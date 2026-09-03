@@ -1,0 +1,37 @@
+trajectory_impact_sim:
+  ros__parameters:
+    control_rate_hz: 20.0
+    offboard_prestream_time: 2.0
+    px4_command_retry_time: 1.0
+    max_speed: 8.0
+    max_acceleration: 5.0
+    max_prediction_time: 8.0
+    terminal_radius: 3.0
+    terminal_closing_speed: 3.0
+    terminal_max_acceleration: 2.0
+    terminal_max_vertical_acceleration: 1.0
+    impact_radius: 0.25
+    max_sim_duration: 60.0
+    enable_gazebo_control: true
+    flight_altitude: -5.0
+    takeoff_tolerance: 0.5
+    takeoff_settle_time: 1.0
+    follow_distance: 8.0
+    follow_position_gain: 0.8
+    follow_max_closing_speed: 3.0
+    follow_max_acceleration: 1.5
+    altitude_velocity_gain: 1.0
+    max_vertical_speed: 1.0
+    max_vertical_acceleration: 2.0
+    speed_guard_margin: 0.3
+
+moving_target:
+  ros__parameters:
+    initial_x: 20.0
+    initial_y: 0.0
+    initial_z: 0.0
+    velocity_x: 0.0
+    velocity_y: 1.0
+    velocity_z: 0.0
+    update_rate_hz: 20.0
+
