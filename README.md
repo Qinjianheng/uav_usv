@@ -31,6 +31,22 @@ UAV在起飞、跟随、截击和结果悬停阶段都按 `atan2(target_y-uav_y,
 ./scripts/build_workspace.sh
 ```
 
+## 同步到 GitHub
+
+修改完成后，用一句话说明本次变化并同步当前分支：
+
+```bash
+./scripts/sync_github.sh "改进有限时域截击与目标偏航控制"
+```
+
+脚本会显示待提交文件，确认后执行暂存、提交并推送到 `github` 远程仓库。提交正文自动记录文件数量、增删行统计和最多20个文件的状态。使用 `-n` 只预览，使用 `-y` 跳过确认；使用 `--auto` 时无需填写说明，脚本会根据时间和文件数量自动生成提交标题并直接同步：
+
+```bash
+./scripts/sync_github.sh -n "本次修改说明"
+./scripts/sync_github.sh -y "本次修改说明"
+./scripts/sync_github.sh --auto
+```
+
 ## 目录
 
 ```text
