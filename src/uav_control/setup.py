@@ -33,8 +33,8 @@ setup(
             'uav_control.trajectory_impact_sim:main',
             'target_kalman_filter = '
             'uav_control.tracking.target_kalman_filter:main',
-            'camera_visibility_monitor = '
-            'uav_control.perception.camera_visibility_monitor:main',
+            'front_tof_monitor = '
+            'uav_control.perception.front_tof_monitor:main',
         ],
     },
 )

@@ -137,12 +137,13 @@ exec bash"
 echo "Waiting 15 seconds for PX4 initialization..."
 sleep 15
 
-echo "Checking front and bottom camera topics..."
+echo "Checking front ToF RGB and depth topics..."
 camera_topics_ready=false
 for _ in {1..20}; do
     gazebo_topics="$(gz topic -l 2>/dev/null || true)"
     if grep -Fxq '/uav/camera/front/image' <<< "${gazebo_topics}" \
-        && grep -Fxq '/uav/camera/down/image' <<< "${gazebo_topics}"; then
+        && grep -Fxq '/uav/camera/front/depth_image' \
+            <<< "${gazebo_topics}"; then
         camera_topics_ready=true
         break
     fi
@@ -150,12 +151,13 @@ for _ in {1..20}; do
 done
 
 if ! ${camera_topics_ready}; then
-    echo "Dual-camera topics were not available within 20 seconds." >&2
-    echo "Expected /uav/camera/front/image and /uav/camera/down/image." >&2
+    echo "Front ToF topics were not available within 20 seconds." >&2
+    echo "Expected /uav/camera/front/image and" >&2
+    echo "  /uav/camera/front/depth_image." >&2
     exit 1
 fi
 
-echo "Front and bottom cameras are publishing Gazebo images."
+echo "Front ToF camera is publishing aligned RGB and depth images."
 
 echo "Starting Micro XRCE-DDS Agent..."
 gnome-terminal --title="Micro XRCE-DDS Agent" -- bash -lc "

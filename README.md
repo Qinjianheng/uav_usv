@@ -25,27 +25,35 @@ cd /home/qin/data/uav_usv
 
 UAV在起飞、跟随、截击和结果悬停阶段都按 `atan2(target_y-uav_y, target_x-uav_x)` 计算期望偏航，并以默认1.5 rad/s的最大偏航速率连续转向USV。该观测偏航将作为后续相机和激光雷达共同视场约束的基础。
 
-## 双相机可见性验证
+## 前视ToF试验
 
-一键启动现在使用工作空间内的 `x500_mono_cam` 双相机模型。安装方式参考 Gao 等（2024）的实机方案：机头固定前视相机用于远距离跟踪和接近，机腹固定下视相机用于近距离末端观测，不使用有明显链路延迟的摄影云台。前视相机水平视场角为1.74 rad（约99.7度），下视相机为2.0 rad（约114.6度）；在640×480分辨率下，相应垂直视场角约为83.3度和98.9度。这些数值是为当前8字航迹和固定相机姿态选择的仿真工程参数，并非论文给出的相机标定值。
+一键启动现在使用一台固定在机头的前视RGB-D相机模拟ToF设备。它同时输出对齐的彩色图像和逐像素浮点深度：RGB暂时通过红色目标球验证视场，深度图在目标掩膜内取有效像素中值作为目标表面距离。相机水平视场角为1.74 rad（约99.7度），640×480图像对应垂直视场角约83.3度，更新率20 Hz，有效深度范围0.2–25米。这些数值是针对当前8字航迹的仿真工程参数，并非Gao等（2024）论文中的相机标定值。
+
+Gazebo RGB-D输出属于理想化几何深度，尚未模拟真实ToF在强日照、海面镜面反射、多径和低反射区域中的深度空洞。当前结果只能验证接口、视场和规划几何，不能替代真实海面传感器试验。
 
 相机图像和诊断话题如下：
 
-- `/camera/front/image_raw`、`/camera/down/image_raw`：前视和下视RGB图像；
-- `/camera/front/camera_info`、`/camera/down/camera_info`：由视场角生成的针孔模型参数；
-- `/perception/usv_visible`：至少一个相机看到当前红色目标球；
-- `/perception/active_camera`：当前优选且可见的相机，取值为 `front`、`down` 或 `none`。
+- `/camera/front/image_raw`：前视RGB图像；
+- `/camera/front/depth/image_raw`：与RGB对齐的 `32FC1` 米制深度图；
+- `/camera/front/camera_info`：由视场角生成的针孔模型参数；
+- `/perception/usv_visible`：RGB画面是否看到当前红色目标球；
+- `/perception/usv_tof_valid`、`/perception/usv_range`：目标区域是否有可靠深度以及深度中值；
+- `/perception/usv_depth_valid_ratio`：目标掩膜内有效深度比例；
+- `/perception/usv_visibility_rate`、`/perception/usv_tof_valid_rate`：最近5秒RGB可见率和ToF有效率。
 
-当前阶段只验证“USV是否进入相机视场”。节点用红色像素检测仿真目标球，但截击控制、卡尔曼滤波和成功/失败判定仍使用 `/target/*` 真值，不读取可见性结果。目标距离小于等于2米且机体俯仰绝对值小于30度时优选下视相机，其余阶段优选前视相机；若优选相机暂时不可见，则自动报告另一个可见相机。可用以下命令检查：
+当前阶段只验证“单个前视ToF能否稳定获取USV”。截击控制、卡尔曼滤波和成功/失败判定仍使用 `/target/*` 真值，不读取ToF结果。可用以下命令检查：
 
 ```bash
 ros2 topic echo /perception/usv_visible
-ros2 topic echo /perception/active_camera
+ros2 topic echo /perception/usv_tof_valid
+ros2 topic echo /perception/usv_range
+ros2 topic echo /perception/usv_visibility_rate
+ros2 topic echo /perception/usv_tof_valid_rate
 ros2 topic hz /camera/front/image_raw
-ros2 topic hz /camera/down/image_raw
+ros2 topic hz /camera/front/depth/image_raw
 ```
 
-后续取消全局信息时，红球颜色检测必须替换为非合作目标检测/分割；真值只保留在评价链路中，不能继续作为跟踪或规划输入。
+先用完整起飞、跟随和截击实验观察最近5秒可见率与ToF有效率。若前视固定相机在近距离俯视阶段持续丢失目标，再增加第二台下视ToF，并参考论文的末端姿态条件切换；暂不因个别帧丢失直接增加硬件。后续取消全局信息时，红球颜色检测必须替换为非合作目标检测/分割；真值只保留在评价链路中，不能继续作为跟踪或规划输入。
 
 只编译工作空间：
 

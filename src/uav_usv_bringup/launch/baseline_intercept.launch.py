@@ -51,8 +51,8 @@ def generate_launch_description():
         ),
         Node(
             package='uav_control',
-            executable='camera_visibility_monitor',
-            name='camera_visibility_monitor',
+            executable='front_tof_monitor',
+            name='front_tof_monitor',
             output='screen',
             parameters=[config_file],
         ),

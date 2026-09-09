@@ -1,0 +1,554 @@
+"""Bridge a Gazebo RGB-D sensor and validate front ToF target ranging."""
+
+from collections import deque
+import math
+import threading
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import Point
+from px4_msgs.msg import VehicleLocalPosition
+from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool, Float32, String
+
+
+COLOR_PIXEL_FORMATS = {
+    3: ('rgb8', 3, 0, 1, 2),
+    4: ('rgba8', 4, 0, 1, 2),
+    5: ('bgra8', 4, 2, 1, 0),
+    8: ('bgr8', 3, 2, 1, 0),
+}
+DEPTH_FLOAT32_PIXEL_FORMAT = 13
+
+
+def camera_intrinsics(width, height, horizontal_fov):
+    """Calculate pinhole intrinsics with square pixels."""
+    width = int(width)
+    height = int(height)
+    horizontal_fov = float(horizontal_fov)
+    if width <= 0 or height <= 0:
+        raise ValueError('Camera image dimensions must be positive.')
+    if not 0.0 < horizontal_fov < math.pi:
+        raise ValueError('Horizontal field of view must be in (0, pi).')
+    focal_length = width / (2.0 * math.tan(horizontal_fov / 2.0))
+    return focal_length, focal_length, width / 2.0, height / 2.0
+
+
+def red_pixel_mask(data, width, height, step, encoding):
+    """Return a mask of strongly red pixels from a packed 8-bit image."""
+    formats = {
+        value[0]: value[1:]
+        for value in COLOR_PIXEL_FORMATS.values()
+    }
+    if encoding not in formats:
+        return None
+    channel_count, red_index, green_index, blue_index = formats[encoding]
+    width = int(width)
+    height = int(height)
+    step = int(step)
+    minimum_step = width * channel_count
+    if width <= 0 or height <= 0 or step < minimum_step:
+        return None
+    raw = np.frombuffer(data, dtype=np.uint8)
+    required_size = height * step
+    if raw.size < required_size:
+        return None
+    rows = raw[:required_size].reshape(height, step)
+    pixels = rows[:, :minimum_step].reshape(
+        height,
+        width,
+        channel_count,
+    )
+    red = pixels[:, :, red_index].astype(np.uint16)
+    green = pixels[:, :, green_index].astype(np.uint16)
+    blue = pixels[:, :, blue_index].astype(np.uint16)
+    return (
+        (red >= 160)
+        & (red >= 3 * green // 2)
+        & (red >= 3 * blue // 2)
+        & (red - np.minimum(green, blue) >= 60)
+    )
+
+
+def count_red_pixels(data, width, height, step, encoding):
+    """Count strongly red pixels in a supported packed 8-bit image."""
+    mask = red_pixel_mask(data, width, height, step, encoding)
+    return 0 if mask is None else int(np.count_nonzero(mask))
+
+
+def decode_float32_depth(data, width, height, step):
+    """Decode a row-padded little-endian R_FLOAT32 depth image."""
+    width = int(width)
+    height = int(height)
+    step = int(step)
+    minimum_step = width * 4
+    if width <= 0 or height <= 0 or step < minimum_step:
+        return None
+    raw = np.frombuffer(data, dtype=np.uint8)
+    required_size = height * step
+    if raw.size < required_size:
+        return None
+    rows = raw[:required_size].reshape(height, step)
+    packed = np.ascontiguousarray(rows[:, :minimum_step])
+    return packed.view('<f4').reshape(height, width)
+
+
+def target_depth_statistics(depth, target_mask, minimum, maximum):
+    """Return median target range and valid-depth ratio inside its mask."""
+    if depth is None or target_mask is None:
+        return math.nan, 0.0
+    if depth.shape != target_mask.shape:
+        return math.nan, 0.0
+    target_count = int(np.count_nonzero(target_mask))
+    if target_count == 0:
+        return math.nan, 0.0
+    target_depth = depth[target_mask]
+    valid = (
+        np.isfinite(target_depth)
+        & (target_depth >= float(minimum))
+        & (target_depth <= float(maximum))
+    )
+    valid_count = int(np.count_nonzero(valid))
+    valid_ratio = valid_count / target_count
+    if valid_count == 0:
+        return math.nan, valid_ratio
+    return float(np.median(target_depth[valid])), valid_ratio
+
+
+class FrontTofMonitor(Node):
+    """Publish aligned RGB/depth and ToF visibility quality diagnostics."""
+
+    def __init__(self):
+        super().__init__('front_tof_monitor')
+        self.declare_parameter(
+            'color_gazebo_topic',
+            '/uav/camera/front/image',
+        )
+        self.declare_parameter(
+            'depth_gazebo_topic',
+            '/uav/camera/front/depth_image',
+        )
+        self.declare_parameter(
+            'color_ros_topic',
+            '/camera/front/image_raw',
+        )
+        self.declare_parameter(
+            'depth_ros_topic',
+            '/camera/front/depth/image_raw',
+        )
+        self.declare_parameter('horizontal_fov', 1.74)
+        self.declare_parameter('minimum_red_pixels', 20)
+        self.declare_parameter('minimum_target_depth_ratio', 0.5)
+        self.declare_parameter('image_timeout', 0.5)
+        self.declare_parameter('maximum_rgb_depth_skew', 0.1)
+        self.declare_parameter('minimum_depth', 0.2)
+        self.declare_parameter('maximum_depth', 25.0)
+        self.declare_parameter('evaluation_window_seconds', 5.0)
+
+        self.color_gazebo_topic = str(
+            self.get_parameter('color_gazebo_topic').value
+        )
+        self.depth_gazebo_topic = str(
+            self.get_parameter('depth_gazebo_topic').value
+        )
+        self.color_ros_topic = str(
+            self.get_parameter('color_ros_topic').value
+        )
+        self.depth_ros_topic = str(
+            self.get_parameter('depth_ros_topic').value
+        )
+        self.horizontal_fov = float(
+            self.get_parameter('horizontal_fov').value
+        )
+        self.minimum_red_pixels = max(
+            int(self.get_parameter('minimum_red_pixels').value),
+            1,
+        )
+        self.minimum_target_depth_ratio = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'minimum_target_depth_ratio'
+                    ).value
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        self.image_timeout = max(
+            float(self.get_parameter('image_timeout').value),
+            0.05,
+        )
+        self.maximum_rgb_depth_skew = max(
+            float(
+                self.get_parameter('maximum_rgb_depth_skew').value
+            ),
+            0.0,
+        )
+        self.minimum_depth = max(
+            float(self.get_parameter('minimum_depth').value),
+            0.0,
+        )
+        self.maximum_depth = max(
+            float(self.get_parameter('maximum_depth').value),
+            self.minimum_depth,
+        )
+        self.evaluation_window_seconds = max(
+            float(
+                self.get_parameter(
+                    'evaluation_window_seconds'
+                ).value
+            ),
+            1.0,
+        )
+
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
+        )
+        status_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.color_pub = self.create_publisher(
+            Image,
+            self.color_ros_topic,
+            sensor_qos,
+        )
+        self.depth_pub = self.create_publisher(
+            Image,
+            self.depth_ros_topic,
+            sensor_qos,
+        )
+        self.camera_info_pub = self.create_publisher(
+            CameraInfo,
+            self.color_ros_topic.rsplit('/', 1)[0] + '/camera_info',
+            sensor_qos,
+        )
+        self.visible_pub = self.create_publisher(
+            Bool,
+            '/perception/usv_visible',
+            status_qos,
+        )
+        self.tof_valid_pub = self.create_publisher(
+            Bool,
+            '/perception/usv_tof_valid',
+            status_qos,
+        )
+        self.active_camera_pub = self.create_publisher(
+            String,
+            '/perception/active_camera',
+            status_qos,
+        )
+        self.range_pub = self.create_publisher(
+            Float32,
+            '/perception/usv_range',
+            status_qos,
+        )
+        self.depth_ratio_pub = self.create_publisher(
+            Float32,
+            '/perception/usv_depth_valid_ratio',
+            status_qos,
+        )
+        self.visibility_rate_pub = self.create_publisher(
+            Float32,
+            '/perception/usv_visibility_rate',
+            status_qos,
+        )
+        self.tof_valid_rate_pub = self.create_publisher(
+            Float32,
+            '/perception/usv_tof_valid_rate',
+            status_qos,
+        )
+
+        self.target_sub = self.create_subscription(
+            Point,
+            '/target/position',
+            self.target_callback,
+            10,
+        )
+        self.position_sub = self.create_subscription(
+            VehicleLocalPosition,
+            '/fmu/out/vehicle_local_position_v1',
+            self.position_callback,
+            sensor_qos,
+        )
+
+        self.lock = threading.Lock()
+        self.last_color_time = -math.inf
+        self.last_depth_time = -math.inf
+        self.red_mask = None
+        self.red_pixels = 0
+        self.depth = None
+        self.target_position = None
+        self.uav_position = None
+        self.samples = deque()
+        self.last_status = None
+
+        from gz.msgs10.image_pb2 import Image as GazeboImage
+        from gz.transport13 import Node as GazeboTransportNode
+
+        self.gazebo_node = GazeboTransportNode()
+        color_subscribed = self.gazebo_node.subscribe(
+            GazeboImage,
+            self.color_gazebo_topic,
+            self.color_callback,
+        )
+        depth_subscribed = self.gazebo_node.subscribe(
+            GazeboImage,
+            self.depth_gazebo_topic,
+            self.depth_callback,
+        )
+        if not color_subscribed or not depth_subscribed:
+            raise RuntimeError('Could not subscribe to front ToF streams.')
+
+        self.status_timer = self.create_timer(0.1, self.publish_status)
+        self.get_logger().info(
+            'FRONT TOF READY | '
+            f'RGB={self.color_gazebo_topic} | '
+            f'depth={self.depth_gazebo_topic} | '
+            f'range={self.minimum_depth:.1f}-{self.maximum_depth:.1f} m'
+        )
+        self.get_logger().info(
+            'Target truth remains enabled for control and evaluation; '
+            'ToF output is diagnostic only.'
+        )
+
+    def target_callback(self, message):
+        self.target_position = (
+            float(message.x),
+            float(message.y),
+            float(message.z),
+        )
+
+    def position_callback(self, message):
+        if all(
+            math.isfinite(value)
+            for value in (message.x, message.y, message.z)
+        ):
+            self.uav_position = (
+                float(message.x),
+                float(message.y),
+                float(message.z),
+            )
+
+    def color_callback(self, message):
+        format_info = COLOR_PIXEL_FORMATS.get(
+            int(message.pixel_format_type)
+        )
+        if format_info is None:
+            return
+        encoding = format_info[0]
+        stamp = self.get_clock().now().to_msg()
+        ros_image = Image()
+        ros_image.header.stamp = stamp
+        ros_image.header.frame_id = 'front_camera_optical_frame'
+        ros_image.height = int(message.height)
+        ros_image.width = int(message.width)
+        ros_image.encoding = encoding
+        ros_image.is_bigendian = 0
+        ros_image.step = int(message.step)
+        ros_image.data = bytes(message.data)
+
+        mask = red_pixel_mask(
+            ros_image.data,
+            ros_image.width,
+            ros_image.height,
+            ros_image.step,
+            ros_image.encoding,
+        )
+        red_pixels = (
+            0 if mask is None else int(np.count_nonzero(mask))
+        )
+        now = time.monotonic()
+        with self.lock:
+            self.last_color_time = now
+            self.red_mask = mask
+            self.red_pixels = red_pixels
+        self.color_pub.publish(ros_image)
+        self.camera_info_pub.publish(
+            self.make_camera_info(
+                ros_image.width,
+                ros_image.height,
+                stamp,
+            )
+        )
+
+    def depth_callback(self, message):
+        if int(message.pixel_format_type) != DEPTH_FLOAT32_PIXEL_FORMAT:
+            return
+        depth = decode_float32_depth(
+            message.data,
+            message.width,
+            message.height,
+            message.step,
+        )
+        if depth is None:
+            return
+        ros_image = Image()
+        ros_image.header.stamp = self.get_clock().now().to_msg()
+        ros_image.header.frame_id = 'front_camera_optical_frame'
+        ros_image.height = int(message.height)
+        ros_image.width = int(message.width)
+        ros_image.encoding = '32FC1'
+        ros_image.is_bigendian = 0
+        ros_image.step = int(message.step)
+        ros_image.data = bytes(message.data)
+        with self.lock:
+            self.last_depth_time = time.monotonic()
+            self.depth = depth
+        self.depth_pub.publish(ros_image)
+
+    def make_camera_info(self, width, height, stamp):
+        fx, fy, cx, cy = camera_intrinsics(
+            width,
+            height,
+            self.horizontal_fov,
+        )
+        message = CameraInfo()
+        message.header.stamp = stamp
+        message.header.frame_id = 'front_camera_optical_frame'
+        message.height = height
+        message.width = width
+        message.distortion_model = 'plumb_bob'
+        message.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+        message.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+        message.r = [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]
+        message.p = [
+            fx, 0.0, cx, 0.0,
+            0.0, fy, cy, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+        ]
+        return message
+
+    def truth_distance(self):
+        if self.target_position is None or self.uav_position is None:
+            return math.inf
+        return math.sqrt(sum(
+            (target - uav) ** 2
+            for target, uav in zip(
+                self.target_position,
+                self.uav_position,
+            )
+        ))
+
+    def publish_status(self):
+        now = time.monotonic()
+        with self.lock:
+            color_time = self.last_color_time
+            depth_time = self.last_depth_time
+            mask = self.red_mask
+            red_pixels = self.red_pixels
+            depth = self.depth
+        color_fresh = now - color_time <= self.image_timeout
+        depth_fresh = now - depth_time <= self.image_timeout
+        synchronized = (
+            abs(color_time - depth_time) <= self.maximum_rgb_depth_skew
+        )
+        visible = color_fresh and red_pixels >= self.minimum_red_pixels
+        target_range, depth_ratio = target_depth_statistics(
+            depth if depth_fresh and synchronized else None,
+            mask if visible else None,
+            self.minimum_depth,
+            self.maximum_depth,
+        )
+        tof_valid = (
+            visible
+            and depth_fresh
+            and synchronized
+            and math.isfinite(target_range)
+            and depth_ratio >= self.minimum_target_depth_ratio
+        )
+
+        if color_fresh:
+            self.samples.append((now, visible, tof_valid))
+        cutoff = now - self.evaluation_window_seconds
+        while self.samples and self.samples[0][0] < cutoff:
+            self.samples.popleft()
+        if self.samples:
+            visibility_rate = sum(
+                sample[1] for sample in self.samples
+            ) / len(self.samples)
+            tof_valid_rate = sum(
+                sample[2] for sample in self.samples
+            ) / len(self.samples)
+        else:
+            visibility_rate = 0.0
+            tof_valid_rate = 0.0
+
+        visible_message = Bool()
+        visible_message.data = visible
+        self.visible_pub.publish(visible_message)
+        valid_message = Bool()
+        valid_message.data = tof_valid
+        self.tof_valid_pub.publish(valid_message)
+        camera_message = String()
+        if tof_valid:
+            camera_message.data = 'front_tof'
+        elif visible:
+            camera_message.data = 'front_rgb_only'
+        else:
+            camera_message.data = 'none'
+        self.active_camera_pub.publish(camera_message)
+        range_message = Float32()
+        range_message.data = target_range
+        self.range_pub.publish(range_message)
+        ratio_message = Float32()
+        ratio_message.data = depth_ratio
+        self.depth_ratio_pub.publish(ratio_message)
+        visibility_rate_message = Float32()
+        visibility_rate_message.data = visibility_rate
+        self.visibility_rate_pub.publish(visibility_rate_message)
+        tof_valid_rate_message = Float32()
+        tof_valid_rate_message.data = tof_valid_rate
+        self.tof_valid_rate_pub.publish(tof_valid_rate_message)
+
+        status = (visible, tof_valid, camera_message.data)
+        if status != self.last_status:
+            range_text = (
+                f'{target_range:.2f}'
+                if math.isfinite(target_range)
+                else 'nan'
+            )
+            status_text = (
+                f'USV RGB={visible} | TOF={tof_valid} | '
+                f'active={camera_message.data} | '
+                f'range={range_text} m | '
+                f'depth ratio={depth_ratio:.2f} | '
+                f'window rates RGB/ToF='
+                f'{visibility_rate:.2f}/{tof_valid_rate:.2f} | '
+                f'truth distance={self.truth_distance():.2f} m'
+            )
+            if tof_valid:
+                self.get_logger().info(status_text)
+            else:
+                self.get_logger().warn(status_text)
+        self.last_status = status
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = FrontTofMonitor()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
