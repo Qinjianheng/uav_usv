@@ -88,3 +88,16 @@ target_kalman_filter:
     initial_velocity_std: 5.0
     prediction_horizon: 0.5
     measurement_timeout: 0.5
+
+camera_visibility_monitor:
+  ros__parameters:
+    front_gazebo_topic: /uav/camera/front/image
+    down_gazebo_topic: /uav/camera/down/image
+    front_ros_topic: /camera/front/image_raw
+    down_ros_topic: /camera/down/image_raw
+    front_horizontal_fov: 1.74
+    down_horizontal_fov: 2.0
+    minimum_red_pixels: 20
+    image_timeout: 0.5
+    close_observation_distance: 2.0
+    camera_switch_pitch_deg: 30.0

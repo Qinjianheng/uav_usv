@@ -3,7 +3,7 @@ project(uav_usv_bringup)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY launch config worlds
+install(DIRECTORY launch config models worlds
   DESTINATION share/${PROJECT_NAME}
 )
 

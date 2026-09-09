@@ -51,6 +51,13 @@ def generate_launch_description():
         ),
         Node(
             package='uav_control',
+            executable='camera_visibility_monitor',
+            name='camera_visibility_monitor',
+            output='screen',
+            parameters=[config_file],
+        ),
+        Node(
+            package='uav_control',
             executable='trajectory_impact_sim',
             name='trajectory_impact_sim',
             output='screen',

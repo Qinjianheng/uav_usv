@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <!--
+    Keep the standard PX4 model name so the existing 4010 airframe can be
+    used. This workspace model shadows PX4's single-camera variant by being
+    prepended to GZ_SIM_RESOURCE_PATH.
+
+    Following Gao et al. (T-RO 2024), the vehicle carries independent front
+    and bottom cameras. The front camera supports tracking and approach; the
+    bottom camera supports close-range, low-terminal-pitch observation.
+  -->
+  <model name="x500_mono_cam">
+    <include merge="true">
+      <uri>x500</uri>
+    </include>
+
+    <link name="front_camera_link">
+      <pose relative_to="base_link">0.12 0 0.10 0 0 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.00004</ixx>
+          <iyy>0.00004</iyy>
+          <izz>0.00004</izz>
+        </inertia>
+      </inertial>
+      <visual name="housing">
+        <geometry>
+          <box><size>0.03 0.05 0.04</size></box>
+        </geometry>
+        <material>
+          <ambient>0.12 0.12 0.14 1</ambient>
+          <diffuse>0.18 0.18 0.20 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="front_camera" type="camera">
+        <gz_frame_id>front_camera_optical_frame</gz_frame_id>
+        <topic>/uav/camera/front/image</topic>
+        <camera>
+          <horizontal_fov>1.74</horizontal_fov>
+          <image>
+            <format>R8G8B8</format>
+            <width>640</width>
+            <height>480</height>
+          </image>
+          <clip>
+            <near>0.10</near>
+            <far>150.0</far>
+          </clip>
+        </camera>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="front_camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>front_camera_link</child>
+    </joint>
+
+    <link name="down_camera_link">
+      <pose relative_to="base_link">0 0 0.06 0 1.57079632679 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.00004</ixx>
+          <iyy>0.00004</iyy>
+          <izz>0.00004</izz>
+        </inertia>
+      </inertial>
+      <visual name="housing">
+        <geometry>
+          <box><size>0.03 0.05 0.04</size></box>
+        </geometry>
+        <material>
+          <ambient>0.12 0.12 0.14 1</ambient>
+          <diffuse>0.18 0.18 0.20 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="down_camera" type="camera">
+        <gz_frame_id>down_camera_optical_frame</gz_frame_id>
+        <topic>/uav/camera/down/image</topic>
+        <camera>
+          <horizontal_fov>2.0</horizontal_fov>
+          <image>
+            <format>R8G8B8</format>
+            <width>640</width>
+            <height>480</height>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>80.0</far>
+          </clip>
+        </camera>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+    <joint name="down_camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>down_camera_link</child>
+    </joint>
+  </model>
+</sdf>

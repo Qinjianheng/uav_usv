@@ -6,6 +6,7 @@ WS_ROOT="${UAV_USV_WS:-/home/qin/data/uav_usv}"
 PX4_ROOT="${PX4_ROOT:-/home/qin/Projects/PX4-Autopilot}"
 OCEAN_WORLD="${WS_ROOT}/src/uav_usv_bringup/worlds/ocean.sdf"
 PX4_GZ_ENV="${PX4_ROOT}/build/px4_sitl_default/rootfs/gz_env.sh"
+CUSTOM_GZ_MODELS="${WS_ROOT}/src/uav_usv_bringup/models"
 QGC_APPIMAGE="${QGC_APPIMAGE:-/home/qin/桌面/QGroundControl-x86_64.AppImage}"
 BUILD_WORKSPACE=true
 
@@ -98,10 +99,12 @@ if [[ ! -f "${PX4_GZ_ENV}" ]]; then
 fi
 
 source "${PX4_GZ_ENV}"
+export GZ_SIM_RESOURCE_PATH="${CUSTOM_GZ_MODELS}:${GZ_SIM_RESOURCE_PATH:-}"
 
 echo "Starting Gazebo ocean world..."
 gnome-terminal --title="Gazebo Ocean" -- bash -lc "
 source '${PX4_GZ_ENV}' &&
+export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 gz sim -r '${OCEAN_WORLD}';
 exec bash"
 
@@ -124,14 +127,35 @@ fi
 echo "Starting PX4 SITL in standalone Gazebo mode..."
 gnome-terminal --title="PX4 SITL" -- bash -lc "
 source '${PX4_GZ_ENV}' &&
+export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_STANDALONE=1 &&
 export PX4_GZ_WORLD=default &&
 cd '${PX4_ROOT}' &&
-make px4_sitl gz_x500;
+make px4_sitl gz_x500_mono_cam;
 exec bash"
 
 echo "Waiting 15 seconds for PX4 initialization..."
 sleep 15
+
+echo "Checking front and bottom camera topics..."
+camera_topics_ready=false
+for _ in {1..20}; do
+    gazebo_topics="$(gz topic -l 2>/dev/null || true)"
+    if grep -Fxq '/uav/camera/front/image' <<< "${gazebo_topics}" \
+        && grep -Fxq '/uav/camera/down/image' <<< "${gazebo_topics}"; then
+        camera_topics_ready=true
+        break
+    fi
+    sleep 1
+done
+
+if ! ${camera_topics_ready}; then
+    echo "Dual-camera topics were not available within 20 seconds." >&2
+    echo "Expected /uav/camera/front/image and /uav/camera/down/image." >&2
+    exit 1
+fi
+
+echo "Front and bottom cameras are publishing Gazebo images."
 
 echo "Starting Micro XRCE-DDS Agent..."
 gnome-terminal --title="Micro XRCE-DDS Agent" -- bash -lc "
