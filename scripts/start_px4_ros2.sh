@@ -100,6 +100,7 @@ fi
 
 source "${PX4_GZ_ENV}"
 export GZ_SIM_RESOURCE_PATH="${CUSTOM_GZ_MODELS}:${GZ_SIM_RESOURCE_PATH:-}"
+export PX4_GZ_MODELS="${CUSTOM_GZ_MODELS}"
 
 echo "Starting Gazebo ocean world..."
 gnome-terminal --title="Gazebo Ocean" -- bash -lc "
@@ -128,6 +129,7 @@ echo "Starting PX4 SITL in standalone Gazebo mode..."
 gnome-terminal --title="PX4 SITL" -- bash -lc "
 source '${PX4_GZ_ENV}' &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
+export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
 export PX4_GZ_STANDALONE=1 &&
 export PX4_GZ_WORLD=default &&
 cd '${PX4_ROOT}' &&
@@ -154,6 +156,9 @@ if ! ${camera_topics_ready}; then
     echo "Front ToF topics were not available within 20 seconds." >&2
     echo "Expected /uav/camera/front/image and" >&2
     echo "  /uav/camera/front/depth_image." >&2
+    echo "Available camera-related topics:" >&2
+    rg -i 'camera|image|depth' <<< "${gazebo_topics}" >&2 || true
+    echo "Check the PX4 SITL terminal for model-spawn errors." >&2
     exit 1
 fi
 
