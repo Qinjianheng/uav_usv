@@ -32,7 +32,7 @@ if [[ ! -f "${OCEAN_WORLD}" ]]; then
     exit 1
 fi
 
-for required_command in gnome-terminal gz MicroXRCEAgent; do
+for required_command in gnome-terminal gz MicroXRCEAgent timeout; do
     if ! command -v "${required_command}" >/dev/null; then
         echo "Required command not found: ${required_command}" >&2
         exit 1
@@ -66,11 +66,44 @@ if ! pgrep -f '[Q]GroundControl' >/dev/null; then
     fi
 fi
 
-existing_gazebo_topics="$(gz topic -l 2>/dev/null || true)"
-if grep -Eq '^/world/.*/clock$' <<< "${existing_gazebo_topics}"; then
+if timeout 3s gz topic -e -t /world/default/clock -n 1 \
+    >/dev/null 2>&1; then
     echo "A Gazebo world is already running." >&2
     echo "Close the existing Gazebo/PX4 session, then retry." >&2
     exit 1
+fi
+
+# Gazebo Transport can retain a stopped world's topic discovery records for a
+# short time.  If no live clock is present, a PX4 process left by an aborted
+# launch is orphaned and must not attach to the next Gazebo instance.
+PX4_EXECUTABLE="$(readlink -f \
+    "${PX4_ROOT}/build/px4_sitl_default/bin/px4" 2>/dev/null || true)"
+if [[ -n "${PX4_EXECUTABLE}" ]]; then
+    mapfile -t stale_px4_pids < <(
+        pgrep -f "^${PX4_EXECUTABLE}([[:space:]]|$)" || true
+    )
+    if [[ ${#stale_px4_pids[@]} -gt 0 ]]; then
+        echo "Stopping orphaned PX4 SITL from an earlier launch..."
+        kill -INT "${stale_px4_pids[@]}" 2>/dev/null || true
+        for _ in {1..10}; do
+            px4_still_running=false
+            for stale_pid in "${stale_px4_pids[@]}"; do
+                if kill -0 "${stale_pid}" 2>/dev/null; then
+                    px4_still_running=true
+                    break
+                fi
+            done
+            if ! ${px4_still_running}; then
+                break
+            fi
+            sleep 0.2
+        done
+        if ${px4_still_running}; then
+            echo "Orphaned PX4 SITL did not stop cleanly." >&2
+            echo "Close its PX4 SITL terminal, then retry." >&2
+            exit 1
+        fi
+    fi
 fi
 
 source /opt/ros/humble/setup.bash
