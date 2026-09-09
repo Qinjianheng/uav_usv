@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090,SC1091
 set -eo pipefail
 
 WS_ROOT="${UAV_USV_WS:-/home/qin/data/uav_usv}"
 PX4_ROOT="${PX4_ROOT:-/home/qin/Projects/PX4-Autopilot}"
+OCEAN_WORLD="${WS_ROOT}/src/uav_usv_bringup/worlds/ocean.sdf"
+PX4_GZ_ENV="${PX4_ROOT}/build/px4_sitl_default/rootfs/gz_env.sh"
+QGC_APPIMAGE="${QGC_APPIMAGE:-/home/qin/桌面/QGroundControl-x86_64.AppImage}"
 BUILD_WORKSPACE=true
 
 if [[ "${1:-}" == "--no-build" ]]; then
@@ -22,9 +26,49 @@ if [[ ! -d "${PX4_ROOT}" ]]; then
     exit 1
 fi
 
+if [[ ! -f "${OCEAN_WORLD}" ]]; then
+    echo "Ocean world not found: ${OCEAN_WORLD}" >&2
+    exit 1
+fi
+
+for required_command in gnome-terminal gz MicroXRCEAgent; do
+    if ! command -v "${required_command}" >/dev/null; then
+        echo "Required command not found: ${required_command}" >&2
+        exit 1
+    fi
+done
+
 if ! pgrep -f '[Q]GroundControl' >/dev/null; then
-    echo "QGroundControl is not running."
-    echo "Open QGroundControl first, then run this script again."
+    if [[ ! -x "${QGC_APPIMAGE}" ]]; then
+        echo "QGroundControl is not running and its AppImage was not found:" >&2
+        echo "  ${QGC_APPIMAGE}" >&2
+        echo "Set QGC_APPIMAGE to the executable path and retry." >&2
+        exit 1
+    fi
+
+    echo "Starting QGroundControl..."
+    qgc_log="${TMPDIR:-/tmp}/uav_usv_qgroundcontrol.log"
+    nohup "${QGC_APPIMAGE}" >"${qgc_log}" 2>&1 &
+
+    qgc_ready=false
+    for _ in {1..15}; do
+        if pgrep -f '[Q]GroundControl' >/dev/null; then
+            qgc_ready=true
+            break
+        fi
+        sleep 1
+    done
+
+    if ! ${qgc_ready}; then
+        echo "QGroundControl did not start. See ${qgc_log}" >&2
+        exit 1
+    fi
+fi
+
+existing_gazebo_topics="$(gz topic -l 2>/dev/null || true)"
+if grep -Eq '^/world/.*/clock$' <<< "${existing_gazebo_topics}"; then
+    echo "A Gazebo world is already running." >&2
+    echo "Close the existing Gazebo/PX4 session, then retry." >&2
     exit 1
 fi
 
@@ -40,8 +84,48 @@ fi
 source "${WS_ROOT}/install/setup.bash"
 export UAV_USV_WS="${WS_ROOT}"
 
-echo "Starting PX4 SITL and Gazebo..."
+if [[ ! -f "${PX4_GZ_ENV}" ]]; then
+    echo "Preparing PX4 SITL build and Gazebo environment..."
+    (
+        cd "${PX4_ROOT}"
+        make px4_sitl_default
+    )
+fi
+
+if [[ ! -f "${PX4_GZ_ENV}" ]]; then
+    echo "PX4 Gazebo environment not found: ${PX4_GZ_ENV}" >&2
+    exit 1
+fi
+
+source "${PX4_GZ_ENV}"
+
+echo "Starting Gazebo ocean world..."
+gnome-terminal --title="Gazebo Ocean" -- bash -lc "
+source '${PX4_GZ_ENV}' &&
+gz sim -r '${OCEAN_WORLD}';
+exec bash"
+
+echo "Waiting for Gazebo ocean world..."
+gazebo_ready=false
+for _ in {1..30}; do
+    gazebo_services="$(gz service -l 2>/dev/null || true)"
+    if grep -Fxq '/world/default/create' <<< "${gazebo_services}"; then
+        gazebo_ready=true
+        break
+    fi
+    sleep 1
+done
+
+if ! ${gazebo_ready}; then
+    echo "Gazebo ocean world did not become ready within 30 seconds." >&2
+    exit 1
+fi
+
+echo "Starting PX4 SITL in standalone Gazebo mode..."
 gnome-terminal --title="PX4 SITL" -- bash -lc "
+source '${PX4_GZ_ENV}' &&
+export PX4_GZ_STANDALONE=1 &&
+export PX4_GZ_WORLD=default &&
 cd '${PX4_ROOT}' &&
 make px4_sitl gz_x500;
 exec bash"

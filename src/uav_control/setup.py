@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=['numpy', 'setuptools'],
     zip_safe=True,
     maintainer='qin',
     maintainer_email='email@example.com',
@@ -31,6 +31,8 @@ setup(
             'predictive_intercept = uav_control.predictive_intercept:main',
             'trajectory_impact_sim = '
             'uav_control.trajectory_impact_sim:main',
+            'target_kalman_filter = '
+            'uav_control.tracking.target_kalman_filter:main',
         ],
     },
 )

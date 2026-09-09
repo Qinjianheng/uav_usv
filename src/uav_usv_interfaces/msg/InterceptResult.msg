@@ -1,0 +1,16 @@
+builtin_interfaces/Time stamp
+bool success
+string outcome
+string reason
+string detail
+float64 elapsed_time
+float64 capture_radius
+float64 minimum_distance
+float64 horizontal_distance
+float64 vertical_error
+float64 relative_speed
+float64 closing_speed
+float64 max_horizontal_speed
+float64 max_vertical_speed
+float64 max_horizontal_acceleration
+float64 max_vertical_acceleration

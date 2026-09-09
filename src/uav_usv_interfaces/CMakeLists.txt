@@ -7,6 +7,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/InterceptResult.msg"
   "msg/TargetObservation.msg"
   "msg/TargetState.msg"
   "msg/TrajectoryPoint.msg"
@@ -15,4 +16,3 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()
-

@@ -4,14 +4,40 @@ trajectory_impact_sim:
     offboard_prestream_time: 2.0
     px4_command_retry_time: 1.0
     max_speed: 8.0
-    max_acceleration: 5.0
-    max_prediction_time: 8.0
+    max_acceleration: 4.8
+    max_actual_horizontal_acceleration: 5.0
+    horizontal_acceleration_guard_margin: 0.5
+    enable_maneuver_prediction: true
+    turn_rate_filter_alpha: 0.25
+    max_target_turn_rate: 1.2
+    maneuver_prediction_horizon: 2.0
+    minimum_target_speed: 0.2
+    intercept_guidance_horizon_min: 1.0
+    intercept_guidance_horizon_max: 2.0
+    intercept_guidance_horizon_distance: 20.0
+    intercept_position_gain: 0.8
+    intercept_reference_position_gain: 1.0
+    intercept_reference_max_speed: 7.0
+    intercept_reference_max_acceleration: 4.0
+    intercept_reference_max_vertical_acceleration: 1.5
     terminal_radius: 3.0
     terminal_closing_speed: 3.0
+    terminal_min_closing_speed: 0.5
+    terminal_closing_speed_step: 0.5
+    terminal_plan_duration_step: 0.1
+    terminal_control_lookahead: 0.75
+    terminal_contact_clearance: 0.05
+    approach_staging_height: 1.0
     terminal_max_acceleration: 2.0
     terminal_max_vertical_acceleration: 1.0
     impact_radius: 0.25
-    max_sim_duration: 60.0
+    enable_sea_contact_failure: true
+    sea_surface_z: 0.0
+    max_sim_duration: 30.0
+    state_timeout: 0.5
+    vehicle_status_timeout: 2.0
+    mode_loss_grace_time: 0.5
+    constraint_violation_duration: 0.25
     enable_gazebo_control: true
     flight_altitude: -5.0
     takeoff_tolerance: 0.5
@@ -19,11 +45,14 @@ trajectory_impact_sim:
     follow_distance: 20.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 3.0
-    follow_max_acceleration: 1.5
+    follow_max_acceleration: 2.5
     altitude_velocity_gain: 1.0
     max_vertical_speed: 2.0
     max_vertical_acceleration: 2.0
-    speed_guard_margin: 0.3
+    max_actual_vertical_acceleration: 3.0
+    speed_guard_margin: 0.6
+    speed_governor_gain: 1.0
+    max_observation_yaw_rate: 1.5
 
 moving_target:
   ros__parameters:
@@ -31,7 +60,31 @@ moving_target:
     initial_y: 0.0
     initial_z: 0.0
     velocity_x: 0.0
-    velocity_y: 1.0
+    velocity_y: 5.0
     velocity_z: 0.0
+    trajectory_type: figure_eight
+    horizontal_speed: 5.0
+    figure_eight_x_amplitude: 40.0
+    figure_eight_y_amplitude: 20.0
+    vertical_oscillation_amplitude: 0.15
+    vertical_oscillation_frequency: 0.25
     update_rate_hz: 20.0
+    start_on_command: true
+    enable_gazebo_visualization: true
+    gazebo_world_name: default
+    gazebo_entity_name: usv_target
+    gazebo_sphere_diameter: 0.5
+    pause_gazebo_on_hit: true
 
+target_kalman_filter:
+  ros__parameters:
+    frame_id: local_ned
+    input_topic: /target/position
+    state_topic: /tracking/target_state
+    prediction_topic: /tracking/predicted_position
+    update_rate_hz: 20.0
+    process_acceleration_std: 0.5
+    measurement_position_std: 0.02
+    initial_velocity_std: 5.0
+    prediction_horizon: 0.5
+    measurement_timeout: 0.5
