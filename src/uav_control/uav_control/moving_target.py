@@ -32,6 +32,7 @@ class MovingTarget(Node):
         self.declare_parameter('gazebo_world_name', 'default')
         self.declare_parameter('gazebo_entity_name', 'usv_target')
         self.declare_parameter('gazebo_sphere_diameter', 0.5)
+        self.declare_parameter('gazebo_visual_height_offset', 0.25)
         self.declare_parameter('pause_gazebo_on_hit', True)
 
         self.position_pub = self.create_publisher(
@@ -138,6 +139,14 @@ class MovingTarget(Node):
         self.last_gazebo_warning_time = -math.inf
         self.pause_gazebo_on_hit = bool(
             self.get_parameter('pause_gazebo_on_hit').value
+        )
+        self.gazebo_visual_height_offset = max(
+            float(
+                self.get_parameter(
+                    'gazebo_visual_height_offset'
+                ).value
+            ),
+            0.0,
         )
         if bool(
             self.get_parameter('enable_gazebo_visualization').value
@@ -306,7 +315,7 @@ class MovingTarget(Node):
             updated = self.gazebo_visualizer.update(
                 self.x,
                 self.y,
-                self.z,
+                self.z - self.gazebo_visual_height_offset,
             )
         except RuntimeError as exc:
             updated = False

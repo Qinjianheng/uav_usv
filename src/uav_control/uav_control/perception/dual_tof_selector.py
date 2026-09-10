@@ -38,12 +38,18 @@ class CameraObservation:
 class HystereticCameraSelector:
     """Prefer front view, but retain a usable camera through brief dropouts."""
 
-    def __init__(self, loss_frames=3, front_recovery_frames=10):
+    def __init__(
+        self,
+        loss_frames=3,
+        front_recovery_frames=10,
+        allow_down_fallback=True,
+    ):
         self.loss_frames = max(int(loss_frames), 1)
         self.front_recovery_frames = max(
             int(front_recovery_frames),
             1,
         )
+        self.allow_down_fallback = bool(allow_down_fallback)
         self.active = 'front'
         self.loss_count = 0
         self.front_recovery_count = 0
@@ -59,7 +65,11 @@ class HystereticCameraSelector:
                 self.loss_count = 0
             else:
                 self.loss_count += 1
-                if self.loss_count >= self.loss_frames and down_available:
+                if (
+                    self.allow_down_fallback
+                    and self.loss_count >= self.loss_frames
+                    and down_available
+                ):
                     self.active = 'down'
                     self.loss_count = 0
         else:
@@ -93,11 +103,13 @@ class DualTofSelector(Node):
         super().__init__('dual_tof_selector')
         self.declare_parameter('switch_loss_frames', 3)
         self.declare_parameter('front_recovery_frames', 10)
+        self.declare_parameter('allow_down_fallback', False)
         self.declare_parameter('selection_rate_hz', 10.0)
 
         self.selector = HystereticCameraSelector(
             self.get_parameter('switch_loss_frames').value,
             self.get_parameter('front_recovery_frames').value,
+            self.get_parameter('allow_down_fallback').value,
         )
         self.observations = {
             'front': CameraObservation(),
@@ -234,7 +246,8 @@ class DualTofSelector(Node):
             'DUAL TOF SELECTOR READY | front preferred | '
             f'loss={self.selector.loss_frames} frames | '
             'front recovery='
-            f'{self.selector.front_recovery_frames} frames'
+            f'{self.selector.front_recovery_frames} frames | '
+            f'down fallback={self.selector.allow_down_fallback}'
         )
 
     def _bool_callback(self, camera, field):

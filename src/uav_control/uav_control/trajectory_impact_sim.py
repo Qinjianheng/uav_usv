@@ -71,6 +71,8 @@ class TrajectoryImpactSim(Node):
         'intercept_ay',
         'intercept_az',
         't_go',
+        'guidance_altitude_reference',
+        'guidance_closing_speed',
         'trajectory_plan_feasible',
         'planned_closing_speed',
         'planned_max_horizontal_speed',
@@ -149,6 +151,12 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('terminal_control_lookahead', 0.75)
         self.declare_parameter('terminal_contact_clearance', 0.05)
         self.declare_parameter('approach_staging_height', 1.0)
+        self.declare_parameter('descent_start_distance', 12.0)
+        self.declare_parameter('descent_end_distance', 3.0)
+        self.declare_parameter(
+            'front_camera_max_depression_angle',
+            0.85,
+        )
         self.declare_parameter('terminal_max_acceleration', 2.0)
         self.declare_parameter(
             'terminal_max_vertical_acceleration',
@@ -390,6 +398,32 @@ class TrajectoryImpactSim(Node):
                 self.get_parameter('approach_staging_height').value
             ),
             self.terminal_contact_clearance,
+        )
+        self.descent_start_distance = max(
+            float(
+                self.get_parameter('descent_start_distance').value
+            ),
+            self.terminal_radius,
+        )
+        self.descent_end_distance = min(
+            max(
+                float(
+                    self.get_parameter('descent_end_distance').value
+                ),
+                self.impact_radius,
+            ),
+            self.descent_start_distance - 0.1,
+        )
+        self.front_camera_max_depression_angle = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'front_camera_max_depression_angle'
+                    ).value
+                ),
+                math.radians(5.0),
+            ),
+            math.radians(85.0),
         )
         self.enable_sea_contact_failure = bool(
             self.get_parameter('enable_sea_contact_failure').value
@@ -791,6 +825,8 @@ class TrajectoryImpactSim(Node):
         self.measured_vertical_acceleration = 0.0
         self.terminal_mode_active = False
         self.trajectory_plan_active = False
+        self.guidance_altitude_reference = math.nan
+        self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
         self.planned_max_horizontal_speed = 0.0
         self.planned_max_vertical_speed = 0.0
@@ -849,6 +885,15 @@ class TrajectoryImpactSim(Node):
             f'{self.terminal_closing_speed:.2f} m/s | '
             f'staging height={self.approach_staging_height:.2f} m | '
             f'control lookahead={self.terminal_control_lookahead:.2f} s'
+        )
+        self.get_logger().info(
+            'FRONT-VIEW DESCENT: '
+            f'hold cruise altitude outside '
+            f'{self.descent_start_distance:.1f} m | '
+            f'descend continuously to {self.approach_staging_height:.1f} m '
+            f'by {self.descent_end_distance:.1f} m | '
+            f'max target depression='
+            f'{math.degrees(self.front_camera_max_depression_angle):.1f} deg'
         )
         self.get_logger().info(
             'TARGET OBSERVATION YAW: enabled | '
@@ -1925,6 +1970,8 @@ class TrajectoryImpactSim(Node):
     def reset_trajectory_plan_diagnostics(self):
         """Clear diagnostics when no feasible terminal plan is active."""
         self.trajectory_plan_active = False
+        self.guidance_altitude_reference = math.nan
+        self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
         self.planned_max_horizontal_speed = 0.0
         self.planned_max_vertical_speed = 0.0
@@ -1954,6 +2001,70 @@ class TrajectoryImpactSim(Node):
                 self.command_ay,
                 self.command_az,
             ),
+        )
+
+    def pursuit_altitude_reference(self, horizontal_distance, target_z):
+        """Delay descent while keeping the target inside the front view."""
+        horizontal_distance = max(float(horizontal_distance), 0.0)
+        target_z = float(target_z)
+        transition_width = max(
+            self.descent_start_distance - self.descent_end_distance,
+            0.1,
+        )
+        blend = min(max(
+            (
+                horizontal_distance - self.descent_end_distance
+            ) / transition_width,
+            0.0,
+        ), 1.0)
+        staging_z = min(
+            target_z - self.approach_staging_height,
+            self.sea_surface_z - self.terminal_contact_clearance,
+        )
+        profile_z = (
+            blend * self.flight_altitude
+            + (1.0 - blend) * staging_z
+        )
+
+        # At very short horizontal range, continuing to hold a fixed height
+        # would drive the target below the forward camera's lower FOV edge.
+        # Lower the vehicle with the remaining horizontal gap so pursuit can
+        # continue without stopping to reacquire the target vertically.
+        visibility_height = max(
+            horizontal_distance
+            * math.tan(self.front_camera_max_depression_angle),
+            self.terminal_contact_clearance,
+        )
+        visibility_z = target_z - visibility_height
+        return min(
+            max(profile_z, visibility_z),
+            self.sea_surface_z - self.terminal_contact_clearance,
+        )
+
+    def pursuit_closing_speed(
+        self,
+        horizontal_distance,
+        vertical_distance=0.0,
+    ):
+        """Continue forward closure until the actual capture neighborhood."""
+        acceleration_limit = self.limit_horizontal_acceleration(
+            self.max_acceleration
+        )
+        remaining_radius_squared = max(
+            self.impact_radius * self.impact_radius
+            - float(vertical_distance) * float(vertical_distance),
+            0.0,
+        )
+        horizontal_capture_radius = math.sqrt(
+            remaining_radius_squared
+        )
+        braking_distance = max(
+            float(horizontal_distance) - horizontal_capture_radius,
+            0.0,
+        )
+        return min(
+            self.follow_max_closing_speed,
+            math.sqrt(2.0 * acceleration_limit * braking_distance),
         )
 
     def plan_velocity(self, target_x, target_y, target_z):
@@ -1987,6 +2098,8 @@ class TrajectoryImpactSim(Node):
                 min(self.terminal_control_lookahead, plan.duration)
             )
             self.trajectory_plan_active = True
+            self.guidance_altitude_reference = sample.position[2]
+            self.guidance_closing_speed = plan.closing_speed
             self.planned_closing_speed = plan.closing_speed
             self.planned_max_horizontal_speed = (
                 plan.maximum_horizontal_speed
@@ -2019,16 +2132,9 @@ class TrajectoryImpactSim(Node):
         # avoids the steady spatial lead caused by chasing a rolling point
         # which is already target_velocity * horizon ahead of the USV.
         self.reset_trajectory_plan_diagnostics()
-        acceleration_limit = self.limit_horizontal_acceleration(
-            self.max_acceleration
-        )
-        closing_speed = min(
-            self.follow_max_closing_speed,
-            math.sqrt(
-                2.0
-                * acceleration_limit
-                * max(horizontal_distance - self.terminal_radius, 0.0)
-            ),
+        closing_speed = self.pursuit_closing_speed(
+            horizontal_distance,
+            abs(target_z - self.sim_z),
         )
         desired_vx = self.target_vx + closing_speed * horizontal_los_x
         desired_vy = self.target_vy + closing_speed * horizontal_los_y
@@ -2037,10 +2143,12 @@ class TrajectoryImpactSim(Node):
             desired_vy,
         )
 
-        staging_z = min(
+        staging_z = self.pursuit_altitude_reference(
+            horizontal_distance,
             target_z,
-            self.sea_surface_z - self.approach_staging_height,
         )
+        self.guidance_altitude_reference = staging_z
+        self.guidance_closing_speed = closing_speed
         desired_vz = max(
             min(
                 self.altitude_velocity_gain * (staging_z - self.sim_z),
@@ -2437,6 +2545,8 @@ class TrajectoryImpactSim(Node):
             f'{self.intercept_reference_ay:.6f}',
             f'{self.intercept_reference_az:.6f}',
             f'{t_go:.6f}',
+            f'{self.guidance_altitude_reference:.6f}',
+            f'{self.guidance_closing_speed:.6f}',
             '1' if self.trajectory_plan_active else '0',
             f'{self.planned_closing_speed:.6f}',
             f'{self.planned_max_horizontal_speed:.6f}',

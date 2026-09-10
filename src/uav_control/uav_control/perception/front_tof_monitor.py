@@ -235,6 +235,7 @@ class FrontTofMonitor(Node):
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('evaluation_window_seconds', 5.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
+        self.declare_parameter('target_visual_height_offset', 0.25)
         self.declare_parameter('analysis_rate_hz', 10.0)
 
         self.camera_name = str(
@@ -307,6 +308,14 @@ class FrontTofMonitor(Node):
         )
         self.camera_pitch_down = float(
             self.get_parameter('camera_pitch_down').value
+        )
+        self.target_visual_height_offset = max(
+            float(
+                self.get_parameter(
+                    'target_visual_height_offset'
+                ).value
+            ),
+            0.0,
         )
         analysis_rate_hz = max(
             float(self.get_parameter('analysis_rate_hz').value),
@@ -477,7 +486,7 @@ class FrontTofMonitor(Node):
         self.target_position = (
             float(message.x),
             float(message.y),
-            float(message.z),
+            float(message.z) - self.target_visual_height_offset,
         )
 
     def position_callback(self, message):

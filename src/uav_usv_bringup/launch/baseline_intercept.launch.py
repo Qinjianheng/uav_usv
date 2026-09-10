@@ -104,6 +104,7 @@ def generate_launch_description():
                     'color_ros_topic': '/camera/down/image_raw',
                     'depth_ros_topic': '/camera/down/depth/image_raw',
                     'camera_pitch_down': 1.57079632679,
+                    'target_visual_height_offset': 0.25,
                 },
             ],
         ),

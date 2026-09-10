@@ -28,6 +28,9 @@ trajectory_impact_sim:
     terminal_control_lookahead: 0.75
     terminal_contact_clearance: 0.05
     approach_staging_height: 1.0
+    descent_start_distance: 12.0
+    descent_end_distance: 3.0
+    front_camera_max_depression_angle: 0.85
     terminal_max_acceleration: 2.0
     terminal_max_vertical_acceleration: 1.0
     impact_radius: 0.25
@@ -42,7 +45,7 @@ trajectory_impact_sim:
     flight_altitude: -5.0
     takeoff_tolerance: 0.5
     takeoff_settle_time: 1.0
-    follow_distance: 20.0
+    follow_distance: 15.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 3.0
     follow_max_acceleration: 2.5
@@ -74,6 +77,7 @@ moving_target:
     gazebo_world_name: default
     gazebo_entity_name: usv_target
     gazebo_sphere_diameter: 0.5
+    gazebo_visual_height_offset: 0.25
     pause_gazebo_on_hit: true
 
 target_kalman_filter:
@@ -107,10 +111,12 @@ front_tof_monitor:
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
     camera_pitch_down: 0.20944
+    target_visual_height_offset: 0.25
     analysis_rate_hz: 10.0
 
 dual_tof_selector:
   ros__parameters:
     switch_loss_frames: 3
     front_recovery_frames: 10
+    allow_down_fallback: false
     selection_rate_hz: 10.0

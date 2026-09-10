@@ -44,6 +44,17 @@ def test_csv_records_intercept_reference_kinematics():
     ]
 
 
+def test_csv_records_front_view_guidance_diagnostics():
+    t_go_index = TrajectoryImpactSim.CSV_FIELDS.index('t_go')
+
+    assert TrajectoryImpactSim.CSV_FIELDS[
+        t_go_index + 1:t_go_index + 3
+    ] == [
+        'guidance_altitude_reference',
+        'guidance_closing_speed',
+    ]
+
+
 def test_takeoff_follow_setpoint_combines_xy_velocity_and_z_position():
     published = []
     controller = SimpleNamespace(
@@ -134,6 +145,128 @@ def test_intercept_prediction_horizon_stays_between_one_and_two_seconds():
     assert horizons == pytest.approx([1.0, 2.0])
     assert near_solution[3] == pytest.approx(1.0)
     assert far_solution[3] == pytest.approx(2.0)
+
+
+def make_front_view_altitude_controller():
+    return SimpleNamespace(
+        sea_surface_z=0.0,
+        flight_altitude=-5.0,
+        approach_staging_height=1.0,
+        descent_start_distance=12.0,
+        descent_end_distance=3.0,
+        front_camera_max_depression_angle=0.85,
+        terminal_contact_clearance=0.05,
+    )
+
+
+def test_pursuit_holds_cruise_altitude_before_descent_window():
+    controller = make_front_view_altitude_controller()
+
+    reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        15.0,
+        0.15,
+    )
+
+    assert reference_z == pytest.approx(-5.0)
+
+
+def test_pursuit_descends_continuously_while_closing_horizontally():
+    controller = make_front_view_altitude_controller()
+
+    reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        7.5,
+        0.0,
+    )
+
+    assert reference_z == pytest.approx(-3.0)
+
+
+def test_pursuit_near_target_respects_front_camera_depression_limit():
+    controller = make_front_view_altitude_controller()
+    horizontal_distance = 0.2
+
+    reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        horizontal_distance,
+        0.0,
+    )
+
+    height = -reference_z
+    depression = math.atan2(height, horizontal_distance)
+    assert depression == pytest.approx(0.85)
+    assert reference_z < controller.sea_surface_z
+
+
+def test_pursuit_keeps_forward_closure_inside_terminal_planning_radius():
+    controller = SimpleNamespace(
+        max_acceleration=4.8,
+        max_actual_horizontal_acceleration=5.0,
+        horizontal_acceleration_guard_margin=0.5,
+        enable_gazebo_control=True,
+        follow_max_closing_speed=3.0,
+        impact_radius=0.25,
+    )
+    controller.limit_horizontal_acceleration = lambda requested: (
+        TrajectoryImpactSim.limit_horizontal_acceleration(
+            controller,
+            requested,
+        )
+    )
+
+    closing_speed = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        3.0,
+        1.0,
+    )
+
+    assert closing_speed == pytest.approx(3.0)
+
+
+def test_pursuit_does_not_stop_horizontally_before_vertical_capture():
+    controller = SimpleNamespace(
+        max_acceleration=4.8,
+        max_actual_horizontal_acceleration=5.0,
+        horizontal_acceleration_guard_margin=0.5,
+        enable_gazebo_control=True,
+        follow_max_closing_speed=3.0,
+        impact_radius=0.25,
+    )
+    controller.limit_horizontal_acceleration = lambda requested: (
+        TrajectoryImpactSim.limit_horizontal_acceleration(
+            controller,
+            requested,
+        )
+    )
+
+    closing_speed = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        0.25,
+        1.0,
+    )
+
+    assert closing_speed > 0.0
+
+
+def test_target_visual_height_offset_raises_sphere_without_changing_truth():
+    update_calls = []
+    target = SimpleNamespace(
+        gazebo_visualizer=SimpleNamespace(
+            update=lambda x, y, z: update_calls.append((x, y, z)) or True,
+        ),
+        gazebo_visual_height_offset=0.25,
+        x=20.0,
+        y=3.0,
+        z=0.15,
+        gazebo_visualization_ready=True,
+        last_gazebo_warning_time=-math.inf,
+    )
+
+    MovingTarget.update_gazebo_visualization(target)
+
+    assert update_calls == [(20.0, 3.0, -0.1)]
+    assert target.z == pytest.approx(0.15)
 
 
 def make_speed_governor(actual_speed):

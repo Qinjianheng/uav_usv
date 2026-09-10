@@ -42,3 +42,18 @@ def test_selector_requires_stable_front_recovery_before_switching_back():
     ]
 
     assert states == ['down', 'down', 'front']
+
+
+def test_selector_can_hold_front_for_single_camera_trial():
+    selector = HystereticCameraSelector(
+        loss_frames=1,
+        front_recovery_frames=3,
+        allow_down_fallback=False,
+    )
+
+    states = [
+        selector.update(False, True)[0]
+        for _ in range(5)
+    ]
+
+    assert states == ['front'] * 5

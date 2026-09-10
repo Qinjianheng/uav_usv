@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from uav_control.perception.front_tof_monitor import (
+    FrontTofMonitor,
     camera_intrinsics,
     count_red_pixels,
     decode_float32_depth,
@@ -167,3 +168,17 @@ def test_target_depth_statistics_reject_invalid_ranges():
 
     assert target_range == pytest.approx(3.0)
     assert valid_ratio == pytest.approx(0.5)
+
+
+def test_truth_geometry_uses_red_sphere_visual_center_height():
+    monitor = type('Monitor', (), {
+        'target_visual_height_offset': 0.25,
+        'target_position': None,
+    })()
+
+    FrontTofMonitor.target_callback(
+        monitor,
+        type('Point', (), {'x': 20.0, 'y': 3.0, 'z': 0.15})(),
+    )
+
+    assert monitor.target_position == pytest.approx((20.0, 3.0, -0.1))
