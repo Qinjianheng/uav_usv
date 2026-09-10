@@ -96,10 +96,12 @@ front_tof_monitor:
     color_ros_topic: /camera/front/image_raw
     depth_ros_topic: /camera/front/depth/image_raw
     horizontal_fov: 1.74
-    minimum_red_pixels: 20
+    minimum_red_pixels: 3
     minimum_target_depth_ratio: 0.5
     image_timeout: 0.5
     maximum_rgb_depth_skew: 0.1
     minimum_depth: 0.2
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
+    camera_pitch_down: 0.20944
+    analysis_rate_hz: 10.0

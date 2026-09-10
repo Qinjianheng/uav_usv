@@ -1,4 +1,4 @@
-"""Bridge a Gazebo RGB-D sensor and validate front ToF target ranging."""
+"""Validate front ToF ranging and camera-to-target viewing geometry."""
 
 from collections import deque
 import math
@@ -8,7 +8,7 @@ import time
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Point
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -16,8 +16,8 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Bool, Float32, String
+from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import Bool, Float32, String, UInt64
 
 
 COLOR_PIXEL_FORMATS = {
@@ -40,6 +40,82 @@ def camera_intrinsics(width, height, horizontal_fov):
         raise ValueError('Horizontal field of view must be in (0, pi).')
     focal_length = width / (2.0 * math.tan(horizontal_fov / 2.0))
     return focal_length, focal_length, width / 2.0, height / 2.0
+
+
+def vertical_field_of_view(width, height, horizontal_fov):
+    """Calculate vertical field of view for square camera pixels."""
+    width = int(width)
+    height = int(height)
+    horizontal_fov = float(horizontal_fov)
+    if width <= 0 or height <= 0:
+        raise ValueError('Camera image dimensions must be positive.')
+    if not 0.0 < horizontal_fov < math.pi:
+        raise ValueError('Horizontal field of view must be in (0, pi).')
+    return 2.0 * math.atan(
+        math.tan(horizontal_fov / 2.0) * height / width
+    )
+
+
+def rotate_ned_to_body_frd(quaternion, vector):
+    """Rotate a NED vector into body FRD using PX4's body-to-NED q."""
+    q = np.asarray(quaternion, dtype=float)
+    vector = np.asarray(vector, dtype=float)
+    if q.shape != (4,) or vector.shape != (3,):
+        raise ValueError('Quaternion and vector must have lengths 4 and 3.')
+    norm = float(np.linalg.norm(q))
+    if not math.isfinite(norm) or norm < 1.0e-9:
+        raise ValueError('Attitude quaternion must be finite and nonzero.')
+    w, x, y, z = q / norm
+    body_to_ned = np.array([
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+         2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+         2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+         1.0 - 2.0 * (x * x + y * y)],
+    ])
+    return body_to_ned.T @ vector
+
+
+def target_camera_angles(
+    uav_position,
+    target_position,
+    attitude_quaternion,
+    camera_pitch_down,
+    horizontal_fov,
+    width,
+    height,
+):
+    """Return camera horizontal/down angles and whether truth is in view."""
+    target_vector_ned = np.asarray(target_position, dtype=float) - np.asarray(
+        uav_position,
+        dtype=float,
+    )
+    if target_vector_ned.shape != (3,) or not np.all(
+        np.isfinite(target_vector_ned)
+    ):
+        raise ValueError('UAV and target positions must be finite 3-vectors.')
+    body_frd = rotate_ned_to_body_frd(
+        attitude_quaternion,
+        target_vector_ned,
+    )
+    # Gazebo camera link uses FLU. A positive SDF pitch tilts +X downward.
+    body_flu = np.array([body_frd[0], -body_frd[1], -body_frd[2]])
+    pitch = float(camera_pitch_down)
+    cos_pitch = math.cos(pitch)
+    sin_pitch = math.sin(pitch)
+    camera_x = cos_pitch * body_flu[0] - sin_pitch * body_flu[2]
+    camera_y = body_flu[1]
+    camera_z = sin_pitch * body_flu[0] + cos_pitch * body_flu[2]
+    horizontal_angle = math.atan2(camera_y, camera_x)
+    vertical_down_angle = math.atan2(-camera_z, camera_x)
+    vertical_fov = vertical_field_of_view(width, height, horizontal_fov)
+    in_fov = (
+        camera_x > 0.0
+        and abs(horizontal_angle) <= float(horizontal_fov) / 2.0
+        and abs(vertical_down_angle) <= vertical_fov / 2.0
+    )
+    return horizontal_angle, vertical_down_angle, bool(in_fov)
 
 
 def red_pixel_mask(data, width, height, step, encoding):
@@ -124,7 +200,7 @@ def target_depth_statistics(depth, target_mask, minimum, maximum):
 
 
 class FrontTofMonitor(Node):
-    """Publish aligned RGB/depth and ToF visibility quality diagnostics."""
+    """Publish ToF visibility and camera geometry diagnostics."""
 
     def __init__(self):
         super().__init__('front_tof_monitor')
@@ -152,6 +228,8 @@ class FrontTofMonitor(Node):
         self.declare_parameter('minimum_depth', 0.2)
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('evaluation_window_seconds', 5.0)
+        self.declare_parameter('camera_pitch_down', 0.20944)
+        self.declare_parameter('analysis_rate_hz', 10.0)
 
         self.color_gazebo_topic = str(
             self.get_parameter('color_gazebo_topic').value
@@ -209,6 +287,14 @@ class FrontTofMonitor(Node):
             ),
             1.0,
         )
+        self.camera_pitch_down = float(
+            self.get_parameter('camera_pitch_down').value
+        )
+        analysis_rate_hz = max(
+            float(self.get_parameter('analysis_rate_hz').value),
+            1.0,
+        )
+        self.analysis_period = 1.0 / analysis_rate_hz
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -221,16 +307,6 @@ class FrontTofMonitor(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
-        )
-        self.color_pub = self.create_publisher(
-            Image,
-            self.color_ros_topic,
-            sensor_qos,
-        )
-        self.depth_pub = self.create_publisher(
-            Image,
-            self.depth_ros_topic,
-            sensor_qos,
         )
         self.camera_info_pub = self.create_publisher(
             CameraInfo,
@@ -272,6 +348,41 @@ class FrontTofMonitor(Node):
             '/perception/usv_tof_valid_rate',
             status_qos,
         )
+        self.frame_change_pub = self.create_publisher(
+            Float32,
+            '/perception/camera_frame_change',
+            status_qos,
+        )
+        self.stream_alive_pub = self.create_publisher(
+            Bool,
+            '/perception/camera_stream_alive',
+            status_qos,
+        )
+        self.frame_count_pub = self.create_publisher(
+            UInt64,
+            '/perception/camera_frame_count',
+            status_qos,
+        )
+        self.red_pixel_count_pub = self.create_publisher(
+            UInt64,
+            '/perception/usv_red_pixel_count',
+            status_qos,
+        )
+        self.horizontal_angle_pub = self.create_publisher(
+            Float32,
+            '/perception/target_horizontal_angle',
+            status_qos,
+        )
+        self.vertical_angle_pub = self.create_publisher(
+            Float32,
+            '/perception/target_vertical_angle',
+            status_qos,
+        )
+        self.truth_in_fov_pub = self.create_publisher(
+            Bool,
+            '/perception/target_truth_in_fov',
+            status_qos,
+        )
 
         self.target_sub = self.create_subscription(
             Point,
@@ -285,17 +396,32 @@ class FrontTofMonitor(Node):
             self.position_callback,
             sensor_qos,
         )
+        self.attitude_sub = self.create_subscription(
+            VehicleAttitude,
+            '/fmu/out/vehicle_attitude',
+            self.attitude_callback,
+            sensor_qos,
+        )
 
         self.lock = threading.Lock()
         self.last_color_time = -math.inf
         self.last_depth_time = -math.inf
+        self.last_color_analysis_time = -math.inf
+        self.last_depth_analysis_time = -math.inf
+        self.image_width = 640
+        self.image_height = 480
+        self.previous_thumbnail = None
+        self.frame_change = 0.0
+        self.color_frame_count = 0
         self.red_mask = None
         self.red_pixels = 0
         self.depth = None
         self.target_position = None
         self.uav_position = None
+        self.uav_attitude = None
         self.samples = deque()
         self.last_status = None
+        self.shutting_down = False
 
         from gz.msgs10.image_pb2 import Image as GazeboImage
         from gz.transport13 import Node as GazeboTransportNode
@@ -319,6 +445,7 @@ class FrontTofMonitor(Node):
             'FRONT TOF READY | '
             f'RGB={self.color_gazebo_topic} | '
             f'depth={self.depth_gazebo_topic} | '
+            f'ROS RGB={self.color_ros_topic} | '
             f'range={self.minimum_depth:.1f}-{self.maximum_depth:.1f} m'
         )
         self.get_logger().info(
@@ -344,49 +471,86 @@ class FrontTofMonitor(Node):
                 float(message.z),
             )
 
+    def attitude_callback(self, message):
+        quaternion = tuple(float(value) for value in message.q)
+        if all(math.isfinite(value) for value in quaternion):
+            self.uav_attitude = quaternion
+
     def color_callback(self, message):
+        if self.shutting_down:
+            return
+        now = time.monotonic()
+        with self.lock:
+            if now - self.last_color_analysis_time < self.analysis_period:
+                return
+            self.last_color_analysis_time = now
         format_info = COLOR_PIXEL_FORMATS.get(
             int(message.pixel_format_type)
         )
         if format_info is None:
             return
-        encoding = format_info[0]
+        encoding, channel_count, _, _, _ = format_info
+        width = int(message.width)
+        height = int(message.height)
+        step = int(message.step)
+        data = message.data
         stamp = self.get_clock().now().to_msg()
-        ros_image = Image()
-        ros_image.header.stamp = stamp
-        ros_image.header.frame_id = 'front_camera_optical_frame'
-        ros_image.height = int(message.height)
-        ros_image.width = int(message.width)
-        ros_image.encoding = encoding
-        ros_image.is_bigendian = 0
-        ros_image.step = int(message.step)
-        ros_image.data = bytes(message.data)
-
         mask = red_pixel_mask(
-            ros_image.data,
-            ros_image.width,
-            ros_image.height,
-            ros_image.step,
-            ros_image.encoding,
+            data,
+            width,
+            height,
+            step,
+            encoding,
         )
         red_pixels = (
             0 if mask is None else int(np.count_nonzero(mask))
         )
-        now = time.monotonic()
+        thumbnail = None
+        minimum_step = width * channel_count
+        raw = np.frombuffer(data, dtype=np.uint8)
+        if (
+            width > 0
+            and height > 0
+            and step >= minimum_step
+            and raw.size >= height * step
+        ):
+            pixels = raw[:height * step].reshape(height, step)[
+                :, :minimum_step
+            ].reshape(height, width, channel_count)
+            thumbnail = pixels[::24, ::24, :3].astype(np.int16)
         with self.lock:
             self.last_color_time = now
+            self.color_frame_count += 1
+            self.image_width = width
+            self.image_height = height
             self.red_mask = mask
             self.red_pixels = red_pixels
-        self.color_pub.publish(ros_image)
+            if (
+                thumbnail is not None
+                and self.previous_thumbnail is not None
+                and thumbnail.shape == self.previous_thumbnail.shape
+            ):
+                self.frame_change = float(np.mean(np.abs(
+                    thumbnail - self.previous_thumbnail
+                ))) / 255.0
+            if thumbnail is not None:
+                self.previous_thumbnail = thumbnail
         self.camera_info_pub.publish(
             self.make_camera_info(
-                ros_image.width,
-                ros_image.height,
+                width,
+                height,
                 stamp,
             )
         )
 
     def depth_callback(self, message):
+        if self.shutting_down:
+            return
+        now = time.monotonic()
+        with self.lock:
+            if now - self.last_depth_analysis_time < self.analysis_period:
+                return
+            self.last_depth_analysis_time = now
         if int(message.pixel_format_type) != DEPTH_FLOAT32_PIXEL_FORMAT:
             return
         depth = decode_float32_depth(
@@ -397,19 +561,9 @@ class FrontTofMonitor(Node):
         )
         if depth is None:
             return
-        ros_image = Image()
-        ros_image.header.stamp = self.get_clock().now().to_msg()
-        ros_image.header.frame_id = 'front_camera_optical_frame'
-        ros_image.height = int(message.height)
-        ros_image.width = int(message.width)
-        ros_image.encoding = '32FC1'
-        ros_image.is_bigendian = 0
-        ros_image.step = int(message.step)
-        ros_image.data = bytes(message.data)
         with self.lock:
-            self.last_depth_time = time.monotonic()
+            self.last_depth_time = now
             self.depth = depth
-        self.depth_pub.publish(ros_image)
 
     def make_camera_info(self, width, height, stamp):
         fx, fy, cx, cy = camera_intrinsics(
@@ -448,6 +602,26 @@ class FrontTofMonitor(Node):
             )
         ))
 
+    def truth_camera_geometry(self):
+        if (
+            self.target_position is None
+            or self.uav_position is None
+            or self.uav_attitude is None
+        ):
+            return math.nan, math.nan, False
+        try:
+            return target_camera_angles(
+                self.uav_position,
+                self.target_position,
+                self.uav_attitude,
+                self.camera_pitch_down,
+                self.horizontal_fov,
+                self.image_width,
+                self.image_height,
+            )
+        except ValueError:
+            return math.nan, math.nan, False
+
     def publish_status(self):
         now = time.monotonic()
         with self.lock:
@@ -456,6 +630,8 @@ class FrontTofMonitor(Node):
             mask = self.red_mask
             red_pixels = self.red_pixels
             depth = self.depth
+            frame_change = self.frame_change
+            color_frame_count = self.color_frame_count
         color_fresh = now - color_time <= self.image_timeout
         depth_fresh = now - depth_time <= self.image_timeout
         synchronized = (
@@ -474,6 +650,9 @@ class FrontTofMonitor(Node):
             and synchronized
             and math.isfinite(target_range)
             and depth_ratio >= self.minimum_target_depth_ratio
+        )
+        horizontal_angle, vertical_angle, truth_in_fov = (
+            self.truth_camera_geometry()
         )
 
         if color_fresh:
@@ -518,8 +697,29 @@ class FrontTofMonitor(Node):
         tof_valid_rate_message = Float32()
         tof_valid_rate_message.data = tof_valid_rate
         self.tof_valid_rate_pub.publish(tof_valid_rate_message)
+        frame_change_message = Float32()
+        frame_change_message.data = frame_change
+        self.frame_change_pub.publish(frame_change_message)
+        stream_alive_message = Bool()
+        stream_alive_message.data = color_fresh
+        self.stream_alive_pub.publish(stream_alive_message)
+        frame_count_message = UInt64()
+        frame_count_message.data = color_frame_count
+        self.frame_count_pub.publish(frame_count_message)
+        red_pixel_count_message = UInt64()
+        red_pixel_count_message.data = red_pixels
+        self.red_pixel_count_pub.publish(red_pixel_count_message)
+        horizontal_angle_message = Float32()
+        horizontal_angle_message.data = horizontal_angle
+        self.horizontal_angle_pub.publish(horizontal_angle_message)
+        vertical_angle_message = Float32()
+        vertical_angle_message.data = vertical_angle
+        self.vertical_angle_pub.publish(vertical_angle_message)
+        truth_in_fov_message = Bool()
+        truth_in_fov_message.data = truth_in_fov
+        self.truth_in_fov_pub.publish(truth_in_fov_message)
 
-        status = (visible, tof_valid, camera_message.data)
+        status = (visible, tof_valid, camera_message.data, truth_in_fov)
         if status != self.last_status:
             range_text = (
                 f'{target_range:.2f}'
@@ -533,6 +733,11 @@ class FrontTofMonitor(Node):
                 f'depth ratio={depth_ratio:.2f} | '
                 f'window rates RGB/ToF='
                 f'{visibility_rate:.2f}/{tof_valid_rate:.2f} | '
+                f'frame change={frame_change:.4f} | '
+                f'truth in FOV={truth_in_fov} | '
+                f'H/V angles='
+                f'{math.degrees(horizontal_angle):.1f}/'
+                f'{math.degrees(vertical_angle):.1f} deg | '
                 f'truth distance={self.truth_distance():.2f} m'
             )
             if tof_valid:
@@ -540,6 +745,14 @@ class FrontTofMonitor(Node):
             else:
                 self.get_logger().warn(status_text)
         self.last_status = status
+
+    def destroy_node(self):
+        self.shutting_down = True
+        if hasattr(self, 'gazebo_node'):
+            self.gazebo_node.unsubscribe(self.color_gazebo_topic)
+            self.gazebo_node.unsubscribe(self.depth_gazebo_topic)
+            time.sleep(0.1)
+        return super().destroy_node()
 
 
 def main(args=None):

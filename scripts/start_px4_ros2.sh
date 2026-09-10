@@ -9,6 +9,7 @@ PX4_GZ_ENV="${PX4_ROOT}/build/px4_sitl_default/rootfs/gz_env.sh"
 CUSTOM_GZ_MODELS="${WS_ROOT}/src/uav_usv_bringup/models"
 QGC_APPIMAGE="${QGC_APPIMAGE:-/home/qin/桌面/QGroundControl-x86_64.AppImage}"
 BUILD_WORKSPACE=true
+CAMERA_STARTUP_TIMEOUT="${CAMERA_STARTUP_TIMEOUT:-180}"
 
 if [[ "${1:-}" == "--no-build" ]]; then
     BUILD_WORKSPACE=false
@@ -30,6 +31,11 @@ fi
 if [[ ! -f "${OCEAN_WORLD}" ]]; then
     echo "Ocean world not found: ${OCEAN_WORLD}" >&2
     exit 1
+fi
+
+if ! [[ "${CAMERA_STARTUP_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CAMERA_STARTUP_TIMEOUT must be a positive integer." >&2
+    exit 2
 fi
 
 for required_command in gnome-terminal gz MicroXRCEAgent timeout; do
@@ -165,28 +171,32 @@ export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
 export PX4_GZ_STANDALONE=1 &&
 export PX4_GZ_WORLD=default &&
+# Face Gazebo +Y (local NED north), where the USV starts 20 m away.
+export PX4_GZ_MODEL_POSE='0,0,0,0,0,1.57079632679' &&
 cd '${PX4_ROOT}' &&
 make px4_sitl gz_x500_mono_cam;
 exec bash"
 
-echo "Waiting 15 seconds for PX4 initialization..."
-sleep 15
-
-echo "Checking front ToF RGB and depth topics..."
+echo "Waiting up to ${CAMERA_STARTUP_TIMEOUT} seconds for PX4 and front ToF..."
 camera_topics_ready=false
-for _ in {1..20}; do
-    gazebo_topics="$(gz topic -l 2>/dev/null || true)"
+gazebo_topics=""
+for ((elapsed = 0; elapsed < CAMERA_STARTUP_TIMEOUT; elapsed++)); do
+    gazebo_topics="$(timeout 3s gz topic -l 2>/dev/null || true)"
     if grep -Fxq '/uav/camera/front/image' <<< "${gazebo_topics}" \
         && grep -Fxq '/uav/camera/front/depth_image' \
             <<< "${gazebo_topics}"; then
         camera_topics_ready=true
         break
     fi
+    if ((elapsed > 0 && elapsed % 15 == 0)); then
+        echo "Still waiting for PX4/front ToF (${elapsed}s)..."
+    fi
     sleep 1
 done
 
 if ! ${camera_topics_ready}; then
-    echo "Front ToF topics were not available within 20 seconds." >&2
+    echo "Front ToF topics were not available within" \
+        "${CAMERA_STARTUP_TIMEOUT} seconds." >&2
     echo "Expected /uav/camera/front/image and" >&2
     echo "  /uav/camera/front/depth_image." >&2
     echo "Available camera-related topics:" >&2

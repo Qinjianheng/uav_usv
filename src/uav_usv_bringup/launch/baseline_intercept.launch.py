@@ -50,6 +50,26 @@ def generate_launch_description():
             parameters=[config_file],
         ),
         Node(
+            package='ros_gz_image',
+            executable='image_bridge',
+            name='front_tof_image_bridge',
+            output='screen',
+            arguments=[
+                '/uav/camera/front/image',
+                '/uav/camera/front/depth_image',
+            ],
+            remappings=[
+                (
+                    '/uav/camera/front/image',
+                    '/camera/front/image_raw',
+                ),
+                (
+                    '/uav/camera/front/depth_image',
+                    '/camera/front/depth/image_raw',
+                ),
+            ],
+        ),
+        Node(
             package='uav_control',
             executable='front_tof_monitor',
             name='front_tof_monitor',
