@@ -12,6 +12,7 @@ from uav_control.perception.front_tof_monitor import (
     rotate_ned_to_body_frd,
     target_camera_angles,
     target_depth_statistics,
+    target_renderable_in_rgb,
     vertical_field_of_view,
 )
 
@@ -170,9 +171,15 @@ def test_target_depth_statistics_reject_invalid_ranges():
     assert valid_ratio == pytest.approx(0.5)
 
 
+def test_rgb_render_volume_includes_angle_and_clip_distance():
+    assert target_renderable_in_rgb(True, 25.6, 0.2, 60.0)
+    assert not target_renderable_in_rgb(True, 60.1, 0.2, 60.0)
+    assert not target_renderable_in_rgb(False, 20.0, 0.2, 60.0)
+
+
 def test_truth_geometry_uses_red_sphere_visual_center_height():
     monitor = type('Monitor', (), {
-        'target_visual_height_offset': 0.25,
+        'target_visual_height_offset': 0.42,
         'target_position': None,
     })()
 
@@ -181,4 +188,4 @@ def test_truth_geometry_uses_red_sphere_visual_center_height():
         type('Point', (), {'x': 20.0, 'y': 3.0, 'z': 0.15})(),
     )
 
-    assert monitor.target_position == pytest.approx((20.0, 3.0, -0.1))
+    assert monitor.target_position == pytest.approx((20.0, 3.0, -0.27))

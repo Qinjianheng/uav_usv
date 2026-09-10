@@ -199,6 +199,21 @@ def target_depth_statistics(depth, target_mask, minimum, maximum):
     return float(np.median(target_depth[valid])), valid_ratio
 
 
+def target_renderable_in_rgb(
+    angular_in_fov,
+    distance,
+    minimum_distance,
+    maximum_distance,
+):
+    """Return whether truth lies inside the RGB angular and clip volume."""
+    distance = float(distance)
+    return bool(
+        angular_in_fov
+        and math.isfinite(distance)
+        and float(minimum_distance) <= distance <= float(maximum_distance)
+    )
+
+
 class FrontTofMonitor(Node):
     """Publish ToF visibility and camera geometry diagnostics."""
 
@@ -231,11 +246,13 @@ class FrontTofMonitor(Node):
         self.declare_parameter('minimum_target_depth_ratio', 0.5)
         self.declare_parameter('image_timeout', 0.5)
         self.declare_parameter('maximum_rgb_depth_skew', 0.1)
+        self.declare_parameter('minimum_rgb_distance', 0.2)
+        self.declare_parameter('maximum_rgb_distance', 60.0)
         self.declare_parameter('minimum_depth', 0.2)
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('evaluation_window_seconds', 5.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
-        self.declare_parameter('target_visual_height_offset', 0.25)
+        self.declare_parameter('target_visual_height_offset', 0.42)
         self.declare_parameter('analysis_rate_hz', 10.0)
 
         self.camera_name = str(
@@ -289,6 +306,14 @@ class FrontTofMonitor(Node):
                 self.get_parameter('maximum_rgb_depth_skew').value
             ),
             0.0,
+        )
+        self.minimum_rgb_distance = max(
+            float(self.get_parameter('minimum_rgb_distance').value),
+            0.0,
+        )
+        self.maximum_rgb_distance = max(
+            float(self.get_parameter('maximum_rgb_distance').value),
+            self.minimum_rgb_distance,
         )
         self.minimum_depth = max(
             float(self.get_parameter('minimum_depth').value),
@@ -410,6 +435,11 @@ class FrontTofMonitor(Node):
             self.diagnostic_prefix + '/target_truth_in_fov',
             status_qos,
         )
+        self.truth_renderable_pub = self.create_publisher(
+            Bool,
+            self.diagnostic_prefix + '/target_truth_renderable',
+            status_qos,
+        )
 
         self.target_sub = self.create_subscription(
             Point,
@@ -475,7 +505,10 @@ class FrontTofMonitor(Node):
             f'RGB={self.color_gazebo_topic} | '
             f'depth={self.depth_gazebo_topic} | '
             f'ROS RGB={self.color_ros_topic} | '
-            f'range={self.minimum_depth:.1f}-{self.maximum_depth:.1f} m'
+            f'RGB clip={self.minimum_rgb_distance:.1f}-'
+            f'{self.maximum_rgb_distance:.1f} m | '
+            f'ToF range={self.minimum_depth:.1f}-'
+            f'{self.maximum_depth:.1f} m'
         )
         self.get_logger().info(
             'Target truth remains enabled for control and evaluation; '
@@ -683,6 +716,13 @@ class FrontTofMonitor(Node):
         horizontal_angle, vertical_angle, truth_in_fov = (
             self.truth_camera_geometry()
         )
+        truth_distance = self.truth_distance()
+        truth_renderable = target_renderable_in_rgb(
+            truth_in_fov,
+            truth_distance,
+            self.minimum_rgb_distance,
+            self.maximum_rgb_distance,
+        )
 
         if color_fresh:
             self.samples.append((now, visible, tof_valid))
@@ -747,8 +787,17 @@ class FrontTofMonitor(Node):
         truth_in_fov_message = Bool()
         truth_in_fov_message.data = truth_in_fov
         self.truth_in_fov_pub.publish(truth_in_fov_message)
+        truth_renderable_message = Bool()
+        truth_renderable_message.data = truth_renderable
+        self.truth_renderable_pub.publish(truth_renderable_message)
 
-        status = (visible, tof_valid, camera_message.data, truth_in_fov)
+        status = (
+            visible,
+            tof_valid,
+            camera_message.data,
+            truth_in_fov,
+            truth_renderable,
+        )
         if status != self.last_status:
             range_text = (
                 f'{target_range:.2f}'
@@ -763,11 +812,12 @@ class FrontTofMonitor(Node):
                 f'window rates RGB/ToF='
                 f'{visibility_rate:.2f}/{tof_valid_rate:.2f} | '
                 f'frame change={frame_change:.4f} | '
-                f'truth in FOV={truth_in_fov} | '
+                f'truth angle FOV={truth_in_fov} | '
+                f'RGB render volume={truth_renderable} | '
                 f'H/V angles='
                 f'{math.degrees(horizontal_angle):.1f}/'
                 f'{math.degrees(vertical_angle):.1f} deg | '
-                f'truth distance={self.truth_distance():.2f} m'
+                f'truth distance={truth_distance:.2f} m'
             )
             if tof_valid:
                 self.get_logger().info(status_text)

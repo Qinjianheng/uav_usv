@@ -51,7 +51,8 @@
           </image>
           <clip>
             <near>0.20</near>
-            <far>25.0</far>
+            <!-- Keep distant RGB targets rendered beyond the ToF range. -->
+            <far>60.0</far>
           </clip>
           <depth_camera>
             <output>depths</output>
@@ -104,7 +105,8 @@
           </image>
           <clip>
             <near>0.20</near>
-            <far>25.0</far>
+            <!-- RGB remains useful after the depth measurement saturates. -->
+            <far>60.0</far>
           </clip>
           <depth_camera>
             <output>depths</output>

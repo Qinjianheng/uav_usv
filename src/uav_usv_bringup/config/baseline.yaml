@@ -77,7 +77,8 @@ moving_target:
     gazebo_world_name: default
     gazebo_entity_name: usv_target
     gazebo_sphere_diameter: 0.5
-    gazebo_visual_height_offset: 0.25
+    # Radius 0.25 m + heave amplitude 0.15 m + 0.02 m clearance.
+    gazebo_visual_height_offset: 0.42
     pause_gazebo_on_hit: true
 
 target_kalman_filter:
@@ -107,11 +108,13 @@ front_tof_monitor:
     minimum_target_depth_ratio: 0.5
     image_timeout: 0.5
     maximum_rgb_depth_skew: 0.1
+    minimum_rgb_distance: 0.2
+    maximum_rgb_distance: 60.0
     minimum_depth: 0.2
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
     camera_pitch_down: 0.20944
-    target_visual_height_offset: 0.25
+    target_visual_height_offset: 0.42
     analysis_rate_hz: 10.0
 
 dual_tof_selector:

@@ -255,7 +255,7 @@ def test_target_visual_height_offset_raises_sphere_without_changing_truth():
         gazebo_visualizer=SimpleNamespace(
             update=lambda x, y, z: update_calls.append((x, y, z)) or True,
         ),
-        gazebo_visual_height_offset=0.25,
+        gazebo_visual_height_offset=0.42,
         x=20.0,
         y=3.0,
         z=0.15,
@@ -265,7 +265,7 @@ def test_target_visual_height_offset_raises_sphere_without_changing_truth():
 
     MovingTarget.update_gazebo_visualization(target)
 
-    assert update_calls == [(20.0, 3.0, -0.1)]
+    assert update_calls == [(20.0, 3.0, -0.27)]
     assert target.z == pytest.approx(0.15)
 
 

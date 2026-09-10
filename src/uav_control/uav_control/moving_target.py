@@ -32,7 +32,7 @@ class MovingTarget(Node):
         self.declare_parameter('gazebo_world_name', 'default')
         self.declare_parameter('gazebo_entity_name', 'usv_target')
         self.declare_parameter('gazebo_sphere_diameter', 0.5)
-        self.declare_parameter('gazebo_visual_height_offset', 0.25)
+        self.declare_parameter('gazebo_visual_height_offset', 0.42)
         self.declare_parameter('pause_gazebo_on_hit', True)
 
         self.position_pub = self.create_publisher(
