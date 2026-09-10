@@ -265,7 +265,7 @@ publish_command()
 }
 
 echo
-echo "Two-stage control is ready; PX4 is armed in OFFBOARD ground hold."
+echo "Two-stage control is ready; PX4 is disarmed in OFFBOARD ground hold."
 echo "  X: start UAV takeoff and USV motion simultaneously"
 echo "  Y: start interception after FOLLOW MODE"
 echo "  Q: leave this command console"

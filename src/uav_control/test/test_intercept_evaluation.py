@@ -3,6 +3,7 @@ from collections import deque
 from types import SimpleNamespace
 
 import pytest
+from px4_msgs.msg import VehicleCommand
 
 from uav_control.moving_target import MovingTarget
 from uav_control.trajectory_impact_sim import TrajectoryImpactSim
@@ -477,6 +478,40 @@ def test_moving_target_rejects_x_until_flight_is_ready():
     assert target.started is True
 
 
+def test_x_requests_arming_only_after_operator_command():
+    commands = []
+    controller = SimpleNamespace(
+        enable_gazebo_control=True,
+        completed=False,
+        takeoff_requested=False,
+        flight_ready=True,
+        log_start_time_ns=None,
+        begin_csv_logging=lambda: None,
+        publish_vehicle_command=lambda command, param1, param2=0.0: (
+            commands.append((command, param1, param2))
+        ),
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)
+        ),
+        get_logger=lambda: SimpleNamespace(
+            info=lambda message: None,
+            warn=lambda message: None,
+        ),
+    )
+
+    TrajectoryImpactSim.command_callback(
+        controller,
+        SimpleNamespace(data='X'),
+    )
+
+    assert controller.takeoff_requested is True
+    assert commands == [(
+        VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+        1.0,
+        0.0,
+    )]
+
+
 def test_ground_preparation_holds_position_and_requests_offboard():
     actions = []
     controller = SimpleNamespace(
@@ -486,14 +521,13 @@ def test_ground_preparation_holds_position_and_requests_offboard():
         preflight_counter=39,
         offboard_prestream_cycles=40,
         px4_command_retry_cycles=20,
-        arm_request_start_cycle=60,
         offboard_active=False,
         vehicle_armed=False,
         vehicle_status_time_ns=None,
         vehicle_status_timeout=2.0,
         publish_offboard_mode=lambda: actions.append('stream'),
-        publish_gazebo_setpoint=lambda x, y, z: actions.append(
-            ('hold', x, y, z)
+        publish_gazebo_setpoint=lambda x, y, z, **kwargs: actions.append(
+            ('hold', x, y, z, kwargs)
         ),
         publish_vehicle_command=lambda command, param1, param2=0.0: (
             actions.append(('command', command, param1, param2))
@@ -510,7 +544,13 @@ def test_ground_preparation_holds_position_and_requests_offboard():
     TrajectoryImpactSim.prepare_flight_on_ground(controller)
 
     assert actions[0] == 'stream'
-    assert actions[1] == ('hold', 1.0, 2.0, -0.1)
+    assert actions[1] == (
+        'hold',
+        1.0,
+        2.0,
+        -0.1,
+        {'track_target_yaw': False},
+    )
     assert actions[2][0] == 'command'
     assert actions[-1] == ('ready', False)
 
@@ -524,13 +564,12 @@ def test_ground_preparation_reports_ready_only_after_px4_confirmation():
         preflight_counter=100,
         offboard_prestream_cycles=40,
         px4_command_retry_cycles=20,
-        arm_request_start_cycle=60,
         offboard_active=True,
-        vehicle_armed=True,
+        vehicle_armed=False,
         vehicle_status_time_ns=900_000_000,
         vehicle_status_timeout=2.0,
         publish_offboard_mode=lambda: None,
-        publish_gazebo_setpoint=lambda x, y, z: None,
+        publish_gazebo_setpoint=lambda x, y, z, **kwargs: None,
         publish_vehicle_command=lambda command, param1, param2=0.0: None,
         publish_flight_ready=readiness.append,
         get_clock=lambda: SimpleNamespace(
@@ -541,6 +580,43 @@ def test_ground_preparation_reports_ready_only_after_px4_confirmation():
     TrajectoryImpactSim.prepare_flight_on_ground(controller)
 
     assert readiness == [True]
+
+
+def test_ground_preparation_disarms_unexpected_pre_x_arming():
+    commands = []
+    controller = SimpleNamespace(
+        takeoff_x=0.0,
+        takeoff_y=0.0,
+        takeoff_z=0.0,
+        preflight_counter=59,
+        offboard_prestream_cycles=40,
+        px4_command_retry_cycles=20,
+        offboard_active=True,
+        vehicle_armed=True,
+        vehicle_status_time_ns=900_000_000,
+        vehicle_status_timeout=2.0,
+        publish_offboard_mode=lambda: None,
+        publish_gazebo_setpoint=lambda x, y, z, **kwargs: None,
+        publish_vehicle_command=lambda command, param1, param2=0.0: (
+            commands.append((command, param1, param2))
+        ),
+        publish_flight_ready=lambda ready: None,
+        get_logger=lambda: SimpleNamespace(
+            info=lambda message: None,
+            warn=lambda message: None,
+        ),
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)
+        ),
+    )
+
+    TrajectoryImpactSim.prepare_flight_on_ground(controller)
+
+    assert commands == [(
+        VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+        0.0,
+        0.0,
+    )]
 
 
 def make_constraint_monitor(horizontal_acceleration):

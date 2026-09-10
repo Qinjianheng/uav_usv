@@ -215,10 +215,6 @@ class TrajectoryImpactSim(Node):
             ),
             1,
         )
-        self.arm_request_start_cycle = (
-            self.offboard_prestream_cycles
-            + self.px4_command_retry_cycles
-        )
         self.max_speed = max(
             float(self.get_parameter('max_speed').value),
             0.1
@@ -976,8 +972,13 @@ class TrajectoryImpactSim(Node):
                 self.get_clock().now().nanoseconds
             )
             self.begin_csv_logging()
+            self.publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0,
+            )
             self.get_logger().info(
-                'X accepted. Starting takeoff and follow sequence.'
+                'X accepted. Requesting PX4 arming and starting the '
+                'takeoff/follow sequence.'
             )
             return
 
@@ -1177,7 +1178,7 @@ class TrajectoryImpactSim(Node):
         self.flight_ready_pub.publish(message)
         if ready and not self.flight_ready:
             self.get_logger().info(
-                'FLIGHT READY | PX4 is armed in OFFBOARD ground hold; '
+                'FLIGHT READY | PX4 is disarmed in OFFBOARD ground hold; '
                 'X may now start UAV takeoff and USV motion together.'
             )
         elif self.flight_ready and not ready and not self.takeoff_requested:
@@ -1187,12 +1188,13 @@ class TrajectoryImpactSim(Node):
         self.flight_ready = ready
 
     def prepare_flight_on_ground(self):
-        """Prestream, enter Offboard and arm without commanding takeoff."""
+        """Prestream and enter Offboard while remaining safely disarmed."""
         self.publish_offboard_mode()
         self.publish_gazebo_setpoint(
             self.takeoff_x,
             self.takeoff_y,
             self.takeoff_z,
+            track_target_yaw=False,
         )
         self.preflight_counter += 1
 
@@ -1212,17 +1214,16 @@ class TrajectoryImpactSim(Node):
                 6.0,
             )
 
-        arm_retry_due = (
-            self.preflight_counter >= self.arm_request_start_cycle
-            and (
-                self.preflight_counter - self.arm_request_start_cycle
-            ) % self.px4_command_retry_cycles == 0
+        disarm_retry_due = (
+            self.preflight_counter % self.px4_command_retry_cycles == 0
         )
-        if arm_retry_due and not self.vehicle_armed:
-            self.get_logger().info('Preflight: requesting PX4 arming')
+        if disarm_retry_due and self.vehicle_armed:
+            self.get_logger().warn(
+                'PX4 armed before X; requesting safety disarm.'
+            )
             self.publish_vehicle_command(
                 VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
-                1.0,
+                0.0,
             )
 
         status_fresh = False
@@ -1234,7 +1235,7 @@ class TrajectoryImpactSim(Node):
             status_fresh = status_age <= self.vehicle_status_timeout
         self.publish_flight_ready(
             self.offboard_active
-            and self.vehicle_armed
+            and not self.vehicle_armed
             and status_fresh
         )
 
@@ -1245,6 +1246,7 @@ class TrajectoryImpactSim(Node):
         position_z,
         velocity_x=None,
         velocity_y=None,
+        track_target_yaw=True,
     ):
         if self.setpoint_pub is None:
             return
@@ -1268,7 +1270,14 @@ class TrajectoryImpactSim(Node):
 
         msg.acceleration = [math.nan, math.nan, math.nan]
         msg.jerk = [math.nan, math.nan, math.nan]
-        msg.yaw = self.update_observation_yaw()
+        if track_target_yaw:
+            msg.yaw = self.update_observation_yaw()
+        else:
+            msg.yaw = (
+                self.current_uav_yaw
+                if math.isfinite(self.current_uav_yaw)
+                else math.nan
+            )
         msg.yawspeed = math.nan
         self.setpoint_pub.publish(msg)
 
@@ -2738,7 +2747,8 @@ class TrajectoryImpactSim(Node):
             if not self.ready_for_takeoff_announced:
                 self.ready_for_takeoff_announced = True
                 self.get_logger().info(
-                    'PREPARING | prestreaming OFFBOARD ground hold and arming'
+                    'PREPARING | prestreaming OFFBOARD ground hold while '
+                    'disarmed'
                 )
             return
 
@@ -2820,11 +2830,8 @@ class TrajectoryImpactSim(Node):
                 )
 
             arm_retry_due = (
-                self.control_counter >= self.arm_request_start_cycle
-                and (
-                    self.control_counter
-                    - self.arm_request_start_cycle
-                ) % self.px4_command_retry_cycles == 0
+                self.control_counter == 1
+                or self.control_counter % self.px4_command_retry_cycles == 0
             )
             if arm_retry_due and not self.vehicle_armed:
                 self.get_logger().info('Requesting PX4 arming')
