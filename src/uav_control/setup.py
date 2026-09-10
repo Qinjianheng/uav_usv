@@ -35,6 +35,8 @@ setup(
             'uav_control.tracking.target_kalman_filter:main',
             'front_tof_monitor = '
             'uav_control.perception.front_tof_monitor:main',
+            'dual_tof_selector = '
+            'uav_control.perception.dual_tof_selector:main',
         ],
     },
 )

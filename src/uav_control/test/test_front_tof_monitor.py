@@ -77,6 +77,22 @@ def test_target_camera_angles_reports_target_outside_horizontal_fov():
     assert not in_fov
 
 
+def test_down_camera_sees_target_directly_below_uav():
+    horizontal, vertical, in_fov = target_camera_angles(
+        uav_position=(0.0, 0.0, -5.0),
+        target_position=(0.0, 0.0, 0.0),
+        attitude_quaternion=(1.0, 0.0, 0.0, 0.0),
+        camera_pitch_down=math.pi / 2.0,
+        horizontal_fov=1.74,
+        width=640,
+        height=480,
+    )
+
+    assert horizontal == pytest.approx(0.0)
+    assert vertical == pytest.approx(0.0)
+    assert in_fov
+
+
 def test_rotate_ned_to_body_frd_rejects_zero_quaternion():
     with pytest.raises(ValueError):
         rotate_ned_to_body_frd((0.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0))

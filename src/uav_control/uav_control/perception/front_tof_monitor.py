@@ -204,6 +204,12 @@ class FrontTofMonitor(Node):
 
     def __init__(self):
         super().__init__('front_tof_monitor')
+        self.declare_parameter('camera_name', 'front')
+        self.declare_parameter('diagnostic_prefix', '/perception/front')
+        self.declare_parameter(
+            'camera_frame_id',
+            'front_camera_optical_frame',
+        )
         self.declare_parameter(
             'color_gazebo_topic',
             '/uav/camera/front/image',
@@ -230,6 +236,18 @@ class FrontTofMonitor(Node):
         self.declare_parameter('evaluation_window_seconds', 5.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
         self.declare_parameter('analysis_rate_hz', 10.0)
+
+        self.camera_name = str(
+            self.get_parameter('camera_name').value
+        ).strip() or 'camera'
+        self.diagnostic_prefix = str(
+            self.get_parameter('diagnostic_prefix').value
+        ).rstrip('/')
+        if not self.diagnostic_prefix.startswith('/'):
+            self.diagnostic_prefix = '/' + self.diagnostic_prefix
+        self.camera_frame_id = str(
+            self.get_parameter('camera_frame_id').value
+        )
 
         self.color_gazebo_topic = str(
             self.get_parameter('color_gazebo_topic').value
@@ -315,72 +333,72 @@ class FrontTofMonitor(Node):
         )
         self.visible_pub = self.create_publisher(
             Bool,
-            '/perception/usv_visible',
+            self.diagnostic_prefix + '/usv_visible',
             status_qos,
         )
         self.tof_valid_pub = self.create_publisher(
             Bool,
-            '/perception/usv_tof_valid',
+            self.diagnostic_prefix + '/usv_tof_valid',
             status_qos,
         )
         self.active_camera_pub = self.create_publisher(
             String,
-            '/perception/active_camera',
+            self.diagnostic_prefix + '/active_camera',
             status_qos,
         )
         self.range_pub = self.create_publisher(
             Float32,
-            '/perception/usv_range',
+            self.diagnostic_prefix + '/usv_range',
             status_qos,
         )
         self.depth_ratio_pub = self.create_publisher(
             Float32,
-            '/perception/usv_depth_valid_ratio',
+            self.diagnostic_prefix + '/usv_depth_valid_ratio',
             status_qos,
         )
         self.visibility_rate_pub = self.create_publisher(
             Float32,
-            '/perception/usv_visibility_rate',
+            self.diagnostic_prefix + '/usv_visibility_rate',
             status_qos,
         )
         self.tof_valid_rate_pub = self.create_publisher(
             Float32,
-            '/perception/usv_tof_valid_rate',
+            self.diagnostic_prefix + '/usv_tof_valid_rate',
             status_qos,
         )
         self.frame_change_pub = self.create_publisher(
             Float32,
-            '/perception/camera_frame_change',
+            self.diagnostic_prefix + '/camera_frame_change',
             status_qos,
         )
         self.stream_alive_pub = self.create_publisher(
             Bool,
-            '/perception/camera_stream_alive',
+            self.diagnostic_prefix + '/camera_stream_alive',
             status_qos,
         )
         self.frame_count_pub = self.create_publisher(
             UInt64,
-            '/perception/camera_frame_count',
+            self.diagnostic_prefix + '/camera_frame_count',
             status_qos,
         )
         self.red_pixel_count_pub = self.create_publisher(
             UInt64,
-            '/perception/usv_red_pixel_count',
+            self.diagnostic_prefix + '/usv_red_pixel_count',
             status_qos,
         )
         self.horizontal_angle_pub = self.create_publisher(
             Float32,
-            '/perception/target_horizontal_angle',
+            self.diagnostic_prefix + '/target_horizontal_angle',
             status_qos,
         )
         self.vertical_angle_pub = self.create_publisher(
             Float32,
-            '/perception/target_vertical_angle',
+            self.diagnostic_prefix + '/target_vertical_angle',
             status_qos,
         )
         self.truth_in_fov_pub = self.create_publisher(
             Bool,
-            '/perception/target_truth_in_fov',
+            self.diagnostic_prefix + '/target_truth_in_fov',
             status_qos,
         )
 
@@ -438,11 +456,13 @@ class FrontTofMonitor(Node):
             self.depth_callback,
         )
         if not color_subscribed or not depth_subscribed:
-            raise RuntimeError('Could not subscribe to front ToF streams.')
+            raise RuntimeError(
+                f'Could not subscribe to {self.camera_name} ToF streams.'
+            )
 
         self.status_timer = self.create_timer(0.1, self.publish_status)
         self.get_logger().info(
-            'FRONT TOF READY | '
+            f'{self.camera_name.upper()} TOF READY | '
             f'RGB={self.color_gazebo_topic} | '
             f'depth={self.depth_gazebo_topic} | '
             f'ROS RGB={self.color_ros_topic} | '
@@ -573,7 +593,7 @@ class FrontTofMonitor(Node):
         )
         message = CameraInfo()
         message.header.stamp = stamp
-        message.header.frame_id = 'front_camera_optical_frame'
+        message.header.frame_id = self.camera_frame_id
         message.height = height
         message.width = width
         message.distortion_model = 'plumb_bob'
@@ -679,9 +699,9 @@ class FrontTofMonitor(Node):
         self.tof_valid_pub.publish(valid_message)
         camera_message = String()
         if tof_valid:
-            camera_message.data = 'front_tof'
+            camera_message.data = f'{self.camera_name}_tof'
         elif visible:
-            camera_message.data = 'front_rgb_only'
+            camera_message.data = f'{self.camera_name}_rgb_only'
         else:
             camera_message.data = 'none'
         self.active_camera_pub.publish(camera_message)
@@ -764,4 +784,5 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

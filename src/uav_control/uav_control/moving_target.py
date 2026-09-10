@@ -64,6 +64,12 @@ class MovingTarget(Node):
             self.command_callback,
             10,
         )
+        self.flight_ready_sub = self.create_subscription(
+            Bool,
+            '/simulation/impact/flight_ready',
+            self.flight_ready_callback,
+            10,
+        )
 
         self.x = float(self.get_parameter('initial_x').value)
         self.y = float(self.get_parameter('initial_y').value)
@@ -110,6 +116,7 @@ class MovingTarget(Node):
         self.elapsed_time = 0.0
 
         self.hit = False
+        self.flight_ready = False
         self.started = not bool(
             self.get_parameter('start_on_command').value
         )
@@ -174,10 +181,18 @@ class MovingTarget(Node):
 
     def command_callback(self, msg):
         if msg.data.strip().upper() == 'X' and not self.started:
+            if not self.flight_ready:
+                self.get_logger().warn(
+                    'X ignored: UAV flight preparation is not ready.'
+                )
+                return
             self.started = True
             self.get_logger().info(
                 'X received. Moving target motion started.'
             )
+
+    def flight_ready_callback(self, msg):
+        self.flight_ready = bool(msg.data)
 
     def hit_callback(self, msg):
 

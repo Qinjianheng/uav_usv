@@ -674,6 +674,11 @@ class TrajectoryImpactSim(Node):
             '/simulation/impact/result',
             result_qos,
         )
+        self.flight_ready_pub = self.create_publisher(
+            Bool,
+            '/simulation/impact/flight_ready',
+            result_qos,
+        )
         self.command_sub = self.create_subscription(
             String,
             '/simulation/impact/command',
@@ -748,10 +753,13 @@ class TrajectoryImpactSim(Node):
         self.takeoff_complete = False
         self.intercept_requested = False
         self.ready_for_takeoff_announced = False
+        self.preflight_counter = 0
+        self.flight_ready = False
         self.control_counter = 0
         self.takeoff_settle_counter = 0
         self.takeoff_x = None
         self.takeoff_y = None
+        self.takeoff_z = None
         self.hold_x = None
         self.hold_y = None
         self.hold_z = None
@@ -912,14 +920,10 @@ class TrajectoryImpactSim(Node):
                 )
                 return
 
-            state_ready = (
-                self.target_position_received
-                and self.target_velocity_received
-                and self.uav_state_received
-            )
-            if not state_ready:
+            if not self.flight_ready:
                 self.get_logger().warn(
-                    'X rejected: target/UAV state is not ready.'
+                    'X rejected: flight preparation is not ready; wait for '
+                    '/simulation/impact/flight_ready=true.'
                 )
                 return
             self.takeoff_requested = True
@@ -1119,6 +1123,75 @@ class TrajectoryImpactSim(Node):
         msg.source_component = 1
         msg.from_external = True
         self.command_pub.publish(msg)
+
+    def publish_flight_ready(self, ready):
+        """Publish the ground-preparation gate used by both command clients."""
+        ready = bool(ready)
+        message = Bool()
+        message.data = ready
+        self.flight_ready_pub.publish(message)
+        if ready and not self.flight_ready:
+            self.get_logger().info(
+                'FLIGHT READY | PX4 is armed in OFFBOARD ground hold; '
+                'X may now start UAV takeoff and USV motion together.'
+            )
+        elif self.flight_ready and not ready and not self.takeoff_requested:
+            self.get_logger().warn(
+                'FLIGHT READY lost while waiting for X.'
+            )
+        self.flight_ready = ready
+
+    def prepare_flight_on_ground(self):
+        """Prestream, enter Offboard and arm without commanding takeoff."""
+        self.publish_offboard_mode()
+        self.publish_gazebo_setpoint(
+            self.takeoff_x,
+            self.takeoff_y,
+            self.takeoff_z,
+        )
+        self.preflight_counter += 1
+
+        mode_retry_due = (
+            self.preflight_counter >= self.offboard_prestream_cycles
+            and (
+                self.preflight_counter - self.offboard_prestream_cycles
+            ) % self.px4_command_retry_cycles == 0
+        )
+        if mode_retry_due and not self.offboard_active:
+            self.get_logger().info(
+                'Preflight: requesting PX4 OFFBOARD mode'
+            )
+            self.publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                1.0,
+                6.0,
+            )
+
+        arm_retry_due = (
+            self.preflight_counter >= self.arm_request_start_cycle
+            and (
+                self.preflight_counter - self.arm_request_start_cycle
+            ) % self.px4_command_retry_cycles == 0
+        )
+        if arm_retry_due and not self.vehicle_armed:
+            self.get_logger().info('Preflight: requesting PX4 arming')
+            self.publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0,
+            )
+
+        status_fresh = False
+        if self.vehicle_status_time_ns is not None:
+            status_age = (
+                self.get_clock().now().nanoseconds
+                - self.vehicle_status_time_ns
+            ) * 1e-9
+            status_fresh = status_age <= self.vehicle_status_timeout
+        self.publish_flight_ready(
+            self.offboard_active
+            and self.vehicle_armed
+            and status_fresh
+        )
 
     def publish_gazebo_setpoint(
         self,
@@ -2542,17 +2615,20 @@ class TrajectoryImpactSim(Node):
             and self.uav_state_received
         )
         if not state_ready:
+            self.publish_flight_ready(False)
             return
 
         if self.takeoff_x is None:
             self.takeoff_x = self.initial_uav_x
             self.takeoff_y = self.initial_uav_y
+            self.takeoff_z = self.initial_uav_z
 
         if not self.takeoff_requested:
+            self.prepare_flight_on_ground()
             if not self.ready_for_takeoff_announced:
                 self.ready_for_takeoff_announced = True
                 self.get_logger().info(
-                    'READY | waiting for X to take off and follow'
+                    'PREPARING | prestreaming OFFBOARD ground hold and arming'
                 )
             return
 
@@ -2676,7 +2752,8 @@ class TrajectoryImpactSim(Node):
                 abs(self.initial_uav_z - self.flight_altitude)
                 <= self.takeoff_tolerance
                 and abs(self.initial_uav_vz) <= 0.5
-                and self.control_counter >= self.arm_request_start_cycle
+                and self.offboard_active
+                and self.vehicle_armed
             )
 
             if altitude_ready:

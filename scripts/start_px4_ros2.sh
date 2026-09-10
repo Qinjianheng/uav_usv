@@ -10,6 +10,7 @@ CUSTOM_GZ_MODELS="${WS_ROOT}/src/uav_usv_bringup/models"
 QGC_APPIMAGE="${QGC_APPIMAGE:-/home/qin/桌面/QGroundControl-x86_64.AppImage}"
 BUILD_WORKSPACE=true
 CAMERA_STARTUP_TIMEOUT="${CAMERA_STARTUP_TIMEOUT:-180}"
+FLIGHT_READY_TIMEOUT="${FLIGHT_READY_TIMEOUT:-60}"
 
 if [[ "${1:-}" == "--no-build" ]]; then
     BUILD_WORKSPACE=false
@@ -37,8 +38,12 @@ if ! [[ "${CAMERA_STARTUP_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
     echo "CAMERA_STARTUP_TIMEOUT must be a positive integer." >&2
     exit 2
 fi
+if ! [[ "${FLIGHT_READY_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FLIGHT_READY_TIMEOUT must be a positive integer." >&2
+    exit 2
+fi
 
-for required_command in gnome-terminal gz MicroXRCEAgent timeout; do
+for required_command in gnome-terminal gz MicroXRCEAgent timeout rg; do
     if ! command -v "${required_command}" >/dev/null; then
         echo "Required command not found: ${required_command}" >&2
         exit 1
@@ -177,35 +182,37 @@ cd '${PX4_ROOT}' &&
 make px4_sitl gz_x500_mono_cam;
 exec bash"
 
-echo "Waiting up to ${CAMERA_STARTUP_TIMEOUT} seconds for PX4 and front ToF..."
+echo "Waiting up to ${CAMERA_STARTUP_TIMEOUT} seconds for PX4 and dual ToF..."
 camera_topics_ready=false
 gazebo_topics=""
 for ((elapsed = 0; elapsed < CAMERA_STARTUP_TIMEOUT; elapsed++)); do
     gazebo_topics="$(timeout 3s gz topic -l 2>/dev/null || true)"
     if grep -Fxq '/uav/camera/front/image' <<< "${gazebo_topics}" \
         && grep -Fxq '/uav/camera/front/depth_image' \
+            <<< "${gazebo_topics}" \
+        && grep -Fxq '/uav/camera/down/image' <<< "${gazebo_topics}" \
+        && grep -Fxq '/uav/camera/down/depth_image' \
             <<< "${gazebo_topics}"; then
         camera_topics_ready=true
         break
     fi
     if ((elapsed > 0 && elapsed % 15 == 0)); then
-        echo "Still waiting for PX4/front ToF (${elapsed}s)..."
+        echo "Still waiting for PX4/dual ToF (${elapsed}s)..."
     fi
     sleep 1
 done
 
 if ! ${camera_topics_ready}; then
-    echo "Front ToF topics were not available within" \
+    echo "Dual ToF topics were not available within" \
         "${CAMERA_STARTUP_TIMEOUT} seconds." >&2
-    echo "Expected /uav/camera/front/image and" >&2
-    echo "  /uav/camera/front/depth_image." >&2
+    echo "Expected front/down image and depth_image topics." >&2
     echo "Available camera-related topics:" >&2
     rg -i 'camera|image|depth' <<< "${gazebo_topics}" >&2 || true
     echo "Check the PX4 SITL terminal for model-spawn errors." >&2
     exit 1
 fi
 
-echo "Front ToF camera is publishing aligned RGB and depth images."
+echo "Front and down ToF cameras are publishing aligned RGB/depth images."
 
 echo "Starting Micro XRCE-DDS Agent..."
 gnome-terminal --title="Micro XRCE-DDS Agent" -- bash -lc "
@@ -224,8 +231,30 @@ cd '${WS_ROOT}' &&
 ros2 launch uav_usv_bringup baseline_intercept.launch.py;
 exec bash"
 
-echo "Waiting 5 seconds for ROS 2 nodes..."
-sleep 5
+echo "Waiting up to ${FLIGHT_READY_TIMEOUT} seconds for OFFBOARD ground hold..."
+flight_ready=false
+for ((elapsed = 0; elapsed < FLIGHT_READY_TIMEOUT; elapsed++)); do
+    ready_sample="$(
+        timeout 2s ros2 topic echo --once \
+            /simulation/impact/flight_ready \
+            std_msgs/msg/Bool 2>/dev/null || true
+    )"
+    if rg -q 'data: true' <<< "${ready_sample}"; then
+        flight_ready=true
+        break
+    fi
+    if ((elapsed > 0 && elapsed % 10 == 0)); then
+        echo "Still preparing PX4 OFFBOARD/arming (${elapsed}s)..."
+    fi
+    sleep 1
+done
+
+if ! ${flight_ready}; then
+    echo "UAV did not report flight readiness within" \
+        "${FLIGHT_READY_TIMEOUT} seconds." >&2
+    echo "Inspect the UAV-USV experiment and PX4 terminals." >&2
+    exit 1
+fi
 
 publish_command()
 {
@@ -236,8 +265,8 @@ publish_command()
 }
 
 echo
-echo "Two-stage control is ready."
-echo "  X: take off and enter FOLLOW MODE"
+echo "Two-stage control is ready; PX4 is armed in OFFBOARD ground hold."
+echo "  X: start UAV takeoff and USV motion simultaneously"
 echo "  Y: start interception after FOLLOW MODE"
 echo "  Q: leave this command console"
 

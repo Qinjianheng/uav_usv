@@ -91,6 +91,9 @@ target_kalman_filter:
 
 front_tof_monitor:
   ros__parameters:
+    camera_name: front
+    diagnostic_prefix: /perception/front
+    camera_frame_id: front_camera_optical_frame
     color_gazebo_topic: /uav/camera/front/image
     depth_gazebo_topic: /uav/camera/front/depth_image
     color_ros_topic: /camera/front/image_raw
@@ -105,3 +108,9 @@ front_tof_monitor:
     evaluation_window_seconds: 5.0
     camera_pitch_down: 0.20944
     analysis_rate_hz: 10.0
+
+dual_tof_selector:
+  ros__parameters:
+    switch_loss_frames: 3
+    front_recovery_frames: 10
+    selection_rate_hz: 10.0

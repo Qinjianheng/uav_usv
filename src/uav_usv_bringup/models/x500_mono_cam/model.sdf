@@ -5,10 +5,10 @@
     used. This workspace model shadows PX4's single-camera variant by being
     prepended to GZ_SIM_RESOURCE_PATH.
 
-    The first sensor trial uses one fixed forward RGB-D camera as a simulated
-    ToF device. Its RGB stream supports temporary red-sphere validation and
-    its aligned float depth stream provides target range. A second downward
-    sensor can be added later if flight logs show inadequate terminal FOV.
+    The forward RGB-D camera covers approach and tracking. A second downward
+    RGB-D camera covers the terminal region beneath the airframe. Their RGB
+    streams support temporary red-sphere validation and their aligned float
+    depth streams provide target range.
   -->
   <model name="x500_mono_cam">
     <include merge="true">
@@ -70,6 +70,59 @@
     <joint name="front_camera_joint" type="fixed">
       <parent>base_link</parent>
       <child>front_camera_link</child>
+    </joint>
+
+    <link name="down_camera_link">
+      <!-- Optical +X points vertically down for close terminal observation. -->
+      <pose relative_to="base_link">0.05 0 -0.12 0 1.57079632679 0</pose>
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.00004</ixx>
+          <iyy>0.00004</iyy>
+          <izz>0.00004</izz>
+        </inertia>
+      </inertial>
+      <visual name="housing">
+        <geometry>
+          <box><size>0.03 0.05 0.04</size></box>
+        </geometry>
+        <material>
+          <ambient>0.12 0.12 0.14 1</ambient>
+          <diffuse>0.18 0.18 0.20 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="down_tof_camera" type="rgbd_camera">
+        <topic>/uav/camera/down</topic>
+        <camera>
+          <optical_frame_id>down_camera_optical_frame</optical_frame_id>
+          <horizontal_fov>1.74</horizontal_fov>
+          <image>
+            <format>R8G8B8</format>
+            <width>640</width>
+            <height>480</height>
+          </image>
+          <clip>
+            <near>0.20</near>
+            <far>25.0</far>
+          </clip>
+          <depth_camera>
+            <output>depths</output>
+            <clip>
+              <near>0.20</near>
+              <far>25.0</far>
+            </clip>
+          </depth_camera>
+        </camera>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <visualize>true</visualize>
+        <enable_metrics>true</enable_metrics>
+      </sensor>
+    </link>
+    <joint name="down_camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>down_camera_link</child>
     </joint>
 
   </model>

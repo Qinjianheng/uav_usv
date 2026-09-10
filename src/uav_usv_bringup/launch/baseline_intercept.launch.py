@@ -52,11 +52,13 @@ def generate_launch_description():
         Node(
             package='ros_gz_image',
             executable='image_bridge',
-            name='front_tof_image_bridge',
+            name='dual_tof_image_bridge',
             output='screen',
             arguments=[
                 '/uav/camera/front/image',
                 '/uav/camera/front/depth_image',
+                '/uav/camera/down/image',
+                '/uav/camera/down/depth_image',
             ],
             remappings=[
                 (
@@ -67,12 +69,48 @@ def generate_launch_description():
                     '/uav/camera/front/depth_image',
                     '/camera/front/depth/image_raw',
                 ),
+                (
+                    '/uav/camera/down/image',
+                    '/camera/down/image_raw',
+                ),
+                (
+                    '/uav/camera/down/depth_image',
+                    '/camera/down/depth/image_raw',
+                ),
             ],
         ),
         Node(
             package='uav_control',
             executable='front_tof_monitor',
             name='front_tof_monitor',
+            output='screen',
+            parameters=[config_file],
+        ),
+        Node(
+            package='uav_control',
+            executable='front_tof_monitor',
+            name='down_tof_monitor',
+            output='screen',
+            parameters=[
+                config_file,
+                {
+                    'camera_name': 'down',
+                    'diagnostic_prefix': '/perception/down',
+                    'camera_frame_id': 'down_camera_optical_frame',
+                    'color_gazebo_topic': '/uav/camera/down/image',
+                    'depth_gazebo_topic': (
+                        '/uav/camera/down/depth_image'
+                    ),
+                    'color_ros_topic': '/camera/down/image_raw',
+                    'depth_ros_topic': '/camera/down/depth/image_raw',
+                    'camera_pitch_down': 1.57079632679,
+                },
+            ],
+        ),
+        Node(
+            package='uav_control',
+            executable='dual_tof_selector',
+            name='dual_tof_selector',
             output='screen',
             parameters=[config_file],
         ),
