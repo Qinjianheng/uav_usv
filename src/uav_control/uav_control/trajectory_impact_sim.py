@@ -184,6 +184,14 @@ class TrajectoryImpactSim(Node):
             'takeoff_max_vertical_acceleration',
             1.0,
         )
+        self.declare_parameter(
+            'takeoff_horizontal_start_height',
+            0.5,
+        )
+        self.declare_parameter(
+            'takeoff_horizontal_full_height',
+            1.5,
+        )
         self.declare_parameter('follow_distance', 20.0)
         self.declare_parameter('follow_position_gain', 0.8)
         self.declare_parameter('follow_max_closing_speed', 3.0)
@@ -605,6 +613,22 @@ class TrajectoryImpactSim(Node):
             ),
             self.max_vertical_acceleration,
         )
+        self.takeoff_horizontal_start_height = max(
+            float(
+                self.get_parameter(
+                    'takeoff_horizontal_start_height'
+                ).value
+            ),
+            0.0,
+        )
+        self.takeoff_horizontal_full_height = max(
+            float(
+                self.get_parameter(
+                    'takeoff_horizontal_full_height'
+                ).value
+            ),
+            self.takeoff_horizontal_start_height + 0.1,
+        )
         self.intercept_reference_max_speed = min(
             max(
                 float(
@@ -930,7 +954,9 @@ class TrajectoryImpactSim(Node):
             f'{self.takeoff_max_horizontal_acceleration:.2f} m/s^2 | '
             f'Z speed={self.takeoff_max_vertical_speed:.2f} m/s | '
             f'Z acceleration='
-            f'{self.takeoff_max_vertical_acceleration:.2f} m/s^2'
+            f'{self.takeoff_max_vertical_acceleration:.2f} m/s^2 | '
+            f'XY blend={self.takeoff_horizontal_start_height:.2f}-'
+            f'{self.takeoff_horizontal_full_height:.2f} m AGL'
         )
         self.get_logger().info(
             'FRONT-VIEW DESCENT: '
@@ -1372,6 +1398,19 @@ class TrajectoryImpactSim(Node):
         msg.yaw = self.update_observation_yaw()
         msg.yawspeed = math.nan
         self.setpoint_pub.publish(msg)
+
+    @staticmethod
+    def takeoff_horizontal_scale(clearance, start_height, full_height):
+        """Smoothly enable horizontal motion after confirmed liftoff."""
+        if clearance <= start_height:
+            return 0.0
+        if clearance >= full_height:
+            return 1.0
+        progress = (
+            (clearance - start_height)
+            / (full_height - start_height)
+        )
+        return progress * progress * (3.0 - 2.0 * progress)
 
     def reset_evaluation(self):
         self.completed = False
@@ -2837,6 +2876,17 @@ class TrajectoryImpactSim(Node):
                 follow_vx,
                 follow_vy,
             )
+            takeoff_clearance = max(
+                self.takeoff_z - self.sim_z,
+                0.0,
+            )
+            horizontal_scale = self.takeoff_horizontal_scale(
+                takeoff_clearance,
+                self.takeoff_horizontal_start_height,
+                self.takeoff_horizontal_full_height,
+            )
+            desired_vx *= horizontal_scale
+            desired_vy *= horizontal_scale
             if self.offboard_active and self.vehicle_armed:
                 command_vx, command_vy = (
                     self.acceleration_limited_velocity(
@@ -2971,6 +3021,7 @@ class TrajectoryImpactSim(Node):
                     f'TAKEOFF | z={self.initial_uav_z:.2f} m | '
                     f'target z={self.flight_altitude:.2f} m | '
                     f'follow error={takeoff_follow_error:.2f} m | '
+                    f'XY blend={100.0 * horizontal_scale:.0f}% | '
                     f'XY speed={math.hypot(self.sim_vx, self.sim_vy):.2f} '
                     f'm/s'
                 )

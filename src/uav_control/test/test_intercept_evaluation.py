@@ -81,6 +81,29 @@ def test_takeoff_follow_setpoint_uses_smooth_three_axis_velocity():
 
 
 @pytest.mark.parametrize(
+    ('clearance', 'expected'),
+    [
+        (0.0, 0.0),
+        (0.5, 0.0),
+        (1.0, 0.5),
+        (1.5, 1.0),
+        (2.0, 1.0),
+    ],
+)
+def test_takeoff_horizontal_follow_blends_after_liftoff(
+    clearance,
+    expected,
+):
+    scale = TrajectoryImpactSim.takeoff_horizontal_scale(
+        clearance,
+        0.5,
+        1.5,
+    )
+
+    assert scale == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
     ('takeoff_requested', 'completed', 'position', 'velocity'),
     [
         (False, False, True, False),

@@ -49,6 +49,9 @@ trajectory_impact_sim:
     takeoff_max_horizontal_acceleration: 1.5
     takeoff_max_vertical_speed: 1.5
     takeoff_max_vertical_acceleration: 1.0
+    # Do not pitch for translation until the vehicle is safely airborne.
+    takeoff_horizontal_start_height: 0.5
+    takeoff_horizontal_full_height: 1.5
     follow_distance: 15.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 3.0
