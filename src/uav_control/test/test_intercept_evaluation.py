@@ -56,12 +56,11 @@ def test_csv_records_front_view_guidance_diagnostics():
     ]
 
 
-def test_takeoff_follow_setpoint_combines_xy_velocity_and_z_position():
+def test_takeoff_follow_setpoint_uses_smooth_three_axis_velocity():
     published = []
     controller = SimpleNamespace(
         setpoint_pub=SimpleNamespace(publish=published.append),
         timestamp=lambda: 123,
-        flight_altitude=-5.0,
         update_observation_yaw=lambda: 0.75,
     )
 
@@ -69,16 +68,45 @@ def test_takeoff_follow_setpoint_combines_xy_velocity_and_z_position():
         controller,
         3.0,
         4.0,
+        -1.0,
     )
 
     assert len(published) == 1
     message = published[0]
     assert math.isnan(message.position[0])
     assert math.isnan(message.position[1])
-    assert message.position[2] == pytest.approx(-5.0)
-    assert message.velocity[:2] == pytest.approx([3.0, 4.0])
-    assert math.isnan(message.velocity[2])
+    assert math.isnan(message.position[2])
+    assert message.velocity == pytest.approx([3.0, 4.0, -1.0])
     assert message.yaw == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize(
+    ('takeoff_requested', 'completed', 'position', 'velocity'),
+    [
+        (False, False, True, False),
+        (True, False, False, True),
+        (True, True, True, False),
+    ],
+)
+def test_offboard_mode_has_no_takeoff_control_mode_switch(
+    takeoff_requested,
+    completed,
+    position,
+    velocity,
+):
+    published = []
+    controller = SimpleNamespace(
+        offboard_pub=SimpleNamespace(publish=published.append),
+        timestamp=lambda: 123,
+        takeoff_requested=takeoff_requested,
+        completed=completed,
+    )
+
+    TrajectoryImpactSim.publish_offboard_mode(controller)
+
+    assert len(published) == 1
+    assert published[0].position is position
+    assert published[0].velocity is velocity
 
 
 def test_observation_yaw_points_from_uav_to_target():

@@ -45,6 +45,10 @@ trajectory_impact_sim:
     flight_altitude: -5.0
     takeoff_tolerance: 0.5
     takeoff_settle_time: 1.0
+    # Keep horizontal tracking during launch, but avoid large tilt/thrust steps.
+    takeoff_max_horizontal_acceleration: 1.5
+    takeoff_max_vertical_speed: 1.5
+    takeoff_max_vertical_acceleration: 1.0
     follow_distance: 15.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 3.0

@@ -175,6 +175,15 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('flight_altitude', -5.0)
         self.declare_parameter('takeoff_tolerance', 0.5)
         self.declare_parameter('takeoff_settle_time', 1.0)
+        self.declare_parameter(
+            'takeoff_max_horizontal_acceleration',
+            1.5,
+        )
+        self.declare_parameter('takeoff_max_vertical_speed', 1.5)
+        self.declare_parameter(
+            'takeoff_max_vertical_acceleration',
+            1.0,
+        )
         self.declare_parameter('follow_distance', 20.0)
         self.declare_parameter('follow_position_gain', 0.8)
         self.declare_parameter('follow_max_closing_speed', 3.0)
@@ -563,6 +572,39 @@ class TrajectoryImpactSim(Node):
             ),
             self.max_acceleration,
         )
+        self.takeoff_max_horizontal_acceleration = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'takeoff_max_horizontal_acceleration'
+                    ).value
+                ),
+                0.1,
+            ),
+            self.follow_max_acceleration,
+        )
+        self.takeoff_max_vertical_speed = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'takeoff_max_vertical_speed'
+                    ).value
+                ),
+                0.1,
+            ),
+            self.max_vertical_speed,
+        )
+        self.takeoff_max_vertical_acceleration = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'takeoff_max_vertical_acceleration'
+                    ).value
+                ),
+                0.1,
+            ),
+            self.max_vertical_acceleration,
+        )
         self.intercept_reference_max_speed = min(
             max(
                 float(
@@ -883,6 +925,14 @@ class TrajectoryImpactSim(Node):
             f'control lookahead={self.terminal_control_lookahead:.2f} s'
         )
         self.get_logger().info(
+            'SMOOTH TAKEOFF: velocity control on all axes | '
+            f'XY acceleration='
+            f'{self.takeoff_max_horizontal_acceleration:.2f} m/s^2 | '
+            f'Z speed={self.takeoff_max_vertical_speed:.2f} m/s | '
+            f'Z acceleration='
+            f'{self.takeoff_max_vertical_acceleration:.2f} m/s^2'
+        )
+        self.get_logger().info(
             'FRONT-VIEW DESCENT: '
             f'hold cruise altitude outside '
             f'{self.descent_start_distance:.1f} m | '
@@ -1139,14 +1189,9 @@ class TrajectoryImpactSim(Node):
 
         msg = OffboardControlMode()
         msg.timestamp = self.timestamp()
-        velocity_control = self.takeoff_complete and not self.completed
-        takeoff_follow_control = (
-            self.takeoff_requested
-            and not self.takeoff_complete
-            and not self.completed
-        )
+        velocity_control = self.takeoff_requested and not self.completed
         msg.position = not velocity_control
-        msg.velocity = velocity_control or takeoff_follow_control
+        msg.velocity = velocity_control
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -1308,18 +1353,19 @@ class TrajectoryImpactSim(Node):
         self,
         velocity_x,
         velocity_y,
+        velocity_z,
     ):
-        """Climb in position Z while following horizontally in velocity."""
+        """Climb and follow with a continuous three-axis velocity command."""
         if self.setpoint_pub is None:
             return
 
         msg = TrajectorySetpoint()
         msg.timestamp = self.timestamp()
-        msg.position = [math.nan, math.nan, self.flight_altitude]
+        msg.position = [math.nan, math.nan, math.nan]
         msg.velocity = [
             float(velocity_x),
             float(velocity_y),
-            math.nan,
+            float(velocity_z),
         ]
         msg.acceleration = [math.nan, math.nan, math.nan]
         msg.jerk = [math.nan, math.nan, math.nan]
@@ -2796,7 +2842,7 @@ class TrajectoryImpactSim(Node):
                     self.acceleration_limited_velocity(
                         desired_vx,
                         desired_vy,
-                        self.follow_max_acceleration,
+                        self.takeoff_max_horizontal_acceleration,
                     )
                 )
             else:
@@ -2808,9 +2854,22 @@ class TrajectoryImpactSim(Node):
                 self.command_vy = command_vy
                 self.command_ax = 0.0
                 self.command_ay = 0.0
+            altitude_error = self.flight_altitude - self.sim_z
+            desired_vz = max(
+                min(
+                    self.altitude_velocity_gain * altitude_error,
+                    self.takeoff_max_vertical_speed,
+                ),
+                -self.takeoff_max_vertical_speed,
+            )
+            command_vz = self.acceleration_limited_vertical_velocity(
+                desired_vz,
+                self.takeoff_max_vertical_acceleration,
+            )
             self.publish_takeoff_follow_setpoint(
                 command_vx,
                 command_vy,
+                command_vz,
             )
 
             mode_retry_due = (
