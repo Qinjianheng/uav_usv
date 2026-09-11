@@ -3,13 +3,14 @@ trajectory_impact_sim:
     control_rate_hz: 20.0
     offboard_prestream_time: 2.0
     px4_command_retry_time: 1.0
-    max_speed: 8.0
-    max_acceleration: 4.8
-    max_actual_horizontal_acceleration: 5.0
+    # Representative command envelope for the 2.1 kg PX4 X500 model.
+    max_speed: 7.0
+    max_acceleration: 3.5
+    max_actual_horizontal_acceleration: 4.0
     horizontal_acceleration_guard_margin: 0.5
     enable_maneuver_prediction: true
     turn_rate_filter_alpha: 0.25
-    max_target_turn_rate: 1.2
+    max_target_turn_rate: 0.7
     maneuver_prediction_horizon: 2.0
     minimum_target_speed: 0.2
     intercept_guidance_horizon_min: 1.0
@@ -17,13 +18,13 @@ trajectory_impact_sim:
     intercept_guidance_horizon_distance: 20.0
     intercept_position_gain: 0.8
     intercept_reference_position_gain: 1.0
-    intercept_reference_max_speed: 7.0
-    intercept_reference_max_acceleration: 4.0
+    intercept_reference_max_speed: 6.2
+    intercept_reference_max_acceleration: 3.2
     intercept_reference_max_vertical_acceleration: 1.5
     terminal_radius: 3.0
-    terminal_closing_speed: 3.0
-    terminal_min_closing_speed: 0.5
-    terminal_closing_speed_step: 0.5
+    terminal_closing_speed: 1.5
+    terminal_min_closing_speed: 0.3
+    terminal_closing_speed_step: 0.3
     terminal_plan_duration_step: 0.1
     terminal_control_lookahead: 0.75
     terminal_contact_clearance: 0.05
@@ -52,21 +53,22 @@ trajectory_impact_sim:
     # Do not pitch for translation until the vehicle is safely airborne.
     takeoff_horizontal_start_height: 0.5
     takeoff_horizontal_full_height: 1.5
-    follow_distance: 15.0
+    follow_distance: 5.0
     follow_position_gain: 0.8
-    follow_max_closing_speed: 3.0
+    follow_max_closing_speed: 1.5
     follow_max_acceleration: 2.5
     altitude_velocity_gain: 1.0
     max_vertical_speed: 2.0
     max_vertical_acceleration: 2.0
     max_actual_vertical_acceleration: 3.0
-    speed_guard_margin: 0.6
+    speed_guard_margin: 0.5
     speed_governor_gain: 1.0
-    max_observation_yaw_rate: 1.5
+    max_observation_yaw_rate: 1.0
 
 moving_target:
   ros__parameters:
-    initial_x: 20.0
+    # Eight metres gives a roughly 23-pixel target diameter at startup.
+    initial_x: 8.0
     initial_y: 0.0
     initial_z: 0.0
     velocity_x: 0.0
@@ -74,6 +76,9 @@ moving_target:
     velocity_z: 0.0
     trajectory_type: figure_eight
     horizontal_speed: 5.0
+    horizontal_acceleration_limit: 1.0
+    maximum_turn_rate: 0.65
+    maximum_lateral_acceleration: 3.2
     figure_eight_x_amplitude: 40.0
     figure_eight_y_amplitude: 20.0
     vertical_oscillation_amplitude: 0.15

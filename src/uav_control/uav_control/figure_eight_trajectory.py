@@ -41,6 +41,44 @@ class FigureEightTrajectory:
             )
         return value
 
+    @staticmethod
+    def _nonnegative_finite(value, description):
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f'Figure-eight {description} must be non-negative.'
+            )
+        return value
+
+    def set_speed(self, speed):
+        """Set the instantaneous path speed, allowing a stationary start."""
+        self.speed = self._nonnegative_finite(speed, 'speed')
+
+    def maximum_curvature(self, sample_count=4096):
+        """Numerically bound curvature over one complete figure eight."""
+        sample_count = max(int(sample_count), 32)
+        maximum = 0.0
+        for index in range(sample_count):
+            phase = 2.0 * math.pi * index / sample_count
+            derivative_x, derivative_y = self._path_derivative(phase)
+            second_x = -self.x_amplitude * math.cos(phase)
+            second_y = -4.0 * self.y_amplitude * math.sin(2.0 * phase)
+            speed_parameter = math.hypot(derivative_x, derivative_y)
+            curvature = abs(
+                derivative_x * second_y
+                - derivative_y * second_x
+            ) / (speed_parameter ** 3)
+            maximum = max(maximum, curvature)
+        return maximum
+
+    def kinematic_envelope(self, speed=None):
+        """Return peak turn rate and lateral acceleration at path speed."""
+        if speed is None:
+            speed = self.speed
+        speed = self._nonnegative_finite(speed, 'speed')
+        curvature = self.maximum_curvature()
+        return speed * curvature, speed * speed * curvature
+
     @property
     def x_limits(self):
         return (

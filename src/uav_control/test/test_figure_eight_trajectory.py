@@ -49,6 +49,28 @@ def test_horizontal_speed_remains_five_metres_per_second():
         assert math.hypot(vx, vy) == pytest.approx(5.0, abs=1e-12)
 
 
+def test_speed_can_ramp_from_rest_without_position_jump():
+    trajectory = make_trajectory()
+    initial_state = trajectory.state()
+
+    trajectory.set_speed(0.0)
+    stopped_state = trajectory.advance(0.05)
+
+    assert stopped_state[:2] == pytest.approx(initial_state[:2])
+    assert stopped_state[2:] == pytest.approx((0.0, 0.0))
+
+
+def test_configured_usv_kinematics_fit_representative_limits():
+    trajectory = make_trajectory()
+
+    turn_rate, lateral_acceleration = trajectory.kinematic_envelope(5.0)
+
+    assert turn_rate == pytest.approx(0.599, abs=0.002)
+    assert lateral_acceleration == pytest.approx(2.994, abs=0.01)
+    assert turn_rate <= 0.65
+    assert lateral_acceleration <= 3.2
+
+
 @pytest.mark.parametrize(
     'keyword,value',
     [

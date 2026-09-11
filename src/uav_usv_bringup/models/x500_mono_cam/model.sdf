@@ -18,8 +18,9 @@
     <link name="front_camera_link">
       <!--
         Put the sensor ahead of the X500 rotor / body envelope and tilt its
-        optical axis 12 degrees down.  At the nominal 5 m altitude and 20 m
-        follow distance the target depression angle is about 14 degrees.
+        optical axis 12 degrees down. At the nominal 5 m altitude and 5 m
+        follow distance the target depression angle is about 45 degrees,
+        which remains inside the camera's vertical field of view.
       -->
       <pose relative_to="base_link">0.35 0 -0.05 0 0.20944 0</pose>
       <inertial>

@@ -14,7 +14,7 @@ class MovingTarget(Node):
     def __init__(self):
         super().__init__('moving_target')
 
-        self.declare_parameter('initial_x', 20.0)
+        self.declare_parameter('initial_x', 8.0)
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('initial_z', 0.0)
         self.declare_parameter('velocity_x', 0.0)
@@ -22,6 +22,9 @@ class MovingTarget(Node):
         self.declare_parameter('velocity_z', 0.0)
         self.declare_parameter('trajectory_type', 'figure_eight')
         self.declare_parameter('horizontal_speed', 5.0)
+        self.declare_parameter('horizontal_acceleration_limit', 1.0)
+        self.declare_parameter('maximum_turn_rate', 0.65)
+        self.declare_parameter('maximum_lateral_acceleration', 3.2)
         self.declare_parameter('figure_eight_x_amplitude', 40.0)
         self.declare_parameter('figure_eight_y_amplitude', 20.0)
         self.declare_parameter('vertical_oscillation_amplitude', 0.15)
@@ -82,6 +85,30 @@ class MovingTarget(Node):
         self.vx = self.linear_vx
         self.vy = self.linear_vy
         self.vz = float(self.get_parameter('velocity_z').value)
+        self.horizontal_acceleration_limit = max(
+            float(
+                self.get_parameter(
+                    'horizontal_acceleration_limit'
+                ).value
+            ),
+            0.1,
+        )
+        self.maximum_turn_rate = max(
+            float(self.get_parameter('maximum_turn_rate').value),
+            0.1,
+        )
+        self.maximum_lateral_acceleration = max(
+            float(
+                self.get_parameter(
+                    'maximum_lateral_acceleration'
+                ).value
+            ),
+            0.1,
+        )
+        self.cruise_horizontal_speed = float(
+            self.get_parameter('horizontal_speed').value
+        )
+        self.commanded_horizontal_speed = 0.0
         self.trajectory_type = str(
             self.get_parameter('trajectory_type').value
         ).strip().lower()
@@ -96,8 +123,31 @@ class MovingTarget(Node):
                 y_amplitude=self.get_parameter(
                     'figure_eight_y_amplitude'
                 ).value,
-                speed=self.get_parameter('horizontal_speed').value,
+                speed=self.cruise_horizontal_speed,
             )
+            (
+                self.peak_turn_rate,
+                self.peak_lateral_acceleration,
+            ) = self.figure_eight_trajectory.kinematic_envelope(
+                self.cruise_horizontal_speed
+            )
+            if self.peak_turn_rate > self.maximum_turn_rate:
+                raise ValueError(
+                    'USV figure-eight exceeds maximum_turn_rate: '
+                    f'{self.peak_turn_rate:.3f} > '
+                    f'{self.maximum_turn_rate:.3f} rad/s'
+                )
+            if (
+                self.peak_lateral_acceleration
+                > self.maximum_lateral_acceleration
+            ):
+                raise ValueError(
+                    'USV figure-eight exceeds '
+                    'maximum_lateral_acceleration: '
+                    f'{self.peak_lateral_acceleration:.3f} > '
+                    f'{self.maximum_lateral_acceleration:.3f} m/s^2'
+                )
+            self.figure_eight_trajectory.set_speed(0.0)
             self.x, self.y, self.vx, self.vy = (
                 self.figure_eight_trajectory.state()
             )
@@ -183,7 +233,11 @@ class MovingTarget(Node):
             y_min, y_max = self.figure_eight_trajectory.y_limits
             self.get_logger().info(
                 'USV figure-eight trajectory enabled | '
-                f'speed={self.figure_eight_trajectory.speed:.2f} m/s | '
+                f'speed=0.00->{self.cruise_horizontal_speed:.2f} m/s | '
+                f'acceleration<={self.horizontal_acceleration_limit:.2f} '
+                f'm/s^2 | turn rate<={self.peak_turn_rate:.2f} rad/s | '
+                f'lateral acceleration<='
+                f'{self.peak_lateral_acceleration:.2f} m/s^2 | '
                 f'X=[{x_min:.1f}, {x_max:.1f}] m | '
                 f'Y=[{y_min:.1f}, {y_max:.1f}] m'
             )
@@ -230,12 +284,29 @@ class MovingTarget(Node):
         # 更新目标位置
         if self.started and not self.hit:
             self.elapsed_time += self.dt
+            self.commanded_horizontal_speed = min(
+                self.commanded_horizontal_speed
+                + self.horizontal_acceleration_limit * self.dt,
+                self.cruise_horizontal_speed,
+            )
             if self.figure_eight_trajectory is None:
-                self.x += self.linear_vx * self.dt
-                self.y += self.linear_vy * self.dt
-                self.vx = self.linear_vx
-                self.vy = self.linear_vy
+                requested_speed = math.hypot(
+                    self.linear_vx,
+                    self.linear_vy,
+                )
+                velocity_scale = (
+                    self.commanded_horizontal_speed / requested_speed
+                    if requested_speed > 1e-9
+                    else 0.0
+                )
+                self.vx = self.linear_vx * velocity_scale
+                self.vy = self.linear_vy * velocity_scale
+                self.x += self.vx * self.dt
+                self.y += self.vy * self.dt
             else:
+                self.figure_eight_trajectory.set_speed(
+                    self.commanded_horizontal_speed
+                )
                 self.x, self.y, self.vx, self.vy = (
                     self.figure_eight_trajectory.advance(self.dt)
                 )

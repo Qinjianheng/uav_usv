@@ -108,11 +108,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('offboard_prestream_time', 2.0)
         self.declare_parameter('px4_command_retry_time', 1.0)
-        self.declare_parameter('max_speed', 8.0)
-        self.declare_parameter('max_acceleration', 4.8)
+        self.declare_parameter('max_speed', 7.0)
+        self.declare_parameter('max_acceleration', 3.5)
         self.declare_parameter(
             'max_actual_horizontal_acceleration',
-            5.0,
+            4.0,
         )
         self.declare_parameter(
             'horizontal_acceleration_guard_margin',
@@ -120,7 +120,7 @@ class TrajectoryImpactSim(Node):
         )
         self.declare_parameter('enable_maneuver_prediction', True)
         self.declare_parameter('turn_rate_filter_alpha', 0.25)
-        self.declare_parameter('max_target_turn_rate', 1.2)
+        self.declare_parameter('max_target_turn_rate', 0.7)
         self.declare_parameter('maneuver_prediction_horizon', 2.0)
         self.declare_parameter('minimum_target_speed', 0.2)
         self.declare_parameter('intercept_guidance_horizon_min', 1.0)
@@ -134,19 +134,19 @@ class TrajectoryImpactSim(Node):
             'intercept_reference_position_gain',
             1.0,
         )
-        self.declare_parameter('intercept_reference_max_speed', 7.0)
+        self.declare_parameter('intercept_reference_max_speed', 6.2)
         self.declare_parameter(
             'intercept_reference_max_acceleration',
-            4.0,
+            3.2,
         )
         self.declare_parameter(
             'intercept_reference_max_vertical_acceleration',
             1.5,
         )
         self.declare_parameter('terminal_radius', 3.0)
-        self.declare_parameter('terminal_closing_speed', 3.0)
-        self.declare_parameter('terminal_min_closing_speed', 0.5)
-        self.declare_parameter('terminal_closing_speed_step', 0.5)
+        self.declare_parameter('terminal_closing_speed', 1.5)
+        self.declare_parameter('terminal_min_closing_speed', 0.3)
+        self.declare_parameter('terminal_closing_speed_step', 0.3)
         self.declare_parameter('terminal_plan_duration_step', 0.1)
         self.declare_parameter('terminal_control_lookahead', 0.75)
         self.declare_parameter('terminal_contact_clearance', 0.05)
@@ -192,9 +192,9 @@ class TrajectoryImpactSim(Node):
             'takeoff_horizontal_full_height',
             1.5,
         )
-        self.declare_parameter('follow_distance', 20.0)
+        self.declare_parameter('follow_distance', 5.0)
         self.declare_parameter('follow_position_gain', 0.8)
-        self.declare_parameter('follow_max_closing_speed', 3.0)
+        self.declare_parameter('follow_max_closing_speed', 1.5)
         self.declare_parameter('follow_max_acceleration', 2.5)
         self.declare_parameter('altitude_velocity_gain', 1.0)
         self.declare_parameter('max_vertical_speed', 2.0)
@@ -203,9 +203,9 @@ class TrajectoryImpactSim(Node):
             'max_actual_vertical_acceleration',
             3.0,
         )
-        self.declare_parameter('speed_guard_margin', 0.6)
+        self.declare_parameter('speed_guard_margin', 0.5)
         self.declare_parameter('speed_governor_gain', 1.0)
-        self.declare_parameter('max_observation_yaw_rate', 1.5)
+        self.declare_parameter('max_observation_yaw_rate', 1.0)
 
         control_rate_hz = self.get_parameter(
             'control_rate_hz'

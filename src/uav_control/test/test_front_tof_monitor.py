@@ -79,6 +79,28 @@ def test_target_camera_angles_reports_target_outside_horizontal_fov():
     assert not in_fov
 
 
+def test_eight_metre_start_is_inside_front_rgbd_view_volume():
+    horizontal, vertical, in_fov = target_camera_angles(
+        uav_position=(0.0, 0.0, 0.0),
+        target_position=(8.0, 0.0, -0.42),
+        attitude_quaternion=(1.0, 0.0, 0.0, 0.0),
+        camera_pitch_down=math.radians(12.0),
+        horizontal_fov=1.74,
+        width=640,
+        height=480,
+    )
+    distance = math.hypot(8.0, 0.42)
+    projected_diameter = (
+        2.0 * math.atan(0.25 / distance) / 1.74 * 640.0
+    )
+
+    assert horizontal == pytest.approx(0.0)
+    assert abs(vertical) < vertical_field_of_view(640, 480, 1.74) / 2.0
+    assert in_fov
+    assert target_renderable_in_rgb(in_fov, distance, 0.2, 60.0)
+    assert projected_diameter >= 20.0
+
+
 def test_down_camera_sees_target_directly_below_uav():
     horizontal, vertical, in_fov = target_camera_angles(
         uav_position=(0.0, 0.0, -5.0),

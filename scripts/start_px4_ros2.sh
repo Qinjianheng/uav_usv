@@ -176,7 +176,7 @@ export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
 export PX4_GZ_STANDALONE=1 &&
 export PX4_GZ_WORLD=default &&
-# Face Gazebo +Y (local NED north), where the USV starts 20 m away.
+# Face Gazebo +Y (local NED north), where the USV starts 8 m away.
 export PX4_GZ_MODEL_POSE='0,0,0,0,0,1.57079632679' &&
 cd '${PX4_ROOT}' &&
 make px4_sitl gz_x500_mono_cam;
