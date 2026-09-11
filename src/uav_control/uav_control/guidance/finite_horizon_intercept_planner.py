@@ -3,6 +3,8 @@
 import math
 from dataclasses import dataclass
 
+from uav_control.guidance.minco_trajectory import MincoS3Trajectory
+
 
 @dataclass(frozen=True)
 class TrajectorySample:
@@ -92,9 +94,14 @@ class InterceptPlan:
     maximum_horizontal_acceleration: float
     maximum_vertical_acceleration: float
     cost: float
+    minco_trajectory: object = None
+    planner_type: str = 'QUINTIC_S3'
+    target_curve_weight: float = 0.0
 
     def sample(self, time):
         """Sample all three axes of the planned trajectory."""
+        if self.minco_trajectory is not None:
+            return self.minco_trajectory.sample(time)
         values = [
             axis.sample(min(max(float(time), 0.0), self.duration))
             for axis in self.axes
@@ -126,6 +133,8 @@ class FiniteHorizonInterceptPlanner:
         capture_radius,
         sea_surface_z,
         contact_clearance,
+        minco_piece_count=1,
+        minco_target_curve_weight=1.0,
     ):
         """Configure the finite-horizon feasibility search."""
         self.minimum_duration = self._positive(
@@ -182,6 +191,20 @@ class FiniteHorizonInterceptPlanner:
             raise ValueError('sea surface z must be finite')
         if self.contact_clearance >= self.capture_radius:
             raise ValueError('contact clearance must be below capture radius')
+        self.minco_piece_count = int(minco_piece_count)
+        if self.minco_piece_count < 1 or self.minco_piece_count > 6:
+            raise ValueError('MINCO piece count must be between one and six')
+        self.minco_target_curve_weight = float(minco_target_curve_weight)
+        if (
+            not math.isfinite(self.minco_target_curve_weight)
+            or self.minco_target_curve_weight < 0.0
+            or self.minco_target_curve_weight > 1.0
+        ):
+            raise ValueError('MINCO target curve weight must be in [0, 1]')
+        self._last_duration = 0.5 * (
+            self.minimum_duration + self.maximum_duration
+        )
+        self._prewarm_minco_mappings()
 
     @staticmethod
     def _positive(value, name):
@@ -223,7 +246,27 @@ class FiniteHorizonInterceptPlanner:
         ]
         if durations[-1] < self.maximum_duration - 1e-9:
             durations.append(self.maximum_duration)
+        if self._last_duration is not None:
+            durations.sort(key=lambda value: abs(value - self._last_duration))
         return durations
+
+    def _prewarm_minco_mappings(self):
+        """Move constant MINCO matrix inversions outside the control loop."""
+        if self.minco_piece_count == 1:
+            return
+        zero = (0.0, 0.0, 0.0)
+        for duration in self._duration_candidates():
+            piece_duration = duration / self.minco_piece_count
+            MincoS3Trajectory(
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                (zero,) * (self.minco_piece_count - 1),
+                (piece_duration,) * self.minco_piece_count,
+            )
 
     def _closing_speed_candidates(self):
         speeds = []
@@ -233,6 +276,18 @@ class FiniteHorizonInterceptPlanner:
             speed -= self.closing_speed_step
         speeds.append(self.minimum_closing_speed)
         return speeds
+
+    def _curve_weight_candidates(self):
+        if self.minco_piece_count == 1:
+            return (0.0,)
+        weights = []
+        weight = self.minco_target_curve_weight
+        while weight > 0.05:
+            weights.append(weight)
+            weight *= 0.5
+        if not weights or weights[-1] > 1e-9:
+            weights.append(0.0)
+        return tuple(weights)
 
     def _candidate(
         self,
@@ -245,6 +300,9 @@ class FiniteHorizonInterceptPlanner:
         duration,
         closing_speed,
         previous_acceleration,
+        target_start_position=None,
+        intermediate_target_positions=(),
+        target_curve_weight=0.0,
     ):
         contact_position = list(target_position)
         contact_position[2] = min(
@@ -279,6 +337,67 @@ class FiniteHorizonInterceptPlanner:
             for index in range(3)
         )
 
+        minco_trajectory = None
+        planner_type = 'QUINTIC_S3'
+        if self.minco_piece_count > 1:
+            if (
+                target_start_position is None
+                or len(intermediate_target_positions)
+                != self.minco_piece_count - 1
+            ):
+                raise ValueError('MINCO target guide states are incomplete')
+            guide_positions = []
+            for index, target_guide in enumerate(
+                intermediate_target_positions,
+                start=1,
+            ):
+                fraction = index / self.minco_piece_count
+                baseline = tuple(
+                    axis.sample(fraction * duration)[0]
+                    for axis in axes
+                )
+                linear_target = tuple(
+                    start + fraction * (end - start)
+                    for start, end in zip(
+                        target_start_position,
+                        target_position,
+                    )
+                )
+                guide_positions.append(tuple(
+                    base + target_curve_weight * (guide - linear)
+                    for base, guide, linear in zip(
+                        baseline,
+                        target_guide,
+                        linear_target,
+                    )
+                ))
+            piece_duration = duration / self.minco_piece_count
+            try:
+                minco_trajectory = MincoS3Trajectory(
+                    initial_position,
+                    initial_velocity,
+                    initial_acceleration,
+                    contact_position,
+                    terminal_velocity,
+                    target_acceleration,
+                    guide_positions,
+                    (piece_duration,) * self.minco_piece_count,
+                )
+            except ValueError:
+                return None
+            planner_type = 'MINCO_T3'
+
+        def sample_trajectory(time):
+            if minco_trajectory is not None:
+                return minco_trajectory.sample(time)
+            values = [axis.sample(time) for axis in axes]
+            return TrajectorySample(
+                tuple(value[0] for value in values),
+                tuple(value[1] for value in values),
+                tuple(value[2] for value in values),
+                tuple(value[3] for value in values),
+            )
+
         maximum_horizontal_speed = 0.0
         maximum_vertical_speed = 0.0
         maximum_horizontal_acceleration = 0.0
@@ -287,10 +406,10 @@ class FiniteHorizonInterceptPlanner:
         sample_count = max(int(math.ceil(duration / self.sample_step)), 1)
         for index in range(sample_count + 1):
             time = min(index * duration / sample_count, duration)
-            values = [axis.sample(time) for axis in axes]
-            velocity = tuple(value[1] for value in values)
-            acceleration = tuple(value[2] for value in values)
-            jerk = tuple(value[3] for value in values)
+            sample = sample_trajectory(time)
+            velocity = sample.velocity
+            acceleration = sample.acceleration
+            jerk = sample.jerk
             horizontal_speed = math.hypot(velocity[0], velocity[1])
             vertical_speed = abs(velocity[2])
             horizontal_acceleration = math.hypot(
@@ -302,7 +421,10 @@ class FiniteHorizonInterceptPlanner:
                 maximum_horizontal_speed,
                 horizontal_speed,
             )
-            maximum_vertical_speed = max(maximum_vertical_speed, vertical_speed)
+            maximum_vertical_speed = max(
+                maximum_vertical_speed,
+                vertical_speed,
+            )
             maximum_horizontal_acceleration = max(
                 maximum_horizontal_acceleration,
                 horizontal_acceleration,
@@ -318,7 +440,7 @@ class FiniteHorizonInterceptPlanner:
                 > self.maximum_horizontal_acceleration + 1e-6
                 or vertical_acceleration
                 > self.maximum_vertical_acceleration + 1e-6
-                or values[2][0] >= self.sea_surface_z
+                or sample.position[2] >= self.sea_surface_z
             ):
                 return None
             effort_cost += (
@@ -327,11 +449,9 @@ class FiniteHorizonInterceptPlanner:
                 + 0.01 * sum(component**2 for component in jerk)
             ) * duration / sample_count
 
-        first_values = [
-            axis.sample(min(self.sample_step, duration))
-            for axis in axes
-        ]
-        first_acceleration = tuple(value[2] for value in first_values)
+        first_acceleration = sample_trajectory(
+            min(self.sample_step, duration)
+        ).acceleration
         continuity_cost = sum(
             (current - previous) ** 2
             for current, previous in zip(
@@ -360,6 +480,9 @@ class FiniteHorizonInterceptPlanner:
             maximum_horizontal_acceleration,
             maximum_vertical_acceleration,
             cost,
+            minco_trajectory,
+            planner_type,
+            target_curve_weight,
         )
 
     def plan(
@@ -370,7 +493,7 @@ class FiniteHorizonInterceptPlanner:
         target_state_at_time,
         previous_acceleration=(0.0, 0.0, 0.0),
     ):
-        """Return the lowest-cost feasible trajectory or ``None``."""
+        """Return the earliest feasible trajectory or ``None``."""
         initial_position = self._vector(initial_position, 'initial position')
         initial_velocity = self._vector(initial_velocity, 'initial velocity')
         initial_acceleration = self._vector(
@@ -381,7 +504,6 @@ class FiniteHorizonInterceptPlanner:
             previous_acceleration,
             'previous acceleration',
         )
-        best_plan = None
         for duration in self._duration_candidates():
             target_state = target_state_at_time(duration)
             if len(target_state) != 3:
@@ -395,20 +517,46 @@ class FiniteHorizonInterceptPlanner:
                 target_state[2],
                 'target acceleration',
             )
-            for closing_speed in self._closing_speed_candidates():
-                candidate = self._candidate(
-                    initial_position,
-                    initial_velocity,
-                    initial_acceleration,
-                    target_position,
-                    target_velocity,
-                    target_acceleration,
-                    duration,
-                    closing_speed,
-                    previous_acceleration,
+            target_start_position = None
+            intermediate_target_positions = ()
+            if self.minco_piece_count > 1:
+                start_state = target_state_at_time(0.0)
+                if len(start_state) != 3:
+                    raise ValueError(
+                        'target state must contain position, velocity, '
+                        'acceleration'
+                    )
+                target_start_position = self._vector(
+                    start_state[0],
+                    'target start position',
                 )
-                if candidate is not None and (
-                    best_plan is None or candidate.cost < best_plan.cost
-                ):
-                    best_plan = candidate
-        return best_plan
+                intermediate_target_positions = tuple(
+                    self._vector(
+                        target_state_at_time(
+                            duration * index / self.minco_piece_count
+                        )[0],
+                        'target guide position',
+                    )
+                    for index in range(1, self.minco_piece_count)
+                )
+            for closing_speed in self._closing_speed_candidates():
+                candidate = None
+                for curve_weight in self._curve_weight_candidates():
+                    candidate = self._candidate(
+                        initial_position,
+                        initial_velocity,
+                        initial_acceleration,
+                        target_position,
+                        target_velocity,
+                        target_acceleration,
+                        duration,
+                        closing_speed,
+                        previous_acceleration,
+                        target_start_position,
+                        intermediate_target_positions,
+                        curve_weight,
+                    )
+                    if candidate is not None:
+                        self._last_duration = candidate.duration
+                        return candidate
+        return None

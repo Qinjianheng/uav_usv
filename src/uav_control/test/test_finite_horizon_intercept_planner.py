@@ -142,3 +142,86 @@ def test_contact_point_stays_above_sea_and_inside_capture_radius():
         math.hypot(sample.velocity[0], sample.velocity[1]) <= 7.4
         for sample in samples
     )
+
+
+def test_minco_planner_tracks_curved_target_prediction_with_three_pieces():
+    planner = make_planner(
+        minco_piece_count=3,
+        minco_target_curve_weight=0.7,
+        maximum_horizontal_acceleration=8.0,
+        maximum_vertical_acceleration=4.0,
+    )
+
+    def turning_target(horizon):
+        angular_rate = 0.35
+        speed = 2.0
+        angle = angular_rate * horizon
+        return (
+            (
+                3.0 + speed * math.sin(angle) / angular_rate,
+                speed * (1.0 - math.cos(angle)) / angular_rate,
+                -0.1,
+            ),
+            (speed * math.cos(angle), speed * math.sin(angle), 0.0),
+            (
+                -speed * angular_rate * math.sin(angle),
+                speed * angular_rate * math.cos(angle),
+                0.0,
+            ),
+        )
+
+    plan = planner.plan(
+        (0.0, 0.0, -1.0),
+        (4.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        turning_target,
+    )
+
+    assert plan is not None
+    assert plan.planner_type == 'MINCO_T3'
+    assert plan.minco_trajectory.piece_count == 3
+    terminal = plan.sample(plan.duration)
+    assert terminal.position == pytest.approx(plan.target_position, abs=1e-7)
+    assert terminal.velocity[1] > 0.0
+
+
+def test_minco_relaxes_target_curve_weight_to_remain_dynamically_feasible():
+    planner = make_planner(
+        minco_piece_count=3,
+        minco_target_curve_weight=0.7,
+        maximum_horizontal_speed=6.5,
+        maximum_horizontal_acceleration=3.5,
+        desired_closing_speed=1.5,
+        minimum_closing_speed=0.3,
+        closing_speed_step=0.3,
+    )
+
+    def fast_turning_target(horizon):
+        angular_rate = 0.3
+        speed = 5.0
+        angle = angular_rate * horizon
+        return (
+            (
+                2.0 + speed * math.sin(angle) / angular_rate,
+                speed * (1.0 - math.cos(angle)) / angular_rate,
+                -0.1,
+            ),
+            (speed * math.cos(angle), speed * math.sin(angle), 0.0),
+            (
+                -speed * angular_rate * math.sin(angle),
+                speed * angular_rate * math.cos(angle),
+                0.0,
+            ),
+        )
+
+    plan = planner.plan(
+        (0.0, 0.0, -1.0),
+        (6.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        fast_turning_target,
+    )
+
+    assert plan is not None
+    assert plan.planner_type == 'MINCO_T3'
+    assert 0.0 < plan.target_curve_weight < 0.7
+    assert plan.maximum_horizontal_acceleration <= 3.5

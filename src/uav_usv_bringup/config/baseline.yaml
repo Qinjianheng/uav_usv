@@ -26,7 +26,11 @@ trajectory_impact_sim:
     terminal_min_closing_speed: 0.3
     terminal_closing_speed_step: 0.3
     terminal_plan_duration_step: 0.1
-    terminal_control_lookahead: 0.75
+    # Three-piece minimum-jerk trajectory, replanned at the controller rate.
+    enable_minco_planner: true
+    minco_piece_count: 3
+    minco_target_curve_weight: 0.7
+    terminal_control_lookahead: 0.15
     terminal_contact_clearance: 0.05
     approach_staging_height: 1.0
     descent_start_distance: 12.0

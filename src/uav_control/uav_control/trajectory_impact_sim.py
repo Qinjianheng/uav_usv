@@ -74,6 +74,8 @@ class TrajectoryImpactSim(Node):
         'guidance_altitude_reference',
         'guidance_closing_speed',
         'trajectory_plan_feasible',
+        'trajectory_planner',
+        'minco_target_curve_weight',
         'planned_closing_speed',
         'planned_max_horizontal_speed',
         'planned_max_vertical_speed',
@@ -148,7 +150,10 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('terminal_min_closing_speed', 0.3)
         self.declare_parameter('terminal_closing_speed_step', 0.3)
         self.declare_parameter('terminal_plan_duration_step', 0.1)
-        self.declare_parameter('terminal_control_lookahead', 0.75)
+        self.declare_parameter('terminal_control_lookahead', 0.15)
+        self.declare_parameter('enable_minco_planner', True)
+        self.declare_parameter('minco_piece_count', 3)
+        self.declare_parameter('minco_target_curve_weight', 0.7)
         self.declare_parameter('terminal_contact_clearance', 0.05)
         self.declare_parameter('approach_staging_height', 1.0)
         self.declare_parameter('descent_start_distance', 12.0)
@@ -379,6 +384,27 @@ class TrajectoryImpactSim(Node):
                 ).value
             ),
             self.dt,
+        )
+        self.enable_minco_planner = bool(
+            self.get_parameter('enable_minco_planner').value
+        )
+        self.minco_piece_count = min(
+            max(
+                int(self.get_parameter('minco_piece_count').value),
+                1,
+            ),
+            6,
+        )
+        self.minco_target_curve_weight = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'minco_target_curve_weight'
+                    ).value
+                ),
+                0.0,
+            ),
+            1.0,
         )
         self.terminal_max_acceleration = min(
             max(
@@ -704,6 +730,14 @@ class TrajectoryImpactSim(Node):
                 capture_radius=self.impact_radius,
                 sea_surface_z=self.sea_surface_z,
                 contact_clearance=self.terminal_contact_clearance,
+                minco_piece_count=(
+                    self.minco_piece_count
+                    if self.enable_minco_planner
+                    else 1
+                ),
+                minco_target_curve_weight=(
+                    self.minco_target_curve_weight
+                ),
             )
         )
 
@@ -887,6 +921,8 @@ class TrajectoryImpactSim(Node):
         self.measured_vertical_acceleration = 0.0
         self.terminal_mode_active = False
         self.trajectory_plan_active = False
+        self.trajectory_planner_type = 'PURSUIT'
+        self.planned_minco_target_curve_weight = 0.0
         self.guidance_altitude_reference = math.nan
         self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
@@ -947,6 +983,16 @@ class TrajectoryImpactSim(Node):
             f'{self.terminal_closing_speed:.2f} m/s | '
             f'staging height={self.approach_staging_height:.2f} m | '
             f'control lookahead={self.terminal_control_lookahead:.2f} s'
+        )
+        self.get_logger().info(
+            'TERMINAL TRAJECTORY GENERATOR: '
+            + (
+                f'MINCO-T3 | pieces={self.minco_piece_count} | '
+                f'target-curve weight={self.minco_target_curve_weight:.2f}'
+                if self.enable_minco_planner
+                else 'single-piece quintic compatibility mode'
+            )
+            + ' | infeasible-plan fallback=pursuit'
         )
         self.get_logger().info(
             'SMOOTH TAKEOFF: velocity control on all axes | '
@@ -2064,6 +2110,8 @@ class TrajectoryImpactSim(Node):
     def reset_trajectory_plan_diagnostics(self):
         """Clear diagnostics when no feasible terminal plan is active."""
         self.trajectory_plan_active = False
+        self.trajectory_planner_type = 'PURSUIT'
+        self.planned_minco_target_curve_weight = 0.0
         self.guidance_altitude_reference = math.nan
         self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
@@ -2192,6 +2240,10 @@ class TrajectoryImpactSim(Node):
                 min(self.terminal_control_lookahead, plan.duration)
             )
             self.trajectory_plan_active = True
+            self.trajectory_planner_type = plan.planner_type
+            self.planned_minco_target_curve_weight = (
+                plan.target_curve_weight
+            )
             self.guidance_altitude_reference = sample.position[2]
             self.guidance_closing_speed = plan.closing_speed
             self.planned_closing_speed = plan.closing_speed
@@ -2642,6 +2694,8 @@ class TrajectoryImpactSim(Node):
             f'{self.guidance_altitude_reference:.6f}',
             f'{self.guidance_closing_speed:.6f}',
             '1' if self.trajectory_plan_active else '0',
+            self.trajectory_planner_type,
+            f'{self.planned_minco_target_curve_weight:.6f}',
             f'{self.planned_closing_speed:.6f}',
             f'{self.planned_max_horizontal_speed:.6f}',
             f'{self.planned_max_vertical_speed:.6f}',
