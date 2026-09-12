@@ -188,6 +188,7 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('minco_piece_count', 3)
         self.declare_parameter('minco_target_curve_weight', 0.7)
         self.declare_parameter('terminal_contact_clearance', 0.05)
+        self.declare_parameter('terminal_descent_release_distance', 4.0)
         self.declare_parameter('approach_staging_height', 1.0)
         self.declare_parameter('descent_start_distance', 12.0)
         self.declare_parameter('descent_end_distance', 3.0)
@@ -464,6 +465,14 @@ class TrajectoryImpactSim(Node):
                 0.001,
             ),
             0.9 * self.impact_radius,
+        )
+        self.terminal_descent_release_distance = max(
+            float(
+                self.get_parameter(
+                    'terminal_descent_release_distance'
+                ).value
+            ),
+            self.terminal_radius + 0.1,
         )
         self.approach_staging_height = max(
             float(
@@ -978,6 +987,9 @@ class TrajectoryImpactSim(Node):
         self.terminal_mode_active = False
         self.trajectory_plan_active = False
         self.trajectory_planner_type = 'PURSUIT'
+        self.retained_terminal_plan = None
+        self.retained_terminal_plan_time_ns = None
+        self.terminal_descent_committed = False
         self.planned_minco_target_curve_weight = 0.0
         self.guidance_altitude_reference = math.nan
         self.guidance_closing_speed = 0.0
@@ -1565,6 +1577,9 @@ class TrajectoryImpactSim(Node):
         self.max_observed_horizontal_acceleration = 0.0
         self.max_observed_vertical_acceleration = 0.0
         self.terminal_mode_active = False
+        self.retained_terminal_plan = None
+        self.retained_terminal_plan_time_ns = None
+        self.terminal_descent_committed = False
         self.reset_trajectory_plan_diagnostics()
 
     @staticmethod
@@ -2235,6 +2250,37 @@ class TrajectoryImpactSim(Node):
             ),
         )
 
+    def retain_terminal_trajectory_plan(self, plan, timestamp_ns=None):
+        """Remember a feasible trajectory for brief replanning dropouts."""
+        if timestamp_ns is None:
+            timestamp_ns = self.get_clock().now().nanoseconds
+        self.retained_terminal_plan = plan
+        self.retained_terminal_plan_time_ns = int(timestamp_ns)
+
+    def retained_terminal_trajectory_sample(self, timestamp_ns=None):
+        """Return a retained plan with its shifted sample and remaining time."""
+        if (
+            self.retained_terminal_plan is None
+            or self.retained_terminal_plan_time_ns is None
+        ):
+            return None
+        if timestamp_ns is None:
+            timestamp_ns = self.get_clock().now().nanoseconds
+        elapsed = max(
+            (int(timestamp_ns) - self.retained_terminal_plan_time_ns) * 1e-9,
+            0.0,
+        )
+        sample_time = elapsed + self.terminal_control_lookahead
+        if sample_time > self.retained_terminal_plan.duration + 1e-9:
+            self.retained_terminal_plan = None
+            self.retained_terminal_plan_time_ns = None
+            return None
+        remaining_time = max(
+            self.retained_terminal_plan.duration - elapsed,
+            0.0,
+        )
+        return self.retained_terminal_plan, sample_time, remaining_time
+
     def pursuit_altitude_reference(self, horizontal_distance, target_z):
         """Delay descent while keeping the target inside the front view."""
         horizontal_distance = max(float(horizontal_distance), 0.0)
@@ -2272,6 +2318,28 @@ class TrajectoryImpactSim(Node):
             max(profile_z, visibility_z),
             self.sea_surface_z - self.terminal_contact_clearance,
         )
+
+    def terminal_fallback_altitude_reference(
+        self,
+        horizontal_distance,
+        target_z,
+    ):
+        """Keep descending after terminal commitment despite plan loss."""
+        pursuit_z = self.pursuit_altitude_reference(
+            horizontal_distance,
+            target_z,
+        )
+        if not self.terminal_descent_committed:
+            return pursuit_z, False
+        if horizontal_distance > self.terminal_descent_release_distance:
+            self.terminal_descent_committed = False
+            return pursuit_z, False
+
+        capture_z = min(
+            float(target_z) - self.terminal_contact_clearance,
+            self.sea_surface_z - self.terminal_contact_clearance,
+        )
+        return max(pursuit_z, capture_z), True
 
     def pursuit_closing_speed(
         self,
@@ -2325,12 +2393,26 @@ class TrajectoryImpactSim(Node):
             target_y,
             target_z,
         )
+        plan_sample_time = self.terminal_control_lookahead
+        plan_time_to_go = plan.duration if plan is not None else 0.0
+        retained_plan_active = False
+        if plan is not None:
+            self.retain_terminal_trajectory_plan(plan)
+        else:
+            retained = self.retained_terminal_trajectory_sample()
+            if retained is not None:
+                plan, plan_sample_time, plan_time_to_go = retained
+                retained_plan_active = True
         if plan is not None:
             sample = plan.sample(
-                min(self.terminal_control_lookahead, plan.duration)
+                min(plan_sample_time, plan.duration)
             )
+            if horizontal_distance <= self.terminal_radius:
+                self.terminal_descent_committed = True
             self.trajectory_plan_active = True
-            self.trajectory_planner_type = plan.planner_type
+            self.trajectory_planner_type = plan.planner_type + (
+                '_HOLD' if retained_plan_active else ''
+            )
             self.planned_minco_target_curve_weight = (
                 plan.target_curve_weight
             )
@@ -2360,7 +2442,7 @@ class TrajectoryImpactSim(Node):
                 plan.target_position[0],
                 plan.target_position[1],
                 plan.target_position[2],
-                plan.duration,
+                plan_time_to_go,
                 True,
             )
 
@@ -2379,10 +2461,14 @@ class TrajectoryImpactSim(Node):
             desired_vy,
         )
 
-        staging_z = self.pursuit_altitude_reference(
-            horizontal_distance,
-            target_z,
+        staging_z, terminal_pursuit = (
+            self.terminal_fallback_altitude_reference(
+                horizontal_distance,
+                target_z,
+            )
         )
+        if terminal_pursuit:
+            self.trajectory_planner_type = 'TERMINAL_PURSUIT'
         self.guidance_altitude_reference = staging_z
         self.guidance_closing_speed = closing_speed
         desired_vz = max(
@@ -2401,7 +2487,7 @@ class TrajectoryImpactSim(Node):
             intercept_y,
             intercept_z,
             t_go,
-            False,
+            terminal_pursuit,
         )
 
     def acceleration_limited_velocity(

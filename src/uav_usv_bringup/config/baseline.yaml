@@ -32,6 +32,8 @@ trajectory_impact_sim:
     minco_target_curve_weight: 0.7
     terminal_control_lookahead: 0.15
     terminal_contact_clearance: 0.05
+    # Release terminal descent only after the target opens beyond this range.
+    terminal_descent_release_distance: 4.0
     approach_staging_height: 1.0
     descent_start_distance: 12.0
     descent_end_distance: 3.0

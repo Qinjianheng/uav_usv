@@ -228,7 +228,7 @@ def test_intercept_prediction_horizon_stays_between_one_and_two_seconds():
 
 
 def make_front_view_altitude_controller():
-    return SimpleNamespace(
+    controller = SimpleNamespace(
         sea_surface_z=0.0,
         flight_altitude=-5.0,
         approach_staging_height=1.0,
@@ -237,6 +237,14 @@ def make_front_view_altitude_controller():
         front_camera_max_depression_angle=0.85,
         terminal_contact_clearance=0.05,
     )
+    controller.pursuit_altitude_reference = lambda distance, target_z: (
+        TrajectoryImpactSim.pursuit_altitude_reference(
+            controller,
+            distance,
+            target_z,
+        )
+    )
+    return controller
 
 
 def test_pursuit_holds_cruise_altitude_before_descent_window():
@@ -277,6 +285,161 @@ def test_pursuit_near_target_respects_front_camera_depression_limit():
     depression = math.atan2(height, horizontal_distance)
     assert depression == pytest.approx(0.85)
     assert reference_z < controller.sea_surface_z
+
+
+def test_retained_terminal_plan_advances_and_expires_with_clock():
+    plan = SimpleNamespace(duration=1.0)
+    controller = SimpleNamespace(
+        terminal_control_lookahead=0.15,
+        retained_terminal_plan=None,
+        retained_terminal_plan_time_ns=None,
+    )
+
+    TrajectoryImpactSim.retain_terminal_trajectory_plan(
+        controller,
+        plan,
+        timestamp_ns=1_000_000_000,
+    )
+    retained = TrajectoryImpactSim.retained_terminal_trajectory_sample(
+        controller,
+        timestamp_ns=1_100_000_000,
+    )
+
+    assert retained[0] is plan
+    assert retained[1] == pytest.approx(0.25)
+    assert retained[2] == pytest.approx(0.9)
+
+    expired = TrajectoryImpactSim.retained_terminal_trajectory_sample(
+        controller,
+        timestamp_ns=2_000_000_000,
+    )
+
+    assert expired is None
+    assert controller.retained_terminal_plan is None
+    assert controller.retained_terminal_plan_time_ns is None
+
+
+def test_terminal_pursuit_keeps_committed_capture_descent():
+    controller = make_front_view_altitude_controller()
+    controller.terminal_descent_committed = True
+    controller.terminal_descent_release_distance = 4.0
+
+    reference_z, committed = (
+        TrajectoryImpactSim.terminal_fallback_altitude_reference(
+            controller,
+            1.0,
+            -0.13,
+        )
+    )
+
+    assert committed is True
+    assert reference_z == pytest.approx(-0.18)
+    assert controller.terminal_descent_committed is True
+
+
+def test_terminal_pursuit_caps_descent_above_sea_surface():
+    controller = make_front_view_altitude_controller()
+    controller.terminal_descent_committed = True
+    controller.terminal_descent_release_distance = 4.0
+
+    reference_z, committed = (
+        TrajectoryImpactSim.terminal_fallback_altitude_reference(
+            controller,
+            0.1,
+            0.15,
+        )
+    )
+
+    assert committed is True
+    assert reference_z == pytest.approx(-0.05)
+
+
+def test_terminal_pursuit_releases_after_distance_hysteresis():
+    controller = make_front_view_altitude_controller()
+    controller.terminal_descent_committed = True
+    controller.terminal_descent_release_distance = 4.0
+
+    reference_z, committed = (
+        TrajectoryImpactSim.terminal_fallback_altitude_reference(
+            controller,
+            4.1,
+            0.0,
+        )
+    )
+    pursuit_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        4.1,
+        0.0,
+    )
+
+    assert committed is False
+    assert reference_z == pytest.approx(pursuit_z)
+    assert controller.terminal_descent_committed is False
+
+
+def test_plan_velocity_uses_retained_plan_during_replan_dropout():
+    sample_times = []
+    sample = SimpleNamespace(
+        position=(1.0, 2.0, -0.2),
+        velocity=(3.0, 4.0, 0.5),
+        acceleration=(0.1, 0.2, 0.3),
+    )
+    plan = SimpleNamespace(
+        duration=1.0,
+        planner_type='MINCO_T3',
+        target_curve_weight=0.7,
+        closing_speed=0.6,
+        maximum_horizontal_speed=6.0,
+        maximum_vertical_speed=1.0,
+        maximum_horizontal_acceleration=3.0,
+        maximum_vertical_acceleration=1.5,
+        target_position=(5.0, 6.0, -0.1),
+        sample=lambda time: sample_times.append(time) or sample,
+    )
+    controller = SimpleNamespace(
+        sim_x=0.0,
+        sim_y=0.0,
+        sim_z=-0.7,
+        terminal_radius=3.0,
+        terminal_control_lookahead=0.15,
+        retained_terminal_plan=plan,
+        retained_terminal_plan_time_ns=1_000_000_000,
+        terminal_descent_committed=False,
+        terminal_trajectory_plan=lambda x, y, z: None,
+        continuous_intercept_solution=lambda x, y, z: (
+            x,
+            y,
+            z,
+            1.0,
+        ),
+    )
+    controller.retained_terminal_trajectory_sample = lambda: (
+        TrajectoryImpactSim.retained_terminal_trajectory_sample(
+            controller,
+            timestamp_ns=1_100_000_000,
+        )
+    )
+
+    command = TrajectoryImpactSim.plan_velocity(
+        controller,
+        1.0,
+        0.0,
+        0.0,
+    )
+
+    assert sample_times == pytest.approx([0.25])
+    assert command[:7] == pytest.approx((
+        3.0,
+        4.0,
+        0.5,
+        5.0,
+        6.0,
+        -0.1,
+        0.9,
+    ))
+    assert command[7] is True
+    assert controller.trajectory_planner_type == 'MINCO_T3_HOLD'
+    assert controller.terminal_descent_committed is True
 
 
 def test_pursuit_keeps_forward_closure_inside_terminal_planning_radius():
