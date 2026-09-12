@@ -78,10 +78,10 @@ moving_target:
     initial_y: 0.0
     initial_z: 0.0
     velocity_x: 0.0
-    velocity_y: 5.0
+    velocity_y: 4.0
     velocity_z: 0.0
     trajectory_type: figure_eight
-    horizontal_speed: 5.0
+    horizontal_speed: 4.0
     horizontal_acceleration_limit: 1.0
     maximum_turn_rate: 0.65
     maximum_lateral_acceleration: 3.2
