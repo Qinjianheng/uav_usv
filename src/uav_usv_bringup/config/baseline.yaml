@@ -11,6 +11,13 @@ trajectory_impact_sim:
     enable_maneuver_prediction: true
     turn_rate_filter_alpha: 0.25
     max_target_turn_rate: 0.7
+    # Bounded CTRA estimates changing curvature and speed without assuming a
+    # cooperative route or using future ground truth.
+    turn_acceleration_filter_alpha: 0.2
+    max_target_turn_acceleration: 1.5
+    speed_acceleration_filter_alpha: 0.2
+    max_target_longitudinal_acceleration: 2.0
+    maneuver_acceleration_decay_time: 1.0
     maneuver_prediction_horizon: 2.0
     minimum_target_speed: 0.2
     intercept_guidance_horizon_min: 1.0
@@ -31,16 +38,26 @@ trajectory_impact_sim:
     minco_piece_count: 3
     minco_target_curve_weight: 0.7
     terminal_control_lookahead: 0.15
+    # MINCO search costs tens of milliseconds; replan at 10 Hz and track the
+    # retained trajectory between searches instead of overrunning 20 Hz.
+    terminal_replan_period: 0.1
+    # Never follow a stale manoeuvring-target trajectory for a full horizon.
+    terminal_plan_max_hold_time: 0.2
+    terminal_plan_target_error_limit: 0.5
+    # Convert MINCO velocity feed-forward into closed-loop trajectory tracking.
+    terminal_trajectory_position_gain: 1.2
+    terminal_trajectory_vertical_gain: 1.2
     terminal_contact_clearance: 0.05
     # Release terminal descent only after the target opens beyond this range.
     terminal_descent_release_distance: 4.0
     # Geometric flight-path angle relative to the moving capture point.
     terminal_dive_angle: 0.78539816339
-    # Preferred terminal clearance above the sea surface.  Zero disables it.
-    # An enabled value is relaxed at runtime when needed to preserve an
-    # intersection with the target's capture sphere.  Keep it disabled for
-    # the first closing-speed-only validation batch.
-    terminal_minimum_clearance: 0.0
+    # Preferred terminal clearance above the sea surface.  It is relaxed only
+    # when needed to preserve an intersection with the capture sphere.
+    terminal_minimum_clearance: 0.1
+    # Include command/vehicle response distance in the all-path sea barrier.
+    terminal_safety_response_time: 0.15
+    terminal_safety_margin: 0.02
     front_camera_max_depression_angle: 0.85
     terminal_max_acceleration: 3.0
     terminal_max_vertical_acceleration: 3.0

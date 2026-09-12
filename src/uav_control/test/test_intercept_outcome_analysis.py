@@ -1,5 +1,6 @@
 import pytest
 
+from uav_control.analysis.intercept_outcome_analysis import percentile
 from uav_control.analysis.intercept_outcome_analysis import radial_components
 
 
@@ -33,3 +34,8 @@ def test_radial_components_reports_negative_opening_rate():
 
     assert closing == pytest.approx(-2.0)
     assert perpendicular == pytest.approx(2.0)
+
+
+def test_percentile_uses_nearest_rank():
+    assert percentile([0.05, 0.10, 0.20, 0.07], 0.95) == pytest.approx(0.20)
+    assert percentile([], 0.95) is None

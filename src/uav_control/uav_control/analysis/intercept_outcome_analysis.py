@@ -50,6 +50,18 @@ def finite_column(rows, field):
     return values
 
 
+def percentile(values, fraction):
+    """Return a nearest-rank percentile, or None for an empty sequence."""
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = min(
+        max(int(math.ceil(float(fraction) * len(ordered))) - 1, 0),
+        len(ordered) - 1,
+    )
+    return ordered[index]
+
+
 def load_intercept_rows(path):
     """Return the intercept-phase rows of one experiment CSV."""
     with Path(path).open(newline='', encoding='utf-8') as stream:
@@ -181,6 +193,15 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
         for row in rows
         if radial_components(row) is not None
     ]
+    control_steps = finite_column(rows, 'control_dt')
+    retained_plan_ages = finite_column(rows, 'retained_plan_age')
+    planner_counts = planner_histogram(rows)
+    planner_total = sum(planner_counts.values())
+    held_samples = sum(
+        count
+        for planner, count in planner_counts.items()
+        if planner.endswith('_HOLD')
+    )
 
     return {
         'row_count': len(rows),
@@ -215,7 +236,19 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
             else None
         ),
         'minco_share': minco_share(rows),
-        'planner_histogram': planner_histogram(rows),
+        'planner_histogram': planner_counts,
+        'held_plan_share': (
+            held_samples / planner_total if planner_total else None
+        ),
+        'mean_control_dt': (
+            sum(control_steps) / len(control_steps)
+            if control_steps
+            else None
+        ),
+        'p95_control_dt': percentile(control_steps, 0.95),
+        'maximum_retained_plan_age': (
+            max(retained_plan_ages) if retained_plan_ages else None
+        ),
     }
 
 
@@ -262,7 +295,7 @@ def print_directory_summary(results):
     """Print the batch table and aggregate counts."""
     print(f'{"file":<48}{"outcome":>9}{"reason":>20}'
           f'{"hd_min":>8}{"|ve|":>7}{"allow":>7}{"t_min":>7}'
-          f'{"minco":>7}{"alt_err":>8}')
+          f'{"minco":>7}{"hold":>7}{"dt95":>7}{"alt_err":>8}')
     for metrics in results:
         ending = f"{metrics['outcome']}/{metrics['failure_reason']}"
         if ending == '/':
@@ -276,6 +309,8 @@ def print_directory_summary(results):
             f"{format_optional(metrics['closest_horizontal_allowance']):>7}"
             f"{format_optional(metrics['closest_time'], 1):>7}"
             f"{format_optional(metrics['minco_share'], 2):>7}"
+            f"{format_optional(metrics['held_plan_share'], 2):>7}"
+            f"{format_optional(metrics['p95_control_dt'], 3):>7}"
             f"{format_optional(metrics['maximum_altitude_tracking_error']):>8}"
         )
     print()
@@ -293,6 +328,8 @@ def print_directory_summary(results):
     print('               sphere given |ve| (0 means capture was')
     print('               geometrically impossible at that instant)')
     print('       minco = fraction of intercept rows planned by MINCO')
+    print('       hold = fraction executing a retained trajectory')
+    print('       dt95 = 95th-percentile measured control period')
     print('       alt_err = max |guidance_altitude_reference - uav_z|')
 
 

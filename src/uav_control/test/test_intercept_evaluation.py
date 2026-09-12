@@ -588,6 +588,124 @@ def test_retained_terminal_plan_advances_and_expires_with_clock():
     assert controller.retained_terminal_plan_time_ns is None
 
 
+def test_retained_terminal_plan_obeys_short_hold_limit():
+    controller = SimpleNamespace(
+        terminal_control_lookahead=0.15,
+        terminal_plan_max_hold_time=0.2,
+        retained_terminal_plan=SimpleNamespace(duration=2.0),
+        retained_terminal_plan_time_ns=1_000_000_000,
+    )
+
+    retained = TrajectoryImpactSim.retained_terminal_trajectory_sample(
+        controller,
+        timestamp_ns=1_200_000_000,
+    )
+    expired = TrajectoryImpactSim.retained_terminal_trajectory_sample(
+        controller,
+        timestamp_ns=1_201_000_000,
+    )
+
+    assert retained is not None
+    assert expired is None
+
+
+def test_retained_plan_is_rejected_after_target_endpoint_moves():
+    controller = SimpleNamespace(
+        terminal_plan_target_error_limit=0.5,
+        target_planning_state=lambda x, y, z, horizon: (
+            ((x + horizon, y + 1.0, z), (1.0, 0.0, 0.0), (0.0,) * 3)
+        ),
+    )
+    plan = SimpleNamespace(target_position=(2.0, 0.0, -0.1))
+
+    matches = TrajectoryImpactSim.retained_plan_matches_target(
+        controller,
+        plan,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+    )
+
+    assert matches is False
+
+
+def test_terminal_trajectory_velocity_closes_position_tracking_error():
+    controller = SimpleNamespace(
+        sim_x=0.0,
+        sim_y=0.0,
+        sim_z=-1.0,
+        sim_vz=0.0,
+        dt=0.05,
+        terminal_trajectory_position_gain=1.0,
+        terminal_trajectory_vertical_gain=1.0,
+        terminal_contact_clearance=0.05,
+        terminal_minimum_clearance=0.1,
+        terminal_safety_margin=0.02,
+        terminal_safety_response_time=0.15,
+        terminal_max_vertical_acceleration=3.0,
+        impact_radius=0.25,
+        sea_surface_z=0.0,
+        max_vertical_speed=4.0,
+        clamp_command_speed=lambda vx, vy: (vx, vy),
+    )
+    sample = SimpleNamespace(
+        position=(1.0, -1.0, -0.8),
+        velocity=(2.0, 1.0, 0.5),
+    )
+
+    desired = TrajectoryImpactSim.terminal_trajectory_velocity(
+        controller,
+        sample,
+        target_z=0.0,
+    )
+
+    assert desired == pytest.approx((3.0, 0.0, 0.7))
+
+
+def test_terminal_safety_barrier_accounts_for_descent_response_distance():
+    controller = SimpleNamespace(
+        sim_z=-0.3,
+        sim_vz=2.0,
+        dt=0.05,
+        terminal_contact_clearance=0.05,
+        terminal_minimum_clearance=0.1,
+        terminal_safety_margin=0.02,
+        terminal_safety_response_time=0.15,
+        terminal_max_vertical_acceleration=3.0,
+        impact_radius=0.25,
+        sea_surface_z=0.0,
+    )
+
+    desired_vz = TrajectoryImpactSim.terminal_safe_vertical_velocity(
+        controller,
+        3.0,
+        target_z=0.15,
+    )
+
+    assert desired_vz <= 0.0
+
+
+def test_control_timing_uses_measured_callback_interval():
+    controller = SimpleNamespace(
+        dt=0.05,
+        control_dt=0.05,
+        last_control_callback_time_ns=None,
+    )
+
+    first = TrajectoryImpactSim.update_control_timing(
+        controller,
+        1_000_000_000,
+    )
+    delayed = TrajectoryImpactSim.update_control_timing(
+        controller,
+        1_120_000_000,
+    )
+
+    assert first == pytest.approx(0.05)
+    assert delayed == pytest.approx(0.12)
+
+
 def test_terminal_pursuit_keeps_committed_capture_descent():
     controller = make_front_view_altitude_controller()
     controller.terminal_descent_committed = True

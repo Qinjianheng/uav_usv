@@ -1,17 +1,18 @@
-"""Short-horizon target prediction for curved surface-vessel motion."""
+"""Bounded short-horizon prediction for an independently manoeuvring target."""
 
 import math
 
 
 class ManeuveringTargetPredictor:
     """
-    Predict target motion with an adaptively estimated coordinated turn.
+    Predict target motion with bounded turn and speed acceleration.
 
-    The predictor estimates horizontal turn rate from consecutive velocity
-    observations.  It uses a constant-turn-rate-and-speed (CTRV) model for a
-    configurable short horizon, then continues along the last predicted
-    tangent.  Until enough valid observations are available, it falls back to
-    constant-velocity prediction.
+    A constant-turn-rate model is systematically late when an evasive target
+    changes curvature.  This model estimates turn acceleration and
+    longitudinal acceleration online, integrates them with exponential decay,
+    and clamps every derivative to a physical envelope.  It requires no known
+    route or target cooperation.  Until enough velocity changes have been
+    observed it falls back to constant-velocity prediction.
     """
 
     def __init__(
@@ -21,6 +22,12 @@ class ManeuveringTargetPredictor:
         maneuver_horizon=2.0,
         minimum_speed=0.2,
         minimum_updates=3,
+        turn_acceleration_filter_alpha=0.2,
+        max_turn_acceleration=1.5,
+        speed_acceleration_filter_alpha=0.2,
+        max_longitudinal_acceleration=2.0,
+        acceleration_decay_time=1.0,
+        integration_step=0.02,
     ):
         """Configure turn-rate filtering and the curved forecast horizon."""
         self.turn_rate_filter_alpha = self._bounded_value(
@@ -42,12 +49,43 @@ class ManeuveringTargetPredictor:
             'minimum speed',
         )
         self.minimum_updates = max(int(minimum_updates), 1)
+        self.turn_acceleration_filter_alpha = self._bounded_value(
+            turn_acceleration_filter_alpha,
+            'turn-acceleration filter alpha',
+            0.0,
+            1.0,
+        )
+        self.max_turn_acceleration = self._positive_value(
+            max_turn_acceleration,
+            'maximum turn acceleration',
+        )
+        self.speed_acceleration_filter_alpha = self._bounded_value(
+            speed_acceleration_filter_alpha,
+            'speed-acceleration filter alpha',
+            0.0,
+            1.0,
+        )
+        self.max_longitudinal_acceleration = self._positive_value(
+            max_longitudinal_acceleration,
+            'maximum longitudinal acceleration',
+        )
+        self.acceleration_decay_time = self._positive_value(
+            acceleration_decay_time,
+            'acceleration decay time',
+        )
+        self.integration_step = self._positive_value(
+            integration_step,
+            'integration step',
+        )
 
         self.turn_rate = 0.0
+        self.turn_acceleration = 0.0
+        self.speed_acceleration = 0.0
         self.valid_turn_updates = 0
         self.previous_vx = None
         self.previous_vy = None
         self.previous_timestamp = None
+        self.previous_raw_turn_rate = None
 
     @staticmethod
     def _positive_value(value, name):
@@ -112,6 +150,37 @@ class ManeuveringTargetPredictor:
                     min(raw_turn_rate, self.max_turn_rate),
                     -self.max_turn_rate,
                 )
+                if self.previous_raw_turn_rate is not None:
+                    raw_turn_acceleration = (
+                        raw_turn_rate - self.previous_raw_turn_rate
+                    ) / sample_dt
+                    raw_turn_acceleration = max(
+                        min(
+                            raw_turn_acceleration,
+                            self.max_turn_acceleration,
+                        ),
+                        -self.max_turn_acceleration,
+                    )
+                    alpha = self.turn_acceleration_filter_alpha
+                    self.turn_acceleration = (
+                        alpha * raw_turn_acceleration
+                        + (1.0 - alpha) * self.turn_acceleration
+                    )
+                raw_speed_acceleration = (
+                    current_speed - previous_speed
+                ) / sample_dt
+                raw_speed_acceleration = max(
+                    min(
+                        raw_speed_acceleration,
+                        self.max_longitudinal_acceleration,
+                    ),
+                    -self.max_longitudinal_acceleration,
+                )
+                speed_alpha = self.speed_acceleration_filter_alpha
+                self.speed_acceleration = (
+                    speed_alpha * raw_speed_acceleration
+                    + (1.0 - speed_alpha) * self.speed_acceleration
+                )
                 if self.valid_turn_updates == 0:
                     self.turn_rate = raw_turn_rate
                 else:
@@ -121,6 +190,7 @@ class ManeuveringTargetPredictor:
                         + (1.0 - alpha) * self.turn_rate
                     )
                 self.valid_turn_updates += 1
+                self.previous_raw_turn_rate = raw_turn_rate
                 updated = True
 
         self.previous_vx = vx
@@ -175,19 +245,73 @@ class ManeuveringTargetPredictor:
 
         heading = math.atan2(vy, vx)
         curved_time = min(horizon, self.maneuver_horizon)
-        (
-            predicted_x,
-            predicted_y,
-            predicted_vx,
-            predicted_vy,
-        ) = self._constant_turn_state(
-            x,
-            y,
-            speed,
-            heading,
-            self.turn_rate,
-            curved_time,
-        )
+        if (
+            abs(self.turn_acceleration) <= 1e-12
+            and abs(self.speed_acceleration) <= 1e-12
+        ):
+            (
+                predicted_x,
+                predicted_y,
+                predicted_vx,
+                predicted_vy,
+            ) = self._constant_turn_state(
+                x,
+                y,
+                speed,
+                heading,
+                self.turn_rate,
+                curved_time,
+            )
+            straight_time = horizon - curved_time
+            return (
+                predicted_x + predicted_vx * straight_time,
+                predicted_y + predicted_vy * straight_time,
+                z + vz * horizon,
+                predicted_vx,
+                predicted_vy,
+                vz,
+            )
+        predicted_x = x
+        predicted_y = y
+        predicted_speed = speed
+        predicted_turn_rate = self.turn_rate
+        elapsed = 0.0
+        while elapsed < curved_time - 1e-12:
+            step = min(self.integration_step, curved_time - elapsed)
+            decay = math.exp(
+                -(elapsed + 0.5 * step) / self.acceleration_decay_time
+            )
+            turn_acceleration = self.turn_acceleration * decay
+            longitudinal_acceleration = self.speed_acceleration * decay
+            next_turn_rate = max(
+                min(
+                    predicted_turn_rate + turn_acceleration * step,
+                    self.max_turn_rate,
+                ),
+                -self.max_turn_rate,
+            )
+            next_speed = max(
+                predicted_speed + longitudinal_acceleration * step,
+                0.0,
+            )
+            midpoint_turn_rate = 0.5 * (
+                predicted_turn_rate + next_turn_rate
+            )
+            midpoint_speed = 0.5 * (predicted_speed + next_speed)
+            midpoint_heading = heading + 0.5 * midpoint_turn_rate * step
+            predicted_x += midpoint_speed * math.cos(
+                midpoint_heading
+            ) * step
+            predicted_y += midpoint_speed * math.sin(
+                midpoint_heading
+            ) * step
+            heading += midpoint_turn_rate * step
+            predicted_turn_rate = next_turn_rate
+            predicted_speed = next_speed
+            elapsed += step
+
+        predicted_vx = predicted_speed * math.cos(heading)
+        predicted_vy = predicted_speed * math.sin(heading)
 
         straight_time = horizon - curved_time
         predicted_x += predicted_vx * straight_time
@@ -200,4 +324,32 @@ class ManeuveringTargetPredictor:
             predicted_vx,
             predicted_vy,
             vz,
+        )
+
+    def acceleration(self, predicted_vx, predicted_vy, horizon):
+        """Return bounded horizontal acceleration at a prediction horizon."""
+        horizon = max(min(float(horizon), self.maneuver_horizon), 0.0)
+        decay = math.exp(-horizon / self.acceleration_decay_time)
+        integrated_turn_change = (
+            self.turn_acceleration
+            * self.acceleration_decay_time
+            * (1.0 - decay)
+        )
+        turn_rate = max(
+            min(
+                self.turn_rate + integrated_turn_change,
+                self.max_turn_rate,
+            ),
+            -self.max_turn_rate,
+        )
+        speed = math.hypot(predicted_vx, predicted_vy)
+        if speed < self.minimum_speed:
+            return 0.0, 0.0, 0.0
+        direction_x = predicted_vx / speed
+        direction_y = predicted_vy / speed
+        longitudinal = self.speed_acceleration * decay
+        return (
+            longitudinal * direction_x - turn_rate * predicted_vy,
+            longitudinal * direction_y + turn_rate * predicted_vx,
+            0.0,
         )

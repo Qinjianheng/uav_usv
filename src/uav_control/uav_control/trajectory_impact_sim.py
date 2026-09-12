@@ -91,6 +91,10 @@ class TrajectoryImpactSim(Node):
         *PREDICTION_CSV_FIELDS,
         'prediction_model',
         'estimated_turn_rate',
+        'estimated_turn_acceleration',
+        'estimated_longitudinal_acceleration',
+        'control_dt',
+        'retained_plan_age',
         'distance',
         'horizontal_distance',
         'vertical_error',
@@ -156,6 +160,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('enable_maneuver_prediction', True)
         self.declare_parameter('turn_rate_filter_alpha', 0.25)
         self.declare_parameter('max_target_turn_rate', 0.7)
+        self.declare_parameter('turn_acceleration_filter_alpha', 0.2)
+        self.declare_parameter('max_target_turn_acceleration', 1.5)
+        self.declare_parameter('speed_acceleration_filter_alpha', 0.2)
+        self.declare_parameter('max_target_longitudinal_acceleration', 2.0)
+        self.declare_parameter('maneuver_acceleration_decay_time', 1.0)
         self.declare_parameter('maneuver_prediction_horizon', 2.0)
         self.declare_parameter('minimum_target_speed', 0.2)
         self.declare_parameter('intercept_guidance_horizon_min', 1.0)
@@ -184,6 +193,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('terminal_closing_speed_step', 0.3)
         self.declare_parameter('terminal_plan_duration_step', 0.1)
         self.declare_parameter('terminal_control_lookahead', 0.15)
+        self.declare_parameter('terminal_replan_period', 0.1)
+        self.declare_parameter('terminal_plan_max_hold_time', 0.2)
+        self.declare_parameter('terminal_plan_target_error_limit', 0.5)
+        self.declare_parameter('terminal_trajectory_position_gain', 1.2)
+        self.declare_parameter('terminal_trajectory_vertical_gain', 1.2)
         self.declare_parameter('enable_minco_planner', True)
         self.declare_parameter('minco_piece_count', 3)
         self.declare_parameter('minco_target_curve_weight', 0.7)
@@ -191,7 +205,9 @@ class TrajectoryImpactSim(Node):
         # Preferred sea-surface clearance for terminal pursuit.  Zero
         # disables it.  The runtime ceiling is relaxed when necessary so it
         # still intersects the target's capture sphere.
-        self.declare_parameter('terminal_minimum_clearance', 0.0)
+        self.declare_parameter('terminal_minimum_clearance', 0.1)
+        self.declare_parameter('terminal_safety_response_time', 0.15)
+        self.declare_parameter('terminal_safety_margin', 0.02)
         self.declare_parameter('terminal_descent_release_distance', 4.0)
         self.declare_parameter(
             'terminal_dive_angle',
@@ -264,6 +280,8 @@ class TrajectoryImpactSim(Node):
         ).value
 
         self.dt = 1.0 / max(float(control_rate_hz), 1.0)
+        self.control_dt = self.dt
+        self.last_control_callback_time_ns = None
         self.offboard_prestream_cycles = max(
             round(
                 float(
@@ -330,6 +348,52 @@ class TrajectoryImpactSim(Node):
                 self.get_parameter('max_target_turn_rate').value
             ),
             0.01,
+        )
+        self.turn_acceleration_filter_alpha = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'turn_acceleration_filter_alpha'
+                    ).value
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        self.max_target_turn_acceleration = max(
+            float(
+                self.get_parameter(
+                    'max_target_turn_acceleration'
+                ).value
+            ),
+            0.01,
+        )
+        self.speed_acceleration_filter_alpha = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'speed_acceleration_filter_alpha'
+                    ).value
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        self.max_target_longitudinal_acceleration = max(
+            float(
+                self.get_parameter(
+                    'max_target_longitudinal_acceleration'
+                ).value
+            ),
+            0.01,
+        )
+        self.maneuver_acceleration_decay_time = max(
+            float(
+                self.get_parameter(
+                    'maneuver_acceleration_decay_time'
+                ).value
+            ),
+            self.dt,
         )
         self.maneuver_prediction_horizon = max(
             float(
@@ -432,6 +496,44 @@ class TrajectoryImpactSim(Node):
             ),
             self.dt,
         )
+        self.terminal_replan_period = max(
+            float(
+                self.get_parameter('terminal_replan_period').value
+            ),
+            self.dt,
+        )
+        self.terminal_plan_max_hold_time = max(
+            float(
+                self.get_parameter(
+                    'terminal_plan_max_hold_time'
+                ).value
+            ),
+            0.0,
+        )
+        self.terminal_plan_target_error_limit = max(
+            float(
+                self.get_parameter(
+                    'terminal_plan_target_error_limit'
+                ).value
+            ),
+            0.01,
+        )
+        self.terminal_trajectory_position_gain = max(
+            float(
+                self.get_parameter(
+                    'terminal_trajectory_position_gain'
+                ).value
+            ),
+            0.0,
+        )
+        self.terminal_trajectory_vertical_gain = max(
+            float(
+                self.get_parameter(
+                    'terminal_trajectory_vertical_gain'
+                ).value
+            ),
+            0.0,
+        )
         self.enable_minco_planner = bool(
             self.get_parameter('enable_minco_planner').value
         )
@@ -468,6 +570,10 @@ class TrajectoryImpactSim(Node):
             float(self.get_parameter('impact_radius').value),
             0.01
         )
+        self.terminal_plan_target_error_limit = max(
+            self.terminal_plan_target_error_limit,
+            self.impact_radius,
+        )
         self.terminal_contact_clearance = min(
             max(
                 float(
@@ -487,6 +593,23 @@ class TrajectoryImpactSim(Node):
                 self.terminal_contact_clearance,
                 self.terminal_radius,
             )
+        )
+        self.terminal_safety_response_time = max(
+            float(
+                self.get_parameter(
+                    'terminal_safety_response_time'
+                ).value
+            ),
+            0.0,
+        )
+        self.terminal_safety_margin = min(
+            max(
+                float(
+                    self.get_parameter('terminal_safety_margin').value
+                ),
+                0.0,
+            ),
+            0.5 * self.impact_radius,
         )
         self.terminal_descent_release_distance = max(
             float(
@@ -757,6 +880,19 @@ class TrajectoryImpactSim(Node):
             max_turn_rate=self.max_target_turn_rate,
             maneuver_horizon=self.maneuver_prediction_horizon,
             minimum_speed=self.minimum_target_speed,
+            turn_acceleration_filter_alpha=(
+                self.turn_acceleration_filter_alpha
+            ),
+            max_turn_acceleration=self.max_target_turn_acceleration,
+            speed_acceleration_filter_alpha=(
+                self.speed_acceleration_filter_alpha
+            ),
+            max_longitudinal_acceleration=(
+                self.max_target_longitudinal_acceleration
+            ),
+            acceleration_decay_time=(
+                self.maneuver_acceleration_decay_time
+            ),
         )
         self.intercept_reference_filter = RollingReferenceFilter(
             position_gain=self.intercept_reference_position_gain,
@@ -800,6 +936,10 @@ class TrajectoryImpactSim(Node):
                 ),
                 minco_target_curve_weight=(
                     self.minco_target_curve_weight
+                ),
+                preferred_clearance=max(
+                    self.terminal_minimum_clearance,
+                    self.terminal_contact_clearance,
                 ),
             )
         )
@@ -1010,6 +1150,7 @@ class TrajectoryImpactSim(Node):
         self.trajectory_planner_type = 'PURSUIT'
         self.retained_terminal_plan = None
         self.retained_terminal_plan_time_ns = None
+        self.retained_terminal_plan_age = 0.0
         self.terminal_descent_committed = False
         self.planned_minco_target_curve_weight = 0.0
         self.guidance_altitude_reference = math.nan
@@ -1105,12 +1246,14 @@ class TrajectoryImpactSim(Node):
         )
         if self.enable_maneuver_prediction:
             self.get_logger().info(
-                'INTERCEPT PREDICTOR: adaptive CTRV | '
+                'INTERCEPT PREDICTOR: bounded adaptive CTRA | '
                 f'guidance horizon='
                 f'{self.intercept_guidance_horizon_min:.2f}-'
                 f'{self.intercept_guidance_horizon_max:.2f} s | '
                 f'curve horizon={self.maneuver_prediction_horizon:.2f} s | '
                 f'max turn rate={self.max_target_turn_rate:.2f} rad/s | '
+                f'max turn acceleration='
+                f'{self.max_target_turn_acceleration:.2f} rad/s^2 | '
                 f'reference acceleration limit='
                 f'{self.intercept_reference_max_acceleration:.2f} m/s^2'
             )
@@ -1597,6 +1740,7 @@ class TrajectoryImpactSim(Node):
         self.terminal_mode_active = False
         self.retained_terminal_plan = None
         self.retained_terminal_plan_time_ns = None
+        self.retained_terminal_plan_age = 0.0
         self.terminal_descent_committed = False
         self.reset_trajectory_plan_diagnostics()
 
@@ -2076,17 +2220,23 @@ class TrajectoryImpactSim(Node):
             target_z,
             guidance_horizon,
         )
-        turn_rate = (
-            self.target_predictor.turn_rate
-            if self.target_predictor.maneuver_model_active
-            else 0.0
-        )
         self.intercept_reference_vx = predicted_state[3]
         self.intercept_reference_vy = predicted_state[4]
         self.intercept_reference_vz = predicted_state[5]
-        self.intercept_reference_ax = -turn_rate * predicted_state[4]
-        self.intercept_reference_ay = turn_rate * predicted_state[3]
-        self.intercept_reference_az = 0.0
+        if (
+            getattr(self, 'enable_maneuver_prediction', True)
+            and self.target_predictor.maneuver_model_active
+        ):
+            acceleration = self.target_predictor.acceleration(
+                predicted_state[3],
+                predicted_state[4],
+                guidance_horizon,
+            )
+        else:
+            acceleration = (0.0, 0.0, 0.0)
+        self.intercept_reference_ax = acceleration[0]
+        self.intercept_reference_ay = acceleration[1]
+        self.intercept_reference_az = acceleration[2]
 
         return (
             predicted_state[0],
@@ -2122,7 +2272,11 @@ class TrajectoryImpactSim(Node):
                 self.intercept_reference_vy,
                 self.intercept_reference_vz,
             ),
-            self.dt,
+            (
+                self.control_dt
+                if self.enable_gazebo_control
+                else self.dt
+            ),
         )
         self.intercept_reference_vx = reference.vx
         self.intercept_reference_vy = reference.vy
@@ -2211,23 +2365,22 @@ class TrajectoryImpactSim(Node):
             target_z,
             horizon,
         )
-        turn_rate = (
-            self.target_predictor.turn_rate
+        acceleration = (
+            self.target_predictor.acceleration(
+                state[3],
+                state[4],
+                horizon,
+            )
             if (
                 self.enable_maneuver_prediction
                 and self.target_predictor.maneuver_model_active
-                and horizon <= self.maneuver_prediction_horizon
             )
-            else 0.0
+            else (0.0, 0.0, 0.0)
         )
         return (
             state[:3],
             state[3:6],
-            (
-                -turn_rate * state[4],
-                turn_rate * state[3],
-                0.0,
-            ),
+            acceleration,
         )
 
     def reset_trajectory_plan_diagnostics(self):
@@ -2274,6 +2427,7 @@ class TrajectoryImpactSim(Node):
             timestamp_ns = self.get_clock().now().nanoseconds
         self.retained_terminal_plan = plan
         self.retained_terminal_plan_time_ns = int(timestamp_ns)
+        self.retained_terminal_plan_age = 0.0
 
     def retained_terminal_trajectory_sample(self, timestamp_ns=None):
         """Return a retained plan, shifted sample, and remaining time."""
@@ -2288,16 +2442,50 @@ class TrajectoryImpactSim(Node):
             (int(timestamp_ns) - self.retained_terminal_plan_time_ns) * 1e-9,
             0.0,
         )
+        maximum_hold_time = float(
+            getattr(self, 'terminal_plan_max_hold_time', math.inf)
+        )
+        if elapsed > maximum_hold_time + 1e-9:
+            self.retained_terminal_plan = None
+            self.retained_terminal_plan_time_ns = None
+            self.retained_terminal_plan_age = 0.0
+            return None
+        self.retained_terminal_plan_age = elapsed
         sample_time = elapsed + self.terminal_control_lookahead
         if sample_time > self.retained_terminal_plan.duration + 1e-9:
             self.retained_terminal_plan = None
             self.retained_terminal_plan_time_ns = None
+            self.retained_terminal_plan_age = 0.0
             return None
         remaining_time = max(
             self.retained_terminal_plan.duration - elapsed,
             0.0,
         )
         return self.retained_terminal_plan, sample_time, remaining_time
+
+    def retained_plan_matches_target(
+        self,
+        plan,
+        remaining_time,
+        target_x,
+        target_y,
+        target_z,
+    ):
+        """Reject a retained endpoint after the target prediction moves."""
+        target_state_at_time = getattr(self, 'target_planning_state', None)
+        if target_state_at_time is None:
+            return True
+        predicted_position = target_state_at_time(
+            target_x,
+            target_y,
+            target_z,
+            remaining_time,
+        )[0]
+        endpoint_error = math.hypot(
+            predicted_position[0] - plan.target_position[0],
+            predicted_position[1] - plan.target_position[1],
+        )
+        return endpoint_error <= self.terminal_plan_target_error_limit
 
     def pursuit_altitude_reference(self, horizontal_distance, target_z):
         """Follow the terminal dive line while retaining front visibility."""
@@ -2436,20 +2624,11 @@ class TrajectoryImpactSim(Node):
             + self.altitude_velocity_gain
             * (float(altitude_reference) - self.sim_z)
         )
-        altitude_limit = TrajectoryImpactSim.terminal_altitude_ceiling(
+        desired_vz = TrajectoryImpactSim.terminal_safe_vertical_velocity(
             self,
+            desired_vz,
             target_z,
         )
-        # Enforce the NED z ceiling on the next control step as well as on the
-        # reference.  Positive vz descends; negative vz climbs.
-        if math.isfinite(altitude_limit):
-            current_z = float(getattr(self, 'sim_z', altitude_limit))
-            step = float(getattr(self, 'dt', 0.0))
-            if step > 0.0:
-                maximum_vz = (altitude_limit - current_z) / step
-                desired_vz = min(desired_vz, maximum_vz)
-            elif current_z >= altitude_limit:
-                desired_vz = min(desired_vz, 0.0)
         return max(
             min(desired_vz, self.max_vertical_speed),
             -self.max_vertical_speed,
@@ -2497,6 +2676,110 @@ class TrajectoryImpactSim(Node):
             + (self.sim_vy - self.target_vy) * float(line_y)
         )
 
+    def terminal_safe_vertical_velocity(self, desired_vz, target_z):
+        """Apply a capture-compatible stopping barrier above the sea."""
+        requested_clearance = max(
+            float(getattr(self, 'terminal_minimum_clearance', 0.0)),
+            float(getattr(self, 'terminal_contact_clearance', 0.05)),
+        )
+        capture_top = float(target_z) - float(
+            getattr(self, 'impact_radius', 0.25)
+        )
+        altitude_ceiling = max(
+            capture_top,
+            float(getattr(self, 'sea_surface_z', 0.0)) - requested_clearance,
+        )
+        safety_margin = float(getattr(self, 'terminal_safety_margin', 0.0))
+        altitude_ceiling = max(capture_top, altitude_ceiling - safety_margin)
+        current_z = float(self.sim_z)
+        control_step = max(
+            float(
+                getattr(
+                    self,
+                    'control_dt',
+                    getattr(self, 'dt', 0.05),
+                )
+            ),
+            1e-3,
+        )
+        if current_z >= altitude_ceiling:
+            return min(
+                float(desired_vz),
+                (altitude_ceiling - current_z) / control_step,
+            )
+
+        response_time = float(
+            getattr(self, 'terminal_safety_response_time', 0.0)
+        )
+        current_descent_speed = max(float(getattr(self, 'sim_vz', 0.0)), 0.0)
+        available_distance = max(
+            altitude_ceiling
+            - current_z
+            - current_descent_speed * response_time,
+            0.0,
+        )
+        acceleration = max(
+            float(
+                getattr(
+                    self,
+                    'terminal_max_vertical_acceleration',
+                    getattr(self, 'max_vertical_acceleration', 3.0),
+                )
+            ),
+            0.1,
+        )
+        safe_descent_speed = (
+            -acceleration * response_time
+            + math.sqrt(
+                (acceleration * response_time) ** 2
+                + 2.0 * acceleration * available_distance
+            )
+        )
+        return min(float(desired_vz), safe_descent_speed)
+
+    def terminal_trajectory_velocity(self, sample, target_z):
+        """Track a planned sample with bounded position feedback."""
+        horizontal_gain = float(
+            getattr(self, 'terminal_trajectory_position_gain', 0.0)
+        )
+        vertical_gain = float(
+            getattr(self, 'terminal_trajectory_vertical_gain', 0.0)
+        )
+        desired_vx = (
+            sample.velocity[0]
+            + horizontal_gain
+            * (sample.position[0] - self.sim_x)
+        )
+        desired_vy = (
+            sample.velocity[1]
+            + horizontal_gain
+            * (sample.position[1] - self.sim_y)
+        )
+        clamp_command_speed = getattr(self, 'clamp_command_speed', None)
+        if clamp_command_speed is not None:
+            desired_vx, desired_vy = clamp_command_speed(
+                desired_vx,
+                desired_vy,
+            )
+        desired_vz = (
+            sample.velocity[2]
+            + vertical_gain
+            * (sample.position[2] - self.sim_z)
+        )
+        desired_vz = TrajectoryImpactSim.terminal_safe_vertical_velocity(
+            self,
+            desired_vz,
+            target_z,
+        )
+        desired_vz = max(
+            min(
+                desired_vz,
+                float(getattr(self, 'max_vertical_speed', math.inf)),
+            ),
+            -float(getattr(self, 'max_vertical_speed', math.inf)),
+        )
+        return desired_vx, desired_vy, desired_vz
+
     def plan_velocity(self, target_x, target_y, target_z):
         """Generate pursuit guidance or one step of a feasible trajectory."""
         dx = target_x - self.sim_x
@@ -2518,24 +2801,63 @@ class TrajectoryImpactSim(Node):
             )
         )
 
-        plan = self.terminal_trajectory_plan(
-            target_x,
-            target_y,
-            target_z,
+        retained = self.retained_terminal_trajectory_sample()
+        retained_plan = None
+        retained_sample_time = 0.0
+        retained_time_to_go = 0.0
+        if retained is not None:
+            (
+                retained_plan,
+                retained_sample_time,
+                retained_time_to_go,
+            ) = retained
+            if not TrajectoryImpactSim.retained_plan_matches_target(
+                self,
+                retained_plan,
+                retained_time_to_go,
+                target_x,
+                target_y,
+                target_z,
+            ):
+                self.retained_terminal_plan = None
+                self.retained_terminal_plan_time_ns = None
+                self.retained_terminal_plan_age = 0.0
+                retained_plan = None
+
+        replan_period = float(
+            getattr(self, 'terminal_replan_period', 0.0)
         )
+        replan_due = (
+            retained_plan is None
+            or self.retained_terminal_plan_age >= replan_period
+        )
+        plan = None
+        if replan_due:
+            plan = self.terminal_trajectory_plan(
+                target_x,
+                target_y,
+                target_z,
+            )
         plan_sample_time = self.terminal_control_lookahead
         plan_time_to_go = plan.duration if plan is not None else 0.0
         retained_plan_active = False
         if plan is not None:
             self.retain_terminal_trajectory_plan(plan)
-        else:
-            retained = self.retained_terminal_trajectory_sample()
-            if retained is not None:
-                plan, plan_sample_time, plan_time_to_go = retained
-                retained_plan_active = True
+        elif retained_plan is not None:
+            plan = retained_plan
+            plan_sample_time = retained_sample_time
+            plan_time_to_go = retained_time_to_go
+            retained_plan_active = True
         if plan is not None:
             sample = plan.sample(
                 min(plan_sample_time, plan.duration)
+            )
+            desired_vx, desired_vy, desired_vz = (
+                TrajectoryImpactSim.terminal_trajectory_velocity(
+                    self,
+                    sample,
+                    target_z,
+                )
             )
             if horizontal_distance <= self.terminal_radius:
                 self.terminal_descent_committed = True
@@ -2566,9 +2888,9 @@ class TrajectoryImpactSim(Node):
             self.intercept_reference_ay = sample.acceleration[1]
             self.intercept_reference_az = sample.acceleration[2]
             return (
-                sample.velocity[0],
-                sample.velocity[1],
-                sample.velocity[2],
+                desired_vx,
+                desired_vy,
+                desired_vz,
                 plan.target_position[0],
                 plan.target_position[1],
                 plan.target_position[2],
@@ -2661,7 +2983,12 @@ class TrajectoryImpactSim(Node):
         delta_vx = desired_vx - base_vx
         delta_vy = desired_vy - base_vy
         delta_speed = math.hypot(delta_vx, delta_vy)
-        max_delta_speed = acceleration_limit * self.dt
+        control_step = (
+            getattr(self, 'control_dt', self.dt)
+            if self.enable_gazebo_control
+            else self.dt
+        )
+        max_delta_speed = acceleration_limit * control_step
 
         if delta_speed > max_delta_speed:
             scale = max_delta_speed / delta_speed
@@ -2684,8 +3011,8 @@ class TrajectoryImpactSim(Node):
 
         self.command_vx = command_vx
         self.command_vy = command_vy
-        self.command_ax = (command_vx - base_vx) / self.dt
-        self.command_ay = (command_vy - base_vy) / self.dt
+        self.command_ax = (command_vx - base_vx) / control_step
+        self.command_ay = (command_vy - base_vy) / control_step
 
         return command_vx, command_vy
 
@@ -2724,7 +3051,12 @@ class TrajectoryImpactSim(Node):
         else:
             base_vz = self.sim_vz
 
-        max_delta = acceleration_limit * self.dt
+        control_step = (
+            getattr(self, 'control_dt', self.dt)
+            if self.enable_gazebo_control
+            else self.dt
+        )
+        max_delta = acceleration_limit * control_step
         delta_vz = max(
             min(desired_vz - base_vz, max_delta),
             -max_delta,
@@ -2735,7 +3067,7 @@ class TrajectoryImpactSim(Node):
         )
 
         self.command_vz = command_vz
-        self.command_az = (command_vz - base_vz) / self.dt
+        self.command_az = (command_vz - base_vz) / control_step
 
         return command_vz
 
@@ -2969,7 +3301,7 @@ class TrajectoryImpactSim(Node):
             else distance
         )
         prediction_model = (
-            'CTRV'
+            'BCTRA'
             if (
                 self.enable_maneuver_prediction
                 and self.target_predictor.maneuver_model_active
@@ -3126,6 +3458,10 @@ class TrajectoryImpactSim(Node):
             *prediction_values,
             prediction_model,
             f'{self.target_predictor.turn_rate:.6f}',
+            f'{self.target_predictor.turn_acceleration:.6f}',
+            f'{self.target_predictor.speed_acceleration:.6f}',
+            f'{self.control_dt:.6f}',
+            f'{self.retained_terminal_plan_age:.6f}',
             f'{distance:.6f}',
             f'{horizontal_distance:.6f}',
             f'{vertical_error:.6f}',
@@ -3310,7 +3646,26 @@ class TrajectoryImpactSim(Node):
                 f'CSV logging to: {self.csv_path}'
             )
 
+    def update_control_timing(self, timestamp_ns=None):
+        """Measure the real callback interval used by command limiters."""
+        if timestamp_ns is None:
+            timestamp_ns = self.get_clock().now().nanoseconds
+        timestamp_ns = int(timestamp_ns)
+        if self.last_control_callback_time_ns is None:
+            self.control_dt = self.dt
+        else:
+            measured_dt = (
+                timestamp_ns - self.last_control_callback_time_ns
+            ) * 1e-9
+            if 0.001 <= measured_dt <= 0.25:
+                self.control_dt = measured_dt
+            else:
+                self.control_dt = self.dt
+        self.last_control_callback_time_ns = timestamp_ns
+        return self.control_dt
+
     def gazebo_timer_callback(self):
+        self.update_control_timing()
         if self.completed:
             self.publish_offboard_mode()
             if self.hold_x is not None:
@@ -3680,7 +4035,7 @@ class TrajectoryImpactSim(Node):
             self.sim_x = hit_uav_x
             self.sim_y = hit_uav_y
             self.sim_z = hit_uav_z
-            self.sim_time += self.dt * event_fraction
+            self.sim_time += self.control_dt * event_fraction
             success = event_reason == 'CAPTURE_RADIUS_REACHED'
             if not success:
                 self.failure_detail = (
@@ -3749,7 +4104,7 @@ class TrajectoryImpactSim(Node):
             )
             return
 
-        self.sim_time += self.dt
+        self.sim_time += self.control_dt
         self.record_row(
             target_x,
             target_y,

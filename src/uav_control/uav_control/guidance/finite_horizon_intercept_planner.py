@@ -135,6 +135,7 @@ class FiniteHorizonInterceptPlanner:
         contact_clearance,
         minco_piece_count=1,
         minco_target_curve_weight=1.0,
+        preferred_clearance=None,
     ):
         """Configure the finite-horizon feasibility search."""
         self.minimum_duration = self._positive(
@@ -191,6 +192,12 @@ class FiniteHorizonInterceptPlanner:
             raise ValueError('sea surface z must be finite')
         if self.contact_clearance >= self.capture_radius:
             raise ValueError('contact clearance must be below capture radius')
+        if preferred_clearance is None:
+            preferred_clearance = self.contact_clearance
+        self.preferred_clearance = self._positive(
+            preferred_clearance,
+            'preferred clearance',
+        )
         self.minco_piece_count = int(minco_piece_count)
         if self.minco_piece_count < 1 or self.minco_piece_count > 6:
             raise ValueError('MINCO piece count must be between one and six')
@@ -304,25 +311,32 @@ class FiniteHorizonInterceptPlanner:
         intermediate_target_positions=(),
         target_curve_weight=0.0,
     ):
+        capture_compatible_clearance = max(
+            self.sea_surface_z
+            - (target_position[2] - self.capture_radius),
+            self.contact_clearance,
+        )
+        effective_clearance = min(
+            self.preferred_clearance,
+            capture_compatible_clearance,
+        )
         contact_position = list(target_position)
         contact_position[2] = min(
             contact_position[2],
-            self.sea_surface_z - self.contact_clearance,
+            self.sea_surface_z - effective_clearance,
         )
         if abs(contact_position[2] - target_position[2]) > self.capture_radius:
             return None
         contact_position = tuple(contact_position)
-        direction = self._direction(
-            initial_position,
-            contact_position,
-            target_velocity,
+        horizontal_direction = self._direction(
+            initial_position[:2],
+            contact_position[:2],
+            target_velocity[:2],
         )
-        terminal_velocity = tuple(
-            target_component + closing_speed * direction_component
-            for target_component, direction_component in zip(
-                target_velocity,
-                direction,
-            )
+        terminal_velocity = (
+            target_velocity[0] + closing_speed * horizontal_direction[0],
+            target_velocity[1] + closing_speed * horizontal_direction[1],
+            min(target_velocity[2], 0.0),
         )
         axes = tuple(
             QuinticAxis.from_boundary(
@@ -440,7 +454,8 @@ class FiniteHorizonInterceptPlanner:
                 > self.maximum_horizontal_acceleration + 1e-6
                 or vertical_acceleration
                 > self.maximum_vertical_acceleration + 1e-6
-                or sample.position[2] >= self.sea_surface_z
+                or sample.position[2]
+                > self.sea_surface_z - effective_clearance + 1e-9
             ):
                 return None
             effort_cost += (
@@ -504,8 +519,16 @@ class FiniteHorizonInterceptPlanner:
             previous_acceleration,
             'previous acceleration',
         )
+        target_state_cache = {}
+
+        def cached_target_state(time):
+            key = round(float(time), 9)
+            if key not in target_state_cache:
+                target_state_cache[key] = target_state_at_time(float(time))
+            return target_state_cache[key]
+
         for duration in self._duration_candidates():
-            target_state = target_state_at_time(duration)
+            target_state = cached_target_state(duration)
             if len(target_state) != 3:
                 raise ValueError(
                     'target state must contain position, velocity, '
@@ -520,7 +543,7 @@ class FiniteHorizonInterceptPlanner:
             target_start_position = None
             intermediate_target_positions = ()
             if self.minco_piece_count > 1:
-                start_state = target_state_at_time(0.0)
+                start_state = cached_target_state(0.0)
                 if len(start_state) != 3:
                     raise ValueError(
                         'target state must contain position, velocity, '
@@ -532,7 +555,7 @@ class FiniteHorizonInterceptPlanner:
                 )
                 intermediate_target_positions = tuple(
                     self._vector(
-                        target_state_at_time(
+                        cached_target_state(
                             duration * index / self.minco_piece_count
                         )[0],
                         'target guide position',

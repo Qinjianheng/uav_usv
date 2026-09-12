@@ -144,6 +144,33 @@ def test_contact_point_stays_above_sea_and_inside_capture_radius():
     )
 
 
+def test_preferred_clearance_and_terminal_velocity_are_sea_safe():
+    planner = make_planner(
+        preferred_clearance=0.1,
+        maximum_vertical_speed=4.0,
+        maximum_vertical_acceleration=4.0,
+    )
+
+    def descending_surface_target(_horizon):
+        return (
+            (2.0, 0.0, 0.15),
+            (0.0, 0.0, 0.1),
+            (0.0, 0.0, 0.0),
+        )
+
+    plan = planner.plan(
+        (0.0, 0.0, -1.0),
+        (2.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        descending_surface_target,
+    )
+
+    assert plan is not None
+    assert plan.target_position[2] == pytest.approx(-0.1)
+    terminal = plan.sample(plan.duration)
+    assert terminal.velocity[2] <= 0.0
+
+
 def test_minco_planner_tracks_curved_target_prediction_with_three_pieces():
     planner = make_planner(
         minco_piece_count=3,

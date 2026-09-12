@@ -129,6 +129,71 @@ def test_turn_prediction_reduces_figure_eight_one_second_error():
     assert mean_maneuver_error < 0.8 * mean_cv_error
 
 
+def test_turn_acceleration_reduces_figure_eight_two_second_error():
+    trajectory = FigureEightTrajectory(
+        initial_x=8.0,
+        initial_y=0.0,
+        x_amplitude=40.0,
+        y_amplitude=20.0,
+        speed=4.0,
+    )
+    predictor = ManeuveringTargetPredictor()
+    sample_dt = 0.05
+    horizon = 2.0
+    horizon_steps = round(horizon / sample_dt)
+    states = [trajectory.state()]
+    states.extend(trajectory.advance(sample_dt) for _ in range(1800))
+    adaptive_errors = []
+    constant_turn_errors = []
+
+    for index, state in enumerate(states[:-horizon_steps]):
+        x, y, vx, vy = state
+        predictor.update_velocity(vx, vy, index * sample_dt)
+        if index < 40:
+            continue
+        future_x, future_y = states[index + horizon_steps][:2]
+        adaptive = predictor.predict(x, y, 0.0, vx, vy, 0.0, horizon)
+        heading = math.atan2(vy, vx)
+        constant_turn = predictor._constant_turn_state(
+            x,
+            y,
+            math.hypot(vx, vy),
+            heading,
+            predictor.turn_rate,
+            horizon,
+        )
+        adaptive_errors.append(math.hypot(
+            adaptive[0] - future_x,
+            adaptive[1] - future_y,
+        ))
+        constant_turn_errors.append(math.hypot(
+            constant_turn[0] - future_x,
+            constant_turn[1] - future_y,
+        ))
+
+    assert sum(adaptive_errors) / len(adaptive_errors) < 0.7 * (
+        sum(constant_turn_errors) / len(constant_turn_errors)
+    )
+
+
+def test_speed_acceleration_moves_prediction_beyond_constant_velocity():
+    predictor = ManeuveringTargetPredictor(
+        speed_acceleration_filter_alpha=0.5,
+    )
+    sample_dt = 0.05
+    acceleration = 0.8
+    x = 0.0
+    for index in range(20):
+        velocity = 2.0 + acceleration * index * sample_dt
+        predictor.update_velocity(velocity, 0.0, index * sample_dt)
+        x += velocity * sample_dt
+
+    predicted = predictor.predict(x, 0.0, 0.0, velocity, 0.0, 0.0, 1.0)
+
+    assert predicted[0] > x + velocity
+    assert predictor.acceleration(predicted[3], predicted[4], 0.0)[0] > 0.0
+
+
 @pytest.mark.parametrize(
     'keyword,value',
     [
