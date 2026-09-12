@@ -227,13 +227,16 @@ def test_intercept_prediction_horizon_stays_between_one_and_two_seconds():
     assert far_solution[3] == pytest.approx(2.0)
 
 
-def make_front_view_altitude_controller():
+def make_front_view_altitude_controller(terminal_minimum_clearance=0.0):
     controller = SimpleNamespace(
         sea_surface_z=0.0,
         flight_altitude=-5.0,
         terminal_dive_angle=math.radians(45.0),
         front_camera_max_depression_angle=0.85,
         terminal_contact_clearance=0.05,
+        impact_radius=0.25,
+        terminal_minimum_clearance=terminal_minimum_clearance,
+        dt=0.05,
     )
     controller.pursuit_altitude_reference = lambda distance, target_z: (
         TrajectoryImpactSim.pursuit_altitude_reference(
@@ -300,7 +303,7 @@ def test_pursuit_vertical_velocity_tracks_45_degree_dive_slope():
         target_z=0.0,
         target_vz=0.0,
         altitude_reference=-4.05,
-        closing_speed=1.5,
+        horizontal_closing_speed=1.5,
     )
 
     assert desired_vz == pytest.approx(1.5)
@@ -320,6 +323,237 @@ def test_pursuit_near_target_respects_front_camera_depression_limit():
     depression = math.atan2(height, horizontal_distance)
     assert depression == pytest.approx(0.85)
     assert reference_z < controller.sea_surface_z
+
+
+def test_terminal_closing_speed_ceiling_is_independent_of_follow():
+    controller = SimpleNamespace(
+        max_acceleration=4.8,
+        terminal_max_acceleration=3.0,
+        max_actual_horizontal_acceleration=5.0,
+        horizontal_acceleration_guard_margin=0.5,
+        enable_gazebo_control=True,
+        follow_max_closing_speed=1.5,
+        impact_radius=0.25,
+    )
+    controller.limit_horizontal_acceleration = lambda requested: (
+        TrajectoryImpactSim.limit_horizontal_acceleration(
+            controller,
+            requested,
+        )
+    )
+
+    follow_ceiling = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        3.0,
+        0.3,
+    )
+    terminal_ceiling = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        3.0,
+        0.3,
+        3.0,
+    )
+
+    # The braking law is what stops the vehicle at the capture
+    # neighbourhood; only the ceiling differs between the two phases.
+    assert follow_ceiling == pytest.approx(1.5)
+    assert terminal_ceiling > follow_ceiling
+
+
+def test_terminal_closing_speed_still_brakes_at_capture_neighbourhood():
+    controller = SimpleNamespace(
+        max_acceleration=4.8,
+        terminal_max_acceleration=3.0,
+        max_actual_horizontal_acceleration=5.0,
+        horizontal_acceleration_guard_margin=0.5,
+        enable_gazebo_control=True,
+        follow_max_closing_speed=1.5,
+        impact_radius=0.25,
+    )
+    controller.limit_horizontal_acceleration = lambda requested: (
+        TrajectoryImpactSim.limit_horizontal_acceleration(
+            controller,
+            requested,
+        )
+    )
+
+    inside_capture = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        0.25,
+        0.0,
+        3.0,
+    )
+
+    assert inside_capture == pytest.approx(0.0)
+
+
+def test_terminal_closing_speed_uses_executable_acceleration_limit():
+    controller = SimpleNamespace(
+        max_acceleration=4.8,
+        terminal_max_acceleration=2.0,
+        max_actual_horizontal_acceleration=5.0,
+        horizontal_acceleration_guard_margin=0.5,
+        enable_gazebo_control=True,
+        follow_max_closing_speed=3.0,
+        impact_radius=0.25,
+    )
+    controller.limit_horizontal_acceleration = lambda requested: (
+        TrajectoryImpactSim.limit_horizontal_acceleration(
+            controller,
+            requested,
+        )
+    )
+
+    closing_speed = TrajectoryImpactSim.pursuit_closing_speed(
+        controller,
+        horizontal_distance=0.5,
+        vertical_distance=0.0,
+    )
+
+    assert closing_speed == pytest.approx(1.0)
+
+
+def test_optional_clearance_preserves_disabled_zero():
+    assert TrajectoryImpactSim.normalize_optional_clearance(
+        0.0,
+        0.05,
+        3.0,
+    ) == pytest.approx(0.0)
+    assert TrajectoryImpactSim.normalize_optional_clearance(
+        0.01,
+        0.05,
+        3.0,
+    ) == pytest.approx(0.05)
+
+
+def test_terminal_altitude_ceiling_is_disabled_by_default():
+    controller = make_front_view_altitude_controller()
+
+    assert TrajectoryImpactSim.terminal_altitude_ceiling(
+        controller,
+        0.15,
+    ) == math.inf
+
+
+def test_terminal_altitude_ceiling_keeps_capture_compatible_clearance():
+    controller = make_front_view_altitude_controller(
+        terminal_minimum_clearance=0.5,
+    )
+    controller.terminal_descent_committed = True
+    controller.terminal_descent_release_distance = 4.0
+
+    reference_z, terminal_pursuit = (
+        TrajectoryImpactSim.terminal_fallback_altitude_reference(
+            controller,
+            1.41,
+            0.15,
+        )
+    )
+
+    # Committed fallback would otherwise jump directly to capture_z=-0.05.
+    # A strict 0.5 m clearance would prevent entry into the 0.25 m capture
+    # sphere, so the ceiling relaxes to the sphere top at -0.1.
+    assert terminal_pursuit is True
+    assert reference_z == pytest.approx(-0.1)
+
+
+def test_altitude_ceiling_does_not_lower_safe_dive_reference():
+    controller = make_front_view_altitude_controller(
+        terminal_minimum_clearance=0.5,
+    )
+
+    reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        1.41,
+        0.15,
+    )
+
+    assert reference_z == pytest.approx(-1.4550491256520994)
+
+
+def test_terminal_altitude_ceiling_never_blocks_a_capture():
+    controller = make_front_view_altitude_controller(
+        terminal_minimum_clearance=0.5,
+    )
+
+    # NED grows downward.  The maximum allowed z must be no smaller than the
+    # top of the capture sphere, leaving at least one reachable intersection.
+    for target_z in (0.5, 0.15, -0.15):
+        ceiling_z = TrajectoryImpactSim.terminal_altitude_ceiling(
+            controller,
+            target_z,
+        )
+        assert ceiling_z >= target_z - controller.impact_radius
+
+
+def test_terminal_altitude_ceiling_brakes_descent_but_allows_climb():
+    controller = make_front_view_altitude_controller(
+        terminal_minimum_clearance=0.5,
+    )
+    controller.altitude_velocity_gain = 1.0
+    controller.max_vertical_speed = 4.0
+
+    # The preferred -0.5 m limit relaxes to -0.1 m to preserve capture.  At
+    # that NED z ceiling the dive feed-forward must not descend farther.
+    controller.sim_z = -0.1
+    braking_vz = TrajectoryImpactSim.pursuit_vertical_velocity(
+        controller,
+        horizontal_distance=1.41,
+        target_z=0.15,
+        target_vz=0.0,
+        altitude_reference=-0.1,
+        horizontal_closing_speed=0.5,
+    )
+    assert braking_vz == pytest.approx(0.0)
+
+    # Past the ceiling (larger NED z, hence lower altitude), the one-step
+    # guard requests a climb back to the limit.
+    controller.sim_z = -0.05
+    overrun_vz = TrajectoryImpactSim.pursuit_vertical_velocity(
+        controller,
+        horizontal_distance=1.41,
+        target_z=0.15,
+        target_vz=0.0,
+        altitude_reference=-0.1,
+        horizontal_closing_speed=0.5,
+    )
+    assert overrun_vz == pytest.approx(-1.0)
+
+    # Above the ceiling (smaller NED z, hence higher altitude), descent is
+    # still allowed up to the remaining one-step distance.
+    controller.sim_z = -0.25
+    tracking_vz = TrajectoryImpactSim.pursuit_vertical_velocity(
+        controller,
+        horizontal_distance=1.41,
+        target_z=0.15,
+        target_vz=0.0,
+        altitude_reference=-0.1,
+        horizontal_closing_speed=0.5,
+    )
+    assert tracking_vz > 0.0
+
+
+def test_measured_horizontal_closing_speed_uses_relative_velocity():
+    controller = SimpleNamespace(
+        sim_vx=3.0,
+        sim_vy=1.0,
+        target_vx=1.0,
+        target_vy=2.0,
+    )
+
+    closing = TrajectoryImpactSim.measured_horizontal_closing_speed(
+        controller,
+        1.0,
+        0.0,
+    )
+    opening = TrajectoryImpactSim.measured_horizontal_closing_speed(
+        controller,
+        0.0,
+        1.0,
+    )
+
+    assert closing == pytest.approx(2.0)
+    assert opening == pytest.approx(-1.0)
 
 
 def test_retained_terminal_plan_advances_and_expires_with_clock():
@@ -480,6 +714,7 @@ def test_plan_velocity_uses_retained_plan_during_replan_dropout():
 def test_pursuit_keeps_forward_closure_inside_terminal_planning_radius():
     controller = SimpleNamespace(
         max_acceleration=4.8,
+        terminal_max_acceleration=3.0,
         max_actual_horizontal_acceleration=5.0,
         horizontal_acceleration_guard_margin=0.5,
         enable_gazebo_control=True,
@@ -505,6 +740,7 @@ def test_pursuit_keeps_forward_closure_inside_terminal_planning_radius():
 def test_pursuit_does_not_stop_horizontally_before_vertical_capture():
     controller = SimpleNamespace(
         max_acceleration=4.8,
+        terminal_max_acceleration=3.0,
         max_actual_horizontal_acceleration=5.0,
         horizontal_acceleration_guard_margin=0.5,
         enable_gazebo_control=True,

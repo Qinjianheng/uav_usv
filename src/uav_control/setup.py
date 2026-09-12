@@ -33,6 +33,8 @@ setup(
             'uav_control.trajectory_impact_sim:main',
             'usv_estimation_analysis = '
             'uav_control.analysis.usv_estimation_analysis:main',
+            'intercept_outcome_analysis = '
+            'uav_control.analysis.intercept_outcome_analysis:main',
             'target_kalman_filter = '
             'uav_control.tracking.target_kalman_filter:main',
             'front_tof_monitor = '

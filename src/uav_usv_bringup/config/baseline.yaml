@@ -36,6 +36,11 @@ trajectory_impact_sim:
     terminal_descent_release_distance: 4.0
     # Geometric flight-path angle relative to the moving capture point.
     terminal_dive_angle: 0.78539816339
+    # Preferred terminal clearance above the sea surface.  Zero disables it.
+    # An enabled value is relaxed at runtime when needed to preserve an
+    # intersection with the target's capture sphere.  Keep it disabled for
+    # the first closing-speed-only validation batch.
+    terminal_minimum_clearance: 0.0
     front_camera_max_depression_angle: 0.85
     terminal_max_acceleration: 3.0
     terminal_max_vertical_acceleration: 3.0
@@ -61,6 +66,10 @@ trajectory_impact_sim:
     follow_distance: 5.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 1.5
+    # Interception needs more radial closure authority than following.  The
+    # 2026-09-12 logs show the terminal fallback closing at only 0.2-0.4 m/s
+    # against a 4 m/s target, so the last 1-2 m were never closed.
+    terminal_pursuit_max_closing_speed: 3.0
     follow_max_acceleration: 2.5
     altitude_velocity_gain: 1.0
     # A 4 m/s descent paired with the 4 m/s USV baseline permits a

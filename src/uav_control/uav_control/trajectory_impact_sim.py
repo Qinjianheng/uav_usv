@@ -188,6 +188,10 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('minco_piece_count', 3)
         self.declare_parameter('minco_target_curve_weight', 0.7)
         self.declare_parameter('terminal_contact_clearance', 0.05)
+        # Preferred sea-surface clearance for terminal pursuit.  Zero
+        # disables it.  The runtime ceiling is relaxed when necessary so it
+        # still intersects the target's capture sphere.
+        self.declare_parameter('terminal_minimum_clearance', 0.0)
         self.declare_parameter('terminal_descent_release_distance', 4.0)
         self.declare_parameter(
             'terminal_dive_angle',
@@ -233,6 +237,14 @@ class TrajectoryImpactSim(Node):
             1.5,
         )
         self.declare_parameter('follow_distance', 5.0)
+        # Interception needs more radial closure authority than following.
+        # The follow value caps the closing speed that the terminal fallback
+        # law may add on top of the target velocity, which is too small to
+        # finish the last metres against a manoeuvring USV.
+        self.declare_parameter(
+            'terminal_pursuit_max_closing_speed',
+            3.0,
+        )
         self.declare_parameter('follow_position_gain', 0.8)
         self.declare_parameter('follow_max_closing_speed', 1.5)
         self.declare_parameter('follow_max_acceleration', 2.5)
@@ -467,6 +479,15 @@ class TrajectoryImpactSim(Node):
             ),
             0.9 * self.impact_radius,
         )
+        self.terminal_minimum_clearance = (
+            TrajectoryImpactSim.normalize_optional_clearance(
+                self.get_parameter(
+                    'terminal_minimum_clearance'
+                ).value,
+                self.terminal_contact_clearance,
+                self.terminal_radius,
+            )
+        )
         self.terminal_descent_release_distance = max(
             float(
                 self.get_parameter(
@@ -623,6 +644,17 @@ class TrajectoryImpactSim(Node):
                     ).value
                 ),
                 0.1,
+            ),
+            self.command_speed_limit,
+        )
+        self.terminal_pursuit_max_closing_speed = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'terminal_pursuit_max_closing_speed'
+                    ).value
+                ),
+                self.follow_max_closing_speed,
             ),
             self.command_speed_limit,
         )
@@ -2291,9 +2323,55 @@ class TrajectoryImpactSim(Node):
             self.terminal_contact_clearance,
         )
         visibility_z = target_z - visibility_height
+        altitude_ceiling_z = TrajectoryImpactSim.terminal_altitude_ceiling(
+            self,
+            target_z,
+        )
         return min(
             max(profile_z, visibility_z),
             self.sea_surface_z - self.terminal_contact_clearance,
+            altitude_ceiling_z,
+        )
+
+    @staticmethod
+    def normalize_optional_clearance(value, minimum_enabled, maximum):
+        """Clamp an optional positive clearance while preserving zero."""
+        requested = max(float(value), 0.0)
+        if requested <= 0.0:
+            return 0.0
+        return min(max(requested, float(minimum_enabled)), float(maximum))
+
+    @staticmethod
+    def terminal_altitude_ceiling(controller, target_z):
+        """
+        Return the maximum allowed NED z for terminal pursuit.
+
+        The geometric dive line is designed to reach the sea-surface capture
+        height only at zero horizontal range.  When horizontal closure is
+        slower than the dive, the vehicle can otherwise reach that height
+        while the horizontal gap is still open and end in sea contact.
+
+        NED z grows downwards, so a clearance constraint is an upper bound on
+        z.  A requested sea clearance is relaxed to the top of the capture
+        sphere when necessary.  This preserves at least one reachable point
+        inside the sphere instead of turning a safety preference into an
+        impossible capture.  Zero disables the ceiling and returns +infinity.
+
+        This is a static helper so the unbound guidance methods stay usable
+        from lightweight test controllers that are not full nodes.
+        """
+        impact_radius = float(getattr(controller, 'impact_radius', 0.25))
+        minimum_clearance = getattr(
+            controller,
+            'terminal_minimum_clearance',
+            None,
+        )
+        if minimum_clearance is None or float(minimum_clearance) <= 0.0:
+            return math.inf
+        capture_sphere_top = float(target_z) - impact_radius
+        return max(
+            capture_sphere_top,
+            controller.sea_surface_z - minimum_clearance,
         )
 
     def terminal_fallback_altitude_reference(
@@ -2316,7 +2394,12 @@ class TrajectoryImpactSim(Node):
             float(target_z) - self.terminal_contact_clearance,
             self.sea_surface_z - self.terminal_contact_clearance,
         )
-        return max(pursuit_z, capture_z), True
+        reference_z = max(pursuit_z, capture_z)
+        altitude_ceiling_z = TrajectoryImpactSim.terminal_altitude_ceiling(
+            self,
+            target_z,
+        )
+        return min(reference_z, altitude_ceiling_z), True
 
     def pursuit_vertical_velocity(
         self,
@@ -2324,7 +2407,7 @@ class TrajectoryImpactSim(Node):
         target_z,
         target_vz,
         altitude_reference,
-        closing_speed,
+        horizontal_closing_speed,
     ):
         """Track the dive line using feed-forward and altitude feedback."""
         capture_z = min(
@@ -2338,9 +2421,10 @@ class TrajectoryImpactSim(Node):
         )
         feedforward_vz = 0.0
         if unclamped_dive_z >= self.flight_altitude:
-            feedforward_vz = max(float(closing_speed), 0.0) * math.tan(
-                self.terminal_dive_angle
-            )
+            feedforward_vz = max(
+                float(horizontal_closing_speed),
+                0.0,
+            ) * math.tan(self.terminal_dive_angle)
             sea_clearance_z = (
                 self.sea_surface_z - self.terminal_contact_clearance
             )
@@ -2352,6 +2436,20 @@ class TrajectoryImpactSim(Node):
             + self.altitude_velocity_gain
             * (float(altitude_reference) - self.sim_z)
         )
+        altitude_limit = TrajectoryImpactSim.terminal_altitude_ceiling(
+            self,
+            target_z,
+        )
+        # Enforce the NED z ceiling on the next control step as well as on the
+        # reference.  Positive vz descends; negative vz climbs.
+        if math.isfinite(altitude_limit):
+            current_z = float(getattr(self, 'sim_z', altitude_limit))
+            step = float(getattr(self, 'dt', 0.0))
+            if step > 0.0:
+                maximum_vz = (altitude_limit - current_z) / step
+                desired_vz = min(desired_vz, maximum_vz)
+            elif current_z >= altitude_limit:
+                desired_vz = min(desired_vz, 0.0)
         return max(
             min(desired_vz, self.max_vertical_speed),
             -self.max_vertical_speed,
@@ -2361,10 +2459,19 @@ class TrajectoryImpactSim(Node):
         self,
         horizontal_distance,
         vertical_distance=0.0,
+        maximum_closing_speed=None,
     ):
-        """Continue forward closure until the actual capture neighborhood."""
+        """
+        Continue forward closure until the actual capture neighborhood.
+
+        The braking law itself is unchanged: the closing speed still falls
+        to zero at the capture neighbourhood.  Only the ceiling differs,
+        because intercepting needs more radial authority than following.
+        """
+        if maximum_closing_speed is None:
+            maximum_closing_speed = self.follow_max_closing_speed
         acceleration_limit = self.limit_horizontal_acceleration(
-            self.max_acceleration
+            self.terminal_max_acceleration
         )
         remaining_radius_squared = max(
             self.impact_radius * self.impact_radius
@@ -2379,8 +2486,15 @@ class TrajectoryImpactSim(Node):
             0.0,
         )
         return min(
-            self.follow_max_closing_speed,
+            float(maximum_closing_speed),
             math.sqrt(2.0 * acceleration_limit * braking_distance),
+        )
+
+    def measured_horizontal_closing_speed(self, line_x, line_y):
+        """Return actual UAV-minus-target velocity along the horizontal LOS."""
+        return (
+            (self.sim_vx - self.target_vx) * float(line_x)
+            + (self.sim_vy - self.target_vy) * float(line_y)
         )
 
     def plan_velocity(self, target_x, target_y, target_z):
@@ -2469,6 +2583,7 @@ class TrajectoryImpactSim(Node):
         closing_speed = self.pursuit_closing_speed(
             horizontal_distance,
             abs(target_z - self.sim_z),
+            self.terminal_pursuit_max_closing_speed,
         )
         desired_vx = self.target_vx + closing_speed * horizontal_los_x
         desired_vy = self.target_vy + closing_speed * horizontal_los_y
@@ -2487,12 +2602,19 @@ class TrajectoryImpactSim(Node):
             self.trajectory_planner_type = 'TERMINAL_PURSUIT'
         self.guidance_altitude_reference = staging_z
         self.guidance_closing_speed = closing_speed
+        measured_closing_speed = max(
+            self.measured_horizontal_closing_speed(
+                horizontal_los_x,
+                horizontal_los_y,
+            ),
+            0.0,
+        )
         desired_vz = self.pursuit_vertical_velocity(
             horizontal_distance,
             target_z,
             self.target_vz,
             staging_z,
-            closing_speed,
+            measured_closing_speed,
         )
 
         return (
