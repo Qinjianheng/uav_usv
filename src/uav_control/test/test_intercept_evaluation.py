@@ -45,6 +45,34 @@ def test_csv_records_intercept_reference_kinematics():
     ]
 
 
+def test_csv_records_camera_kalman_and_delayed_prediction_errors():
+    target_velocity_index = TrajectoryImpactSim.CSV_FIELDS.index('target_vz')
+    assert TrajectoryImpactSim.CSV_FIELDS[
+        target_velocity_index + 1:target_velocity_index + 16
+    ] == [
+        'camera_measurement_valid',
+        'camera_x',
+        'camera_y',
+        'camera_z',
+        'camera_position_error',
+        'camera_confidence',
+        'kf_state_valid',
+        'kf_x',
+        'kf_y',
+        'kf_z',
+        'kf_vx',
+        'kf_vy',
+        'kf_vz',
+        'kf_position_error',
+        'kf_state_age',
+    ]
+    for model in ('guidance', 'kf'):
+        for horizon in ('0p5', '1p0', '2p0'):
+            prefix = f'{model}_prediction_{horizon}'
+            for suffix in ('x', 'y', 'z', 'error', 'age'):
+                assert f'{prefix}_{suffix}' in TrajectoryImpactSim.CSV_FIELDS
+
+
 def test_csv_records_front_view_guidance_diagnostics():
     t_go_index = TrajectoryImpactSim.CSV_FIELDS.index('t_go')
 

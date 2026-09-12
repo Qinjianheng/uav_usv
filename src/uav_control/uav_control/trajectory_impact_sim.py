@@ -21,7 +21,11 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import Bool, String
-from uav_usv_interfaces.msg import InterceptResult
+from uav_usv_interfaces.msg import (
+    InterceptResult,
+    TargetObservation,
+    TargetState,
+)
 
 from uav_control.guidance.finite_horizon_intercept_planner import (
     FiniteHorizonInterceptPlanner,
@@ -32,6 +36,19 @@ from uav_control.guidance.rolling_intercept_guidance import (
 from uav_control.tracking.maneuvering_target_predictor import (
     ManeuveringTargetPredictor,
 )
+from uav_control.tracking.prediction_error_tracker import (
+    PredictionErrorTracker,
+)
+
+
+PREDICTION_HORIZONS = (0.5, 1.0, 2.0)
+PREDICTION_MODELS = ('guidance', 'kf')
+PREDICTION_CSV_FIELDS = [
+    f'{model}_prediction_{str(horizon).replace(".", "p")}_{field}'
+    for model in PREDICTION_MODELS
+    for horizon in PREDICTION_HORIZONS
+    for field in ('x', 'y', 'z', 'error', 'age')
+]
 
 
 class TrajectoryImpactSim(Node):
@@ -56,6 +73,22 @@ class TrajectoryImpactSim(Node):
         'target_vx',
         'target_vy',
         'target_vz',
+        'camera_measurement_valid',
+        'camera_x',
+        'camera_y',
+        'camera_z',
+        'camera_position_error',
+        'camera_confidence',
+        'kf_state_valid',
+        'kf_x',
+        'kf_y',
+        'kf_z',
+        'kf_vx',
+        'kf_vy',
+        'kf_vz',
+        'kf_position_error',
+        'kf_state_age',
+        *PREDICTION_CSV_FIELDS,
         'prediction_model',
         'estimated_turn_rate',
         'distance',
@@ -753,6 +786,18 @@ class TrajectoryImpactSim(Node):
             self.target_velocity_callback,
             10
         )
+        self.camera_observation_sub = self.create_subscription(
+            TargetObservation,
+            '/perception/front/target_observation',
+            self.camera_observation_callback,
+            10,
+        )
+        self.filtered_target_state_sub = self.create_subscription(
+            TargetState,
+            '/tracking/target_state',
+            self.filtered_target_state_callback,
+            10,
+        )
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -849,6 +894,17 @@ class TrajectoryImpactSim(Node):
         self.target_velocity_received = False
         self.target_path_history = deque()
         self.target_path_distance = 0.0
+        self.camera_measurement_valid = False
+        self.camera_measurement = (math.nan, math.nan, math.nan)
+        self.camera_confidence = 0.0
+        self.camera_measurement_time_ns = None
+        self.kf_state_valid = False
+        self.kf_position = (math.nan, math.nan, math.nan)
+        self.kf_velocity = (math.nan, math.nan, math.nan)
+        self.kf_state_time_ns = None
+        self.prediction_error_tracker = PredictionErrorTracker(
+            PREDICTION_HORIZONS
+        )
 
         self.initial_uav_x = 0.0
         self.initial_uav_y = 0.0
@@ -1054,6 +1110,40 @@ class TrajectoryImpactSim(Node):
             self.target_velocity_time_ns * 1e-9,
         )
         self.target_velocity_received = True
+
+    def camera_observation_callback(self, msg):
+        """Store the latest camera-only USV position for CSV evaluation."""
+        position = (
+            float(msg.position.x),
+            float(msg.position.y),
+            float(msg.position.z),
+        )
+        self.camera_measurement_valid = bool(
+            msg.valid and all(math.isfinite(value) for value in position)
+        )
+        self.camera_measurement = position
+        self.camera_confidence = float(msg.confidence)
+        self.camera_measurement_time_ns = self.get_clock().now().nanoseconds
+
+    def filtered_target_state_callback(self, msg):
+        """Store the camera/Kalman USV state for independent evaluation."""
+        position = (
+            float(msg.position.x),
+            float(msg.position.y),
+            float(msg.position.z),
+        )
+        velocity = (
+            float(msg.velocity.x),
+            float(msg.velocity.y),
+            float(msg.velocity.z),
+        )
+        self.kf_state_valid = bool(
+            msg.valid
+            and all(math.isfinite(value) for value in position + velocity)
+        )
+        self.kf_position = position
+        self.kf_velocity = velocity
+        self.kf_state_time_ns = self.get_clock().now().nanoseconds
 
     def command_callback(self, msg):
         command = msg.data.strip().upper()
@@ -2530,6 +2620,7 @@ class TrajectoryImpactSim(Node):
             self.log_start_time_ns = (
                 self.get_clock().now().nanoseconds
             )
+        self.prediction_error_tracker.reset()
 
         try:
             self.open_csv_log()
@@ -2662,7 +2753,113 @@ class TrajectoryImpactSim(Node):
             if self.command_vz is not None
             else self.sim_vz
         )
-        self.csv_writer.writerow([
+        now_ns = self.get_clock().now().nanoseconds
+        camera_age = (
+            math.inf
+            if self.camera_measurement_time_ns is None
+            else max(
+                (now_ns - self.camera_measurement_time_ns) * 1e-9,
+                0.0,
+            )
+        )
+        camera_valid = (
+            self.camera_measurement_valid
+            and camera_age <= self.state_timeout
+        )
+        kf_state_age = (
+            math.inf
+            if self.kf_state_time_ns is None
+            else max((now_ns - self.kf_state_time_ns) * 1e-9, 0.0)
+        )
+        kf_valid = (
+            self.kf_state_valid
+            and kf_state_age <= self.state_timeout
+        )
+        truth_position = (target_x, target_y, target_z)
+        camera_error = (
+            math.sqrt(sum(
+                (estimate - truth) ** 2
+                for estimate, truth in zip(
+                    self.camera_measurement,
+                    truth_position,
+                )
+            ))
+            if camera_valid
+            else math.nan
+        )
+        kf_error = (
+            math.sqrt(sum(
+                (estimate - truth) ** 2
+                for estimate, truth in zip(
+                    self.kf_position,
+                    truth_position,
+                )
+            ))
+            if kf_valid
+            else math.nan
+        )
+
+        prediction_evaluations = {
+            (model, horizon): self.prediction_error_tracker.evaluate(
+                model,
+                horizon,
+                elapsed_time,
+                truth_position,
+            )
+            for model in PREDICTION_MODELS
+            for horizon in PREDICTION_HORIZONS
+        }
+        guidance_predictions = {
+            horizon: self.target_planning_state(
+                target_x,
+                target_y,
+                target_z,
+                horizon,
+            )[0]
+            for horizon in PREDICTION_HORIZONS
+        }
+        self.prediction_error_tracker.add(
+            'guidance',
+            elapsed_time,
+            guidance_predictions,
+        )
+        if kf_valid:
+            self.prediction_error_tracker.add(
+                'kf',
+                elapsed_time,
+                {
+                    horizon: tuple(
+                        position + velocity * horizon
+                        for position, velocity in zip(
+                            self.kf_position,
+                            self.kf_velocity,
+                        )
+                    )
+                    for horizon in PREDICTION_HORIZONS
+                },
+            )
+        prediction_values = []
+        for model in PREDICTION_MODELS:
+            for horizon in PREDICTION_HORIZONS:
+                evaluation = prediction_evaluations[(model, horizon)]
+                if evaluation is None:
+                    prediction_values.extend(['', '', '', '', ''])
+                else:
+                    prediction_values.extend([
+                        f'{evaluation.position[0]:.6f}',
+                        f'{evaluation.position[1]:.6f}',
+                        f'{evaluation.position[2]:.6f}',
+                        f'{evaluation.error:.6f}',
+                        f'{evaluation.age:.6f}',
+                    ])
+
+        def valid_position_values(valid, position):
+            return [
+                f'{value:.6f}' if valid else ''
+                for value in position
+            ]
+
+        row = [
             f'{elapsed_time:.6f}',
             f'{self.sim_x:.6f}',
             f'{self.sim_y:.6f}',
@@ -2676,6 +2873,19 @@ class TrajectoryImpactSim(Node):
             f'{self.target_vx:.6f}',
             f'{self.target_vy:.6f}',
             f'{self.target_vz:.6f}',
+            '1' if camera_valid else '0',
+            *valid_position_values(
+                camera_valid,
+                self.camera_measurement,
+            ),
+            f'{camera_error:.6f}' if camera_valid else '',
+            f'{self.camera_confidence:.6f}' if camera_valid else '',
+            '1' if kf_valid else '0',
+            *valid_position_values(kf_valid, self.kf_position),
+            *valid_position_values(kf_valid, self.kf_velocity),
+            f'{kf_error:.6f}' if kf_valid else '',
+            f'{kf_state_age:.6f}' if kf_valid else '',
+            *prediction_values,
             prediction_model,
             f'{self.target_predictor.turn_rate:.6f}',
             f'{distance:.6f}',
@@ -2722,7 +2932,13 @@ class TrajectoryImpactSim(Node):
             self.outcome,
             self.failure_reason,
             self.failure_detail,
-        ])
+        ]
+        if len(row) != len(self.CSV_FIELDS):
+            raise RuntimeError(
+                f'CSV schema has {len(self.CSV_FIELDS)} fields but row has '
+                f'{len(row)} values'
+            )
+        self.csv_writer.writerow(row)
 
     def publish_simulation_state(
         self,

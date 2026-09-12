@@ -19,11 +19,11 @@ cd /home/qin/data/uav_usv
 
 移动目标在节点启动后保持初始位置并发布零速度。控制器先在地面连续发送保持点，自动进入Offboard并解锁；一键脚本只有收到 `/simulation/impact/flight_ready=true` 才开放命令输入。收到X后，无人机立即改变高度设定值，同时USV才开始运动。起飞阶段采用Z轴位置控制和XY轴速度控制，无人机在爬升时同步跟随USV，不再把Offboard预发送和解锁延迟算入目标先跑时间。
 
-跟随模式保存USV已经走过的轨迹，并跟踪航迹弧长后方15米的历史位置，而不是当前航向切线后方的位置。15米水平间距在5米高度时的斜距约15.8米，为25米ToF上限保留足够余量；单纯提高高度会增加斜距，不能解决远距离丢失。这样8字转弯时跟随参考点仍以接近USV的速度沿原轨迹运动，不会横向快速甩动。
+跟随模式保存USV已经走过的轨迹，并跟踪航迹弧长后方5米的历史位置，而不是当前航向切线后方的位置。5米水平间距在5米高度时的斜距约7.1米，为25米ToF上限保留足够余量；单纯提高高度会增加斜距，不能解决远距离丢失。这样8字转弯时跟随参考点仍以接近USV的速度沿原轨迹运动，不会横向快速甩动。
 
-截击模式以20 Hz滚动重规划。规划器从连续目标速度观测估计转向率；距离USV超过12米时保持5米巡航高度并持续水平闭合，12至3米之间连续下降到约1米，近距离再按前视相机最大48.7度目标俯角继续降低高度。终端多项式暂时不可行时，追逐制动点是0.25米实际捕获邻域，而不是原来的3米终端规划边界，因此不会在3米外停住等待下降。进入可达域后在1–2秒范围内联合搜索末端时间和闭合速度，以五次多项式同时约束末端位置、速度与加速度，并执行轨迹上前视0.75秒的速度状态。候选轨迹只有在全时域满足速度、加速度、捕获半径和海面安全约束时才会执行。观测不足或目标速度过低时自动退回恒速度模型。CSV新增 `guidance_altitude_reference` 和 `guidance_closing_speed`，并继续记录预测模型、转向率、完整轨迹可行性和轨迹约束峰值。
+截击模式以20 Hz滚动重规划。规划器从连续目标速度观测估计转向率；距离USV超过12米时保持5米巡航高度并持续水平闭合，12至3米之间连续下降到约1米，近距离再按前视相机最大48.7度目标俯角继续降低高度。终端轨迹暂时不可行时，追逐制动点是0.25米实际捕获邻域，而不是3米终端规划边界。进入可达域后在1–2秒范围内搜索末端时间和闭合速度，以三段MINCO-T3五次多项式约束起终点位置、速度与加速度，并执行轨迹上前视0.15秒的速度状态；段间保持到四阶导数连续。候选轨迹只有在全时域满足速度、加速度、捕获半径和海面安全约束时才会执行，不可行时逐级降低目标曲率权重，最终回退直接追逐。观测不足或目标速度过低时目标预测自动退回恒速度模型。
 
-UAV在起飞、跟随、截击和结果悬停阶段都按 `atan2(target_y-uav_y, target_x-uav_x)` 计算期望偏航，并以默认1.5 rad/s的最大偏航速率连续转向USV。该观测偏航将作为后续相机和激光雷达共同视场约束的基础。
+UAV在起飞、跟随、截击和结果悬停阶段都按 `atan2(target_y-uav_y, target_x-uav_x)` 计算期望偏航，并以默认1.0 rad/s的最大偏航速率连续转向USV。该观测偏航将作为后续相机和激光雷达共同视场约束的基础。
 
 ## 双ToF试验
 
@@ -45,12 +45,14 @@ Gazebo RGB-D输出属于理想化几何深度，尚未模拟真实ToF在强日�
 - `/perception/usv_red_pixel_count`：当前分析帧中的强红像素数，便于判断远距离小目标阈值；
 - `/perception/usv_tof_valid`、`/perception/usv_range`：目标区域是否有可靠深度以及深度中值；
 - `/perception/usv_depth_valid_ratio`：目标掩膜内有效深度比例；
+- `/perception/front/target_observation`：前视RGB-D恢复的带置信度USV位置，坐标系为PX4本地NED；
+- `/perception/front/target_position`：供卡尔曼滤波器使用的有效相机位置观测；
 - `/perception/usv_visibility_rate`、`/perception/usv_tof_valid_rate`：最近5秒RGB可见率和ToF有效率。
 - `/perception/camera_stream_alive`、`/perception/camera_frame_count`：分析流是否新鲜以及持续递增的帧计数，用于确认相机流没有冻结；
 - `/perception/camera_frame_change`：相邻分析帧的归一化内容变化量；
 - `/perception/target_truth_in_fov`、`/perception/target_horizontal_angle`、`/perception/target_vertical_angle`：真值评价得到的目标视场状态和水平/垂直角（弧度），只用于排障和评价。
 
-当前阶段验证双ToF能否在完整航迹中互补覆盖USV。截击控制、卡尔曼滤波和成功/失败判定仍使用 `/target/*` 真值，不读取ToF结果；选择器只影响诊断输出。可用以下命令检查：
+当前阶段验证双ToF能否在完整航迹中互补覆盖USV。截击控制和成功/失败判定仍使用 `/target/*` 真值；前视RGB-D位置已经进入卡尔曼滤波影子链路，但不会改变控制指令。选择器只影响诊断输出。可用以下命令检查：
 
 ```bash
 ros2 topic echo /perception/usv_visible
@@ -66,6 +68,8 @@ ros2 topic echo /perception/camera_frame_change
 ros2 topic echo /perception/camera_stream_alive
 ros2 topic echo /perception/camera_frame_count
 ros2 topic echo /perception/target_truth_in_fov
+ros2 topic echo /perception/front/target_observation
+ros2 topic echo /tracking/target_state
 ```
 
 查看实时画面时应运行 `ros2 run rqt_image_view rqt_image_view`，跟随/接近阶段选择 `/camera/front/image_raw`，末端阶段同时观察 `/camera/down/image_raw`。图像由独立的 `ros_gz_image` 桥接器直接以传感器频率发布；红球和深度分析以10 Hz限频运行，不再阻塞RQt刷新。海面和天空纹理近似均匀，若目标在视场外，飞机只做平移时画面可能肉眼近似不变；此时应结合每台相机的帧变化量和真值视场话题判断。
@@ -126,4 +130,15 @@ Gazebo控制还会在5米/平方秒实际水平加速度硬限制下保留0.5米
 
 ## 目标状态估计
 
-统一launch同时启动恒速度卡尔曼滤波节点。节点使用 `/target/position` 估计目标位置和速度，在 `/tracking/target_state` 发布 `uav_usv_interfaces/TargetState`，并在 `/tracking/predicted_position` 发布默认0.5秒后的预测位置。当前截击控制仍使用真值状态输入，但规划模型已经支持转弯目标；滤波输出预留给后续传感器闭环，在误差验证完成后再切换控制输入。
+统一launch同时启动RGB-D定位和恒速度卡尔曼滤波节点。定位器对仿真红球做颜色分割，在掩膜内关联深度，利用相机内参、安装外参和PX4姿态把目标恢复到本地NED；有效观测发布到 `/perception/front/target_position`。卡尔曼滤波器据此估计位置和速度，在 `/tracking/target_state` 发布 `uav_usv_interfaces/TargetState`，并在 `/tracking/predicted_position` 发布默认0.5秒后的预测位置。当前截击控制仍使用真值状态输入，滤波输出处于影子验证阶段。
+
+实验CSV会同步记录相机位置、卡尔曼位置/速度及其相对真值误差。制导预测器和卡尔曼滤波器分别生成0.5、1.0和2.0秒预测；相应时域到期后，日志把历史预测与当时USV真值配对并记录误差。完成实验后运行：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/qin/data/uav_usv/install/setup.bash
+ros2 run uav_control usv_estimation_analysis \
+  /home/qin/data/uav_usv/data/experiments/current/<实验日志.csv>
+```
+
+报告给出相机/KF有效率，以及当前定位、0.5秒、1秒和2秒预测的均值、RMSE、中位数、P95和最大误差。红色分割只用于验证当前仿真小球；面对现实中的无标记非合作USV，必须把颜色掩膜替换为外观检测或实例分割模型。

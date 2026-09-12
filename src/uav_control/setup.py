@@ -31,10 +31,14 @@ setup(
             'predictive_intercept = uav_control.predictive_intercept:main',
             'trajectory_impact_sim = '
             'uav_control.trajectory_impact_sim:main',
+            'usv_estimation_analysis = '
+            'uav_control.analysis.usv_estimation_analysis:main',
             'target_kalman_filter = '
             'uav_control.tracking.target_kalman_filter:main',
             'front_tof_monitor = '
             'uav_control.perception.front_tof_monitor:main',
+            'rgbd_target_localizer = '
+            'uav_control.perception.rgbd_target_localizer:main',
             'dual_tof_selector = '
             'uav_control.perception.dual_tof_selector:main',
         ],

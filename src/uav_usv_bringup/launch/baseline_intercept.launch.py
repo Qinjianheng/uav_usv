@@ -88,6 +88,13 @@ def generate_launch_description():
         ),
         Node(
             package='uav_control',
+            executable='rgbd_target_localizer',
+            name='rgbd_target_localizer',
+            output='screen',
+            parameters=[config_file],
+        ),
+        Node(
+            package='uav_control',
             executable='front_tof_monitor',
             name='down_tof_monitor',
             output='screen',
