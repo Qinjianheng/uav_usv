@@ -11,6 +11,7 @@ QGC_APPIMAGE="${QGC_APPIMAGE:-/home/qin/桌面/QGroundControl-x86_64.AppImage}"
 BUILD_WORKSPACE=true
 CAMERA_STARTUP_TIMEOUT="${CAMERA_STARTUP_TIMEOUT:-180}"
 FLIGHT_READY_TIMEOUT="${FLIGHT_READY_TIMEOUT:-60}"
+PX4_VERTICAL_SPEED_LIMIT="${PX4_VERTICAL_SPEED_LIMIT:-4.0}"
 
 if [[ "${1:-}" == "--no-build" ]]; then
     BUILD_WORKSPACE=false
@@ -40,6 +41,10 @@ if ! [[ "${CAMERA_STARTUP_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if ! [[ "${FLIGHT_READY_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
     echo "FLIGHT_READY_TIMEOUT must be a positive integer." >&2
+    exit 2
+fi
+if ! [[ "${PX4_VERTICAL_SPEED_LIMIT}" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]]; then
+    echo "PX4_VERTICAL_SPEED_LIMIT must be a positive number." >&2
     exit 2
 fi
 
@@ -213,6 +218,21 @@ if ! ${camera_topics_ready}; then
 fi
 
 echo "Front and down ToF cameras are publishing aligned RGB/depth images."
+
+# PX4's stock x500 descent limit is 1.5 m/s. Keep its velocity controller
+# aligned with the ROS terminal envelope so a 4 m/s by 4 m/s flight path can
+# reach 45 degrees. Takeoff remains independently limited by baseline.yaml.
+PX4_PARAM_TOOL="${PX4_ROOT}/build/px4_sitl_default/bin/px4-param"
+if [[ ! -x "${PX4_PARAM_TOOL}" ]]; then
+    echo "PX4 parameter tool not found: ${PX4_PARAM_TOOL}" >&2
+    exit 1
+fi
+echo "Configuring PX4 vertical speed envelope to" \
+    "${PX4_VERTICAL_SPEED_LIMIT} m/s..."
+"${PX4_PARAM_TOOL}" --instance 0 set \
+    MPC_Z_VEL_MAX_UP "${PX4_VERTICAL_SPEED_LIMIT}"
+"${PX4_PARAM_TOOL}" --instance 0 set \
+    MPC_Z_VEL_MAX_DN "${PX4_VERTICAL_SPEED_LIMIT}"
 
 echo "Starting Micro XRCE-DDS Agent..."
 gnome-terminal --title="Micro XRCE-DDS Agent" -- bash -lc "

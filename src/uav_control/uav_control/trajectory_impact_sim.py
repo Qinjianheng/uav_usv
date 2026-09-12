@@ -176,7 +176,7 @@ class TrajectoryImpactSim(Node):
         )
         self.declare_parameter(
             'intercept_reference_max_vertical_acceleration',
-            1.5,
+            2.5,
         )
         self.declare_parameter('terminal_radius', 3.0)
         self.declare_parameter('terminal_closing_speed', 1.5)
@@ -189,17 +189,18 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('minco_target_curve_weight', 0.7)
         self.declare_parameter('terminal_contact_clearance', 0.05)
         self.declare_parameter('terminal_descent_release_distance', 4.0)
-        self.declare_parameter('approach_staging_height', 1.0)
-        self.declare_parameter('descent_start_distance', 12.0)
-        self.declare_parameter('descent_end_distance', 3.0)
+        self.declare_parameter(
+            'terminal_dive_angle',
+            math.radians(45.0),
+        )
         self.declare_parameter(
             'front_camera_max_depression_angle',
             0.85,
         )
-        self.declare_parameter('terminal_max_acceleration', 2.0)
+        self.declare_parameter('terminal_max_acceleration', 3.0)
         self.declare_parameter(
             'terminal_max_vertical_acceleration',
-            1.0,
+            3.0,
         )
         self.declare_parameter('impact_radius', 0.25)
         self.declare_parameter('enable_sea_contact_failure', True)
@@ -236,11 +237,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('follow_max_closing_speed', 1.5)
         self.declare_parameter('follow_max_acceleration', 2.5)
         self.declare_parameter('altitude_velocity_gain', 1.0)
-        self.declare_parameter('max_vertical_speed', 2.0)
-        self.declare_parameter('max_vertical_acceleration', 2.0)
+        self.declare_parameter('max_vertical_speed', 4.0)
+        self.declare_parameter('max_vertical_acceleration', 3.0)
         self.declare_parameter(
             'max_actual_vertical_acceleration',
-            3.0,
+            4.0,
         )
         self.declare_parameter('speed_guard_margin', 0.5)
         self.declare_parameter('speed_governor_gain', 1.0)
@@ -474,27 +475,6 @@ class TrajectoryImpactSim(Node):
             ),
             self.terminal_radius + 0.1,
         )
-        self.approach_staging_height = max(
-            float(
-                self.get_parameter('approach_staging_height').value
-            ),
-            self.terminal_contact_clearance,
-        )
-        self.descent_start_distance = max(
-            float(
-                self.get_parameter('descent_start_distance').value
-            ),
-            self.terminal_radius,
-        )
-        self.descent_end_distance = min(
-            max(
-                float(
-                    self.get_parameter('descent_end_distance').value
-                ),
-                self.impact_radius,
-            ),
-            self.descent_start_distance - 0.1,
-        )
         self.front_camera_max_depression_angle = min(
             max(
                 float(
@@ -505,6 +485,15 @@ class TrajectoryImpactSim(Node):
                 math.radians(5.0),
             ),
             math.radians(85.0),
+        )
+        self.terminal_dive_angle = min(
+            max(
+                float(
+                    self.get_parameter('terminal_dive_angle').value
+                ),
+                math.radians(5.0),
+            ),
+            self.front_camera_max_depression_angle,
         )
         self.enable_sea_contact_failure = bool(
             self.get_parameter('enable_sea_contact_failure').value
@@ -758,11 +747,11 @@ class TrajectoryImpactSim(Node):
                 maximum_vertical_speed=self.max_vertical_speed,
                 maximum_horizontal_acceleration=(
                     self.limit_horizontal_acceleration(
-                        self.max_acceleration
+                        self.terminal_max_acceleration
                     )
                 ),
                 maximum_vertical_acceleration=(
-                    self.max_vertical_acceleration
+                    self.terminal_max_vertical_acceleration
                 ),
                 desired_closing_speed=self.terminal_closing_speed,
                 minimum_closing_speed=(
@@ -1049,7 +1038,6 @@ class TrajectoryImpactSim(Node):
             f'{self.intercept_guidance_horizon_max:.2f} s | '
             f'closing speed={self.terminal_min_closing_speed:.2f}-'
             f'{self.terminal_closing_speed:.2f} m/s | '
-            f'staging height={self.approach_staging_height:.2f} m | '
             f'control lookahead={self.terminal_control_lookahead:.2f} s'
         )
         self.get_logger().info(
@@ -1074,10 +1062,8 @@ class TrajectoryImpactSim(Node):
         )
         self.get_logger().info(
             'FRONT-VIEW DESCENT: '
-            f'hold cruise altitude outside '
-            f'{self.descent_start_distance:.1f} m | '
-            f'descend continuously to {self.approach_staging_height:.1f} m '
-            f'by {self.descent_end_distance:.1f} m | '
+            f'terminal flight-path angle='
+            f'{math.degrees(self.terminal_dive_angle):.1f} deg | '
             f'max target depression='
             f'{math.degrees(self.front_camera_max_depression_angle):.1f} deg'
         )
@@ -1716,11 +1702,11 @@ class TrajectoryImpactSim(Node):
         )
         actual_vertical_speed = abs(self.initial_uav_vz)
         speed_violation = actual_speed > self.max_speed + 0.1
-        command_horizontal_acceleration_limit = (
-            self.limit_horizontal_acceleration(self.max_acceleration)
-        )
-        command_vertical_acceleration_limit = (
-            self.max_vertical_acceleration
+        (
+            command_horizontal_acceleration_limit,
+            command_vertical_acceleration_limit,
+        ) = self.command_acceleration_limits(
+            self.terminal_mode_active
         )
         acceleration_violation = (
             self.measured_acceleration
@@ -2258,7 +2244,7 @@ class TrajectoryImpactSim(Node):
         self.retained_terminal_plan_time_ns = int(timestamp_ns)
 
     def retained_terminal_trajectory_sample(self, timestamp_ns=None):
-        """Return a retained plan with its shifted sample and remaining time."""
+        """Return a retained plan, shifted sample, and remaining time."""
         if (
             self.retained_terminal_plan is None
             or self.retained_terminal_plan_time_ns is None
@@ -2282,27 +2268,18 @@ class TrajectoryImpactSim(Node):
         return self.retained_terminal_plan, sample_time, remaining_time
 
     def pursuit_altitude_reference(self, horizontal_distance, target_z):
-        """Delay descent while keeping the target inside the front view."""
+        """Follow the terminal dive line while retaining front visibility."""
         horizontal_distance = max(float(horizontal_distance), 0.0)
         target_z = float(target_z)
-        transition_width = max(
-            self.descent_start_distance - self.descent_end_distance,
-            0.1,
-        )
-        blend = min(max(
-            (
-                horizontal_distance - self.descent_end_distance
-            ) / transition_width,
-            0.0,
-        ), 1.0)
-        staging_z = min(
-            target_z - self.approach_staging_height,
+        capture_z = min(
+            target_z - self.terminal_contact_clearance,
             self.sea_surface_z - self.terminal_contact_clearance,
         )
-        profile_z = (
-            blend * self.flight_altitude
-            + (1.0 - blend) * staging_z
+        dive_z = (
+            capture_z
+            - horizontal_distance * math.tan(self.terminal_dive_angle)
         )
+        profile_z = max(self.flight_altitude, dive_z)
 
         # At very short horizontal range, continuing to hold a fixed height
         # would drive the target below the forward camera's lower FOV edge.
@@ -2340,6 +2317,45 @@ class TrajectoryImpactSim(Node):
             self.sea_surface_z - self.terminal_contact_clearance,
         )
         return max(pursuit_z, capture_z), True
+
+    def pursuit_vertical_velocity(
+        self,
+        horizontal_distance,
+        target_z,
+        target_vz,
+        altitude_reference,
+        closing_speed,
+    ):
+        """Track the dive line using feed-forward and altitude feedback."""
+        capture_z = min(
+            float(target_z) - self.terminal_contact_clearance,
+            self.sea_surface_z - self.terminal_contact_clearance,
+        )
+        unclamped_dive_z = (
+            capture_z
+            - max(float(horizontal_distance), 0.0)
+            * math.tan(self.terminal_dive_angle)
+        )
+        feedforward_vz = 0.0
+        if unclamped_dive_z >= self.flight_altitude:
+            feedforward_vz = max(float(closing_speed), 0.0) * math.tan(
+                self.terminal_dive_angle
+            )
+            sea_clearance_z = (
+                self.sea_surface_z - self.terminal_contact_clearance
+            )
+            if capture_z < sea_clearance_z:
+                feedforward_vz += float(target_vz)
+
+        desired_vz = (
+            feedforward_vz
+            + self.altitude_velocity_gain
+            * (float(altitude_reference) - self.sim_z)
+        )
+        return max(
+            min(desired_vz, self.max_vertical_speed),
+            -self.max_vertical_speed,
+        )
 
     def pursuit_closing_speed(
         self,
@@ -2471,12 +2487,12 @@ class TrajectoryImpactSim(Node):
             self.trajectory_planner_type = 'TERMINAL_PURSUIT'
         self.guidance_altitude_reference = staging_z
         self.guidance_closing_speed = closing_speed
-        desired_vz = max(
-            min(
-                self.altitude_velocity_gain * (staging_z - self.sim_z),
-                self.max_vertical_speed,
-            ),
-            -self.max_vertical_speed,
+        desired_vz = self.pursuit_vertical_velocity(
+            horizontal_distance,
+            target_z,
+            self.target_vz,
+            staging_z,
+            closing_speed,
         )
 
         return (
@@ -2550,6 +2566,20 @@ class TrajectoryImpactSim(Node):
         self.command_ay = (command_vy - base_vy) / self.dt
 
         return command_vx, command_vy
+
+    def command_acceleration_limits(self, terminal_mode):
+        """Return the XY and Z acceleration limits for a guidance phase."""
+        if terminal_mode:
+            return (
+                self.limit_horizontal_acceleration(
+                    self.terminal_max_acceleration
+                ),
+                self.terminal_max_vertical_acceleration,
+            )
+        return (
+            self.limit_horizontal_acceleration(self.max_acceleration),
+            self.max_vertical_acceleration,
+        )
 
     def acceleration_limited_vertical_velocity(
         self,
@@ -3566,11 +3596,11 @@ class TrajectoryImpactSim(Node):
             terminal_mode,
         ) = self.plan_velocity(target_x, target_y, target_z)
         self.terminal_mode_active = terminal_mode
-        horizontal_acceleration_limit = (
-            self.max_acceleration
-        )
-        vertical_acceleration_limit = (
-            self.max_vertical_acceleration
+        (
+            horizontal_acceleration_limit,
+            vertical_acceleration_limit,
+        ) = self.command_acceleration_limits(
+            terminal_mode
         )
         command_vx, command_vy = self.acceleration_limited_velocity(
             desired_vx,
@@ -3886,11 +3916,11 @@ class TrajectoryImpactSim(Node):
             terminal_mode,
         ) = self.plan_velocity(target_x, target_y, target_z)
         self.terminal_mode_active = terminal_mode
-        horizontal_acceleration_limit = (
-            self.max_acceleration
-        )
-        vertical_acceleration_limit = (
-            self.max_vertical_acceleration
+        (
+            horizontal_acceleration_limit,
+            vertical_acceleration_limit,
+        ) = self.command_acceleration_limits(
+            terminal_mode
         )
 
         old_x = self.sim_x

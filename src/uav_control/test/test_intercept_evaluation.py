@@ -231,9 +231,7 @@ def make_front_view_altitude_controller():
     controller = SimpleNamespace(
         sea_surface_z=0.0,
         flight_altitude=-5.0,
-        approach_staging_height=1.0,
-        descent_start_distance=12.0,
-        descent_end_distance=3.0,
+        terminal_dive_angle=math.radians(45.0),
         front_camera_max_depression_angle=0.85,
         terminal_contact_clearance=0.05,
     )
@@ -259,7 +257,7 @@ def test_pursuit_holds_cruise_altitude_before_descent_window():
     assert reference_z == pytest.approx(-5.0)
 
 
-def test_pursuit_descends_continuously_while_closing_horizontally():
+def test_pursuit_holds_cruise_height_before_45_degree_dive_line():
     controller = make_front_view_altitude_controller()
 
     reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
@@ -268,7 +266,44 @@ def test_pursuit_descends_continuously_while_closing_horizontally():
         0.0,
     )
 
-    assert reference_z == pytest.approx(-3.0)
+    assert reference_z == pytest.approx(-5.0)
+
+
+def test_pursuit_follows_45_degree_dive_line_to_capture_point():
+    controller = make_front_view_altitude_controller()
+
+    far_reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        4.0,
+        0.0,
+    )
+    near_reference_z = TrajectoryImpactSim.pursuit_altitude_reference(
+        controller,
+        2.0,
+        0.0,
+    )
+
+    assert far_reference_z == pytest.approx(-4.05)
+    assert near_reference_z == pytest.approx(-2.05)
+    assert far_reference_z - near_reference_z == pytest.approx(-2.0)
+
+
+def test_pursuit_vertical_velocity_tracks_45_degree_dive_slope():
+    controller = make_front_view_altitude_controller()
+    controller.sim_z = -4.05
+    controller.altitude_velocity_gain = 1.0
+    controller.max_vertical_speed = 4.0
+
+    desired_vz = TrajectoryImpactSim.pursuit_vertical_velocity(
+        controller,
+        horizontal_distance=4.0,
+        target_z=0.0,
+        target_vz=0.0,
+        altitude_reference=-4.05,
+        closing_speed=1.5,
+    )
+
+    assert desired_vz == pytest.approx(1.5)
 
 
 def test_pursuit_near_target_respects_front_camera_depression_limit():
@@ -899,7 +934,29 @@ def make_constraint_monitor(horizontal_acceleration):
             requested,
         )
     )
+    evaluator.command_acceleration_limits = lambda terminal_mode: (
+        TrajectoryImpactSim.command_acceleration_limits(
+            evaluator,
+            terminal_mode,
+        )
+    )
     return evaluator
+
+
+def test_terminal_command_uses_its_configured_acceleration_limits():
+    evaluator = make_constraint_monitor(0.0)
+
+    terminal_limits = TrajectoryImpactSim.command_acceleration_limits(
+        evaluator,
+        True,
+    )
+    pursuit_limits = TrajectoryImpactSim.command_acceleration_limits(
+        evaluator,
+        False,
+    )
+
+    assert terminal_limits == pytest.approx((2.0, 1.0))
+    assert pursuit_limits == pytest.approx((4.5, 2.0))
 
 
 def test_terminal_tracking_response_is_not_a_hard_violation():

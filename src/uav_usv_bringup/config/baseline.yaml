@@ -20,7 +20,7 @@ trajectory_impact_sim:
     intercept_reference_position_gain: 1.0
     intercept_reference_max_speed: 6.2
     intercept_reference_max_acceleration: 3.2
-    intercept_reference_max_vertical_acceleration: 1.5
+    intercept_reference_max_vertical_acceleration: 2.5
     terminal_radius: 3.0
     terminal_closing_speed: 1.5
     terminal_min_closing_speed: 0.3
@@ -34,12 +34,11 @@ trajectory_impact_sim:
     terminal_contact_clearance: 0.05
     # Release terminal descent only after the target opens beyond this range.
     terminal_descent_release_distance: 4.0
-    approach_staging_height: 1.0
-    descent_start_distance: 12.0
-    descent_end_distance: 3.0
+    # Geometric flight-path angle relative to the moving capture point.
+    terminal_dive_angle: 0.78539816339
     front_camera_max_depression_angle: 0.85
-    terminal_max_acceleration: 2.0
-    terminal_max_vertical_acceleration: 1.0
+    terminal_max_acceleration: 3.0
+    terminal_max_vertical_acceleration: 3.0
     impact_radius: 0.25
     enable_sea_contact_failure: true
     sea_surface_z: 0.0
@@ -64,9 +63,11 @@ trajectory_impact_sim:
     follow_max_closing_speed: 1.5
     follow_max_acceleration: 2.5
     altitude_velocity_gain: 1.0
-    max_vertical_speed: 2.0
-    max_vertical_acceleration: 2.0
-    max_actual_vertical_acceleration: 3.0
+    # A 4 m/s descent paired with the 4 m/s USV baseline permits a
+    # 45-degree terminal flight-path angle without relaxing XY limits.
+    max_vertical_speed: 4.0
+    max_vertical_acceleration: 3.0
+    max_actual_vertical_acceleration: 4.0
     speed_guard_margin: 0.5
     speed_governor_gain: 1.0
     max_observation_yaw_rate: 1.0
