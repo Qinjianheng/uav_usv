@@ -278,10 +278,25 @@ fi
 
 publish_command()
 {
-    ros2 topic pub --once \
+    # Both moving_target and trajectory_impact_sim must receive X.  The ROS 2
+    # CLI otherwise publishes as soon as it discovers the first subscriber,
+    # so a short-lived publisher can start the UAV while the target misses the
+    # same command.  Wait for both subscribers and repeat the reliable sample
+    # before letting the CLI publisher disappear.  Y is harmlessly ignored by
+    # moving_target, but the same gate guarantees it reaches the controller.
+    if ! timeout 8s ros2 topic pub \
+        --times 3 \
+        --rate 10 \
+        --print 3 \
+        --wait-matching-subscriptions 2 \
+        --keep-alive 0.5 \
         /simulation/impact/command \
         std_msgs/msg/String \
-        "{data: '$1'}"
+        "{data: '$1'}"; then
+        echo "Command $1 was not delivered to both experiment nodes." >&2
+        echo "Inspect the UAV-USV experiment terminal, then retry." >&2
+        return 1
+    fi
 }
 
 echo
