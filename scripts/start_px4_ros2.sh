@@ -253,9 +253,14 @@ exec bash"
 
 echo "Waiting up to ${FLIGHT_READY_TIMEOUT} seconds for OFFBOARD ground hold..."
 flight_ready=false
-for ((elapsed = 0; elapsed < FLIGHT_READY_TIMEOUT; elapsed++)); do
+flight_ready_start_seconds=${SECONDS}
+next_flight_ready_status_seconds=10
+while ((SECONDS - flight_ready_start_seconds < FLIGHT_READY_TIMEOUT)); do
     ready_sample="$(
-        timeout 2s ros2 topic echo --once \
+        # Do not use the long-lived ROS 2 CLI daemon here.  A daemon whose
+        # rclpy context was invalidated returns "!rclpy.ok()" for every graph
+        # query, making a healthy controller look permanently unready.
+        timeout 3s ros2 topic echo --once --no-daemon --spin-time 1 \
             /simulation/impact/flight_ready \
             std_msgs/msg/Bool 2>/dev/null || true
     )"
@@ -263,8 +268,13 @@ for ((elapsed = 0; elapsed < FLIGHT_READY_TIMEOUT; elapsed++)); do
         flight_ready=true
         break
     fi
-    if ((elapsed > 0 && elapsed % 10 == 0)); then
-        echo "Still preparing PX4 OFFBOARD/arming (${elapsed}s)..."
+    flight_ready_elapsed=$((SECONDS - flight_ready_start_seconds))
+    if ((flight_ready_elapsed >= next_flight_ready_status_seconds)); then
+        echo "Still preparing PX4 OFFBOARD/arming" \
+            "(${flight_ready_elapsed}s)..."
+        next_flight_ready_status_seconds=$((
+            next_flight_ready_status_seconds + 10
+        ))
     fi
     sleep 1
 done
