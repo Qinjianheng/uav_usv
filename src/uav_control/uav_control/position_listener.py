@@ -7,7 +7,6 @@ from px4_msgs.msg import VehicleLocalPosition
 
 
 class PositionListener(Node):
-
     def __init__(self):
         super().__init__('position_listener')
 
@@ -23,7 +22,6 @@ class PositionListener(Node):
             self.position_callback,
             qos_profile
         )
-
 
     def position_callback(self, msg):
 

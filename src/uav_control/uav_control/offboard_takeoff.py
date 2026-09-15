@@ -11,7 +11,6 @@ import math
 
 
 class OffboardTakeoff(Node):
-
     def __init__(self):
         super().__init__('offboard_takeoff')
 
@@ -34,20 +33,17 @@ class OffboardTakeoff(Node):
             10
         )
 
-
         # 20Hz发送
         self.timer = self.create_timer(
             0.05,
             self.timer_callback
         )
 
-
         self.counter = 0
 
         self.get_logger().info(
             "Offboard takeoff node started"
         )
-
 
     def timestamp(self):
         return int(
@@ -56,9 +52,7 @@ class OffboardTakeoff(Node):
             .nanoseconds / 1000
         )
 
-
     def publish_offboard_mode(self):
-
         msg = OffboardControlMode()
 
         msg.timestamp = self.timestamp()
@@ -73,17 +67,12 @@ class OffboardTakeoff(Node):
         msg.thrust_and_torque = False
         msg.direct_actuator = False
 
-
         self.offboard_pub.publish(msg)
 
-
-
     def publish_setpoint(self):
-
         msg = TrajectorySetpoint()
 
         msg.timestamp = self.timestamp()
-
 
         # 目标位置
         # NED坐标
@@ -93,7 +82,6 @@ class OffboardTakeoff(Node):
             -2.0
         ]
 
-
         # 不控制速度
         msg.velocity = [
             math.nan,
@@ -101,23 +89,17 @@ class OffboardTakeoff(Node):
             math.nan
         ]
 
-
         msg.acceleration = [
             math.nan,
             math.nan,
             math.nan
         ]
 
-
         msg.yaw = 0.0
-
 
         self.setpoint_pub.publish(msg)
 
-
-
     def send_command(self, command):
-
         msg = VehicleCommand()
 
         msg.timestamp = self.timestamp()
@@ -130,16 +112,11 @@ class OffboardTakeoff(Node):
         msg.source_system = 1
         msg.source_component = 1
 
-
         msg.from_external = True
-
 
         self.command_pub.publish(msg)
 
-
-
     def arm(self):
-
         msg = VehicleCommand()
 
         msg.timestamp = self.timestamp()
@@ -159,13 +136,9 @@ class OffboardTakeoff(Node):
 
         msg.from_external = True
 
-
         self.command_pub.publish(msg)
 
-
-
     def offboard_mode(self):
-
         msg = VehicleCommand()
 
         msg.timestamp = self.timestamp()
@@ -175,13 +148,11 @@ class OffboardTakeoff(Node):
             .VEHICLE_CMD_DO_SET_MODE
         )
 
-
         # MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
         msg.param1 = 1.0
 
         # PX4 custom mode: OFFBOARD
         msg.param2 = 6.0
-
 
         msg.target_system = 1
         msg.target_component = 1
@@ -191,20 +162,14 @@ class OffboardTakeoff(Node):
 
         msg.from_external = True
 
-
         self.command_pub.publish(msg)
 
-
-
     def timer_callback(self):
-
         self.publish_offboard_mode()
 
         self.publish_setpoint()
 
-
         self.counter += 1
-
 
         # 先发送一秒setpoint
         if self.counter == 20:
@@ -215,7 +180,6 @@ class OffboardTakeoff(Node):
 
             self.offboard_mode()
 
-
         if self.counter == 40:
 
             self.get_logger().info(
@@ -223,7 +187,6 @@ class OffboardTakeoff(Node):
             )
 
             self.arm()
-
 
 
 def main(args=None):
@@ -237,7 +200,6 @@ def main(args=None):
     node.destroy_node()
 
     rclpy.shutdown()
-
 
 
 if __name__ == '__main__':

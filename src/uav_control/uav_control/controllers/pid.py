@@ -55,4 +55,3 @@ class AxisPid:
             self.integral = candidate_integral
         self.previous_measurement = float(measurement)
         return output
-
