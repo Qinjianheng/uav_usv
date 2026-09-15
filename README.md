@@ -2,6 +2,8 @@
 
 这是无人机—无人艇感知、跟踪、预测、规划与控制实验的 ROS 2 Humble 工作空间。
 
+项目目标、当前链路、主要参数和已知边界的简要说明见 [`docs/project_introduction.md`](docs/project_introduction.md)。
+
 ## 快速使用
 
 执行一键启动脚本：
