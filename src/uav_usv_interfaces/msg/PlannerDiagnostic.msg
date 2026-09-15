@@ -1,0 +1,35 @@
+uint8 RESULT_IDLE=0
+uint8 RESULT_SUCCESS=1
+uint8 RESULT_FAILURE=2
+
+uint8 NONE=0
+uint8 STATE_STALE=1
+uint8 PREDICTION_STALE=2
+uint8 HORIZON_INSUFFICIENT=3
+uint8 CAPTURE_GEOMETRY=4
+uint8 DYNAMIC_LIMIT_HORIZONTAL=5
+uint8 DYNAMIC_LIMIT_VERTICAL=6
+uint8 SEA_CLEARANCE=7
+uint8 MINCO_CONSTRUCTION_FAIL=8
+uint8 OPTIMIZATION_FAIL=9
+uint8 DEADLINE_EXCEEDED=10
+uint8 PLAN_STALE_ON_ARRIVAL=11
+
+uint64 mission_id
+uint64 plan_id
+uint64 prediction_sequence_id
+builtin_interfaces/Time source_stamp
+builtin_interfaces/Time planning_started_stamp
+builtin_interfaces/Time generated_stamp
+uint8 result
+uint8 failure_reason
+string failure_detail
+float64 compute_time
+float64 generation_time
+float64 optimization_time
+float64 input_age_at_start
+float64 input_age_at_finish
+uint32 candidate_count
+uint64 replaced_request_count
+uint64 completed_plan_count
+float64 actual_completion_frequency

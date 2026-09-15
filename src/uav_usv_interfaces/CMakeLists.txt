@@ -7,8 +7,14 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/InterceptTrajectory.msg"
   "msg/InterceptResult.msg"
+  "msg/MissionState.msg"
+  "msg/PlannerDiagnostic.msg"
+  "msg/PolynomialSegment.msg"
+  "msg/PredictedTargetPoint.msg"
   "msg/TargetObservation.msg"
+  "msg/TargetPrediction.msg"
   "msg/TargetState.msg"
   "msg/TrajectoryPoint.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs

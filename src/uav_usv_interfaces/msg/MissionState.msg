@@ -1,0 +1,20 @@
+uint8 INIT=0
+uint8 GROUND_HOLD=1
+uint8 TAKEOFF=2
+uint8 FOLLOW=3
+uint8 FAR_GUIDANCE=4
+uint8 MINCO_READY=5
+uint8 MINCO_TRACKING=6
+uint8 TERMINAL_MINCO=7
+uint8 PLAN_RECOVERY=8
+uint8 SAFE_WAIT=9
+uint8 CAPTURE=10
+uint8 FAILURE=11
+uint8 ABORTED=12
+
+builtin_interfaces/Time stamp
+uint64 mission_id
+uint8 state
+string state_name
+bool intercept_requested
+bool completed

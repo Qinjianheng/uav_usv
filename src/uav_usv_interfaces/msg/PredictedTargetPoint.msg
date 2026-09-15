@@ -1,0 +1,5 @@
+builtin_interfaces/Duration relative_time
+geometry_msgs/Point position
+geometry_msgs/Vector3 velocity
+geometry_msgs/Vector3 acceleration
+float64[9] position_covariance

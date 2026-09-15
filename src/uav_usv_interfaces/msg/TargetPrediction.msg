@@ -1,0 +1,16 @@
+uint64 mission_id
+uint64 sequence_id
+builtin_interfaces/Time source_stamp
+builtin_interfaces/Time generated_stamp
+builtin_interfaces/Time valid_until
+string frame_id
+string source
+string model
+float64 prediction_horizon
+uav_usv_interfaces/PredictedTargetPoint[] samples
+float64 turn_rate
+float64 turn_acceleration
+float64 longitudinal_acceleration
+float64 compute_time
+bool valid
+string invalid_reason
