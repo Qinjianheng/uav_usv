@@ -172,6 +172,36 @@ target_predictor_node:
     vertical_observation_margin: 0.25
     vertical_history_window: 1.0
 
+intercept_planner_node:
+  ros__parameters:
+    planning_rate_hz: 5.0
+    minimum_duration: 1.0
+    maximum_duration: 3.0
+    duration_margin: 0.35
+    sample_step: 0.05
+    # Match max_speed-speed_guard_margin and terminal hard limits above.
+    maximum_horizontal_speed: 6.5
+    maximum_vertical_speed: 4.0
+    maximum_horizontal_acceleration: 3.0
+    maximum_vertical_acceleration: 3.0
+    preferred_closing_speed: 1.5
+    conservative_closing_speed: 0.3
+    capture_radius: 0.25
+    sea_surface_z: 0.0
+    contact_clearance: 0.05
+    preferred_clearance: 0.1
+    piece_count: 3
+    target_curve_weight: 0.7
+    # Leave 5 ms for message conversion and event diagnostics.
+    solver_deadline_seconds: 0.075
+    deadline_seconds: 0.08
+    maximum_input_age: 0.125
+    endpoint_tolerance: 0.5
+    response_delay: 0.15
+    effective_vertical_braking_acceleration: 2.5
+    quadrature_intervals_per_piece: 6
+    frame_id: local_ned
+
 target_kalman_filter:
   ros__parameters:
     frame_id: local_ned
