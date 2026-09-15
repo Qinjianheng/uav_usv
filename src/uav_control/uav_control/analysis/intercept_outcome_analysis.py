@@ -25,7 +25,12 @@ from pathlib import Path
 
 CAPTURE_RADIUS_DEFAULT = 0.25
 TERMINAL_RADIUS_DEFAULT = 3.0
-TERMINAL_PURSUIT_MODES = ('PURSUIT', 'TERMINAL_PURSUIT')
+TERMINAL_PURSUIT_MODES = (
+    'PURSUIT',
+    'TERMINAL_PURSUIT',
+    'FAR_GUIDANCE',
+    'MINCO_SAFE_WAIT',
+)
 
 
 def finite_value(row, field):
@@ -48,6 +53,15 @@ def finite_column(rows, field):
         if value is not None:
             values.append(value)
     return values
+
+
+def finite_column_alias(rows, *fields):
+    """Read the first available numeric field from a log schema."""
+    for field in fields:
+        values = finite_column(rows, field)
+        if values:
+            return values
+    return []
 
 
 def percentile(values, fraction):
@@ -125,6 +139,16 @@ def planner_histogram(rows):
     return histogram
 
 
+def text_histogram(rows, field):
+    """Count non-empty categorical values in one field."""
+    histogram = {}
+    for row in rows:
+        value = (row.get(field) or '').strip()
+        if value:
+            histogram[value] = histogram.get(value, 0) + 1
+    return histogram
+
+
 def minco_share(rows):
     """Return the fraction of intercept rows planned by MINCO."""
     histogram = planner_histogram(rows)
@@ -193,7 +217,22 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
         for row in rows
         if radial_components(row) is not None
     ]
-    control_steps = finite_column(rows, 'control_dt')
+    control_steps = finite_column(rows, 'sim_dt')
+    if not control_steps:
+        control_steps = finite_column(rows, 'control_dt')
+    wall_steps = finite_column(rows, 'wall_dt')
+    callback_times = finite_column(rows, 'callback_compute_time')
+    planner_times = finite_column(rows, 'planner_compute_time')
+    horizontal_min_times = finite_column_alias(
+        rows,
+        't_horizontal_min',
+        'horizontal_min_time',
+    )
+    vertical_min_times = finite_column_alias(
+        rows,
+        't_vertical_min',
+        'vertical_min_time',
+    )
     retained_plan_ages = finite_column(rows, 'retained_plan_age')
     planner_counts = planner_histogram(rows)
     planner_total = sum(planner_counts.values())
@@ -202,6 +241,27 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
         for planner, count in planner_counts.items()
         if planner.endswith('_HOLD')
     )
+    planner_attempts = sum(
+        1 for row in rows if finite_value(row, 'planner_attempted') == 1.0
+    )
+    planner_successes = sum(
+        1 for row in rows if finite_value(row, 'planner_succeeded') == 1.0
+    )
+    prediction_errors = {}
+    for model in ('guidance', 'kf'):
+        for label in ('0p5', '1p0', '2p0'):
+            field = f'{model}_prediction_{label}_error'
+            values = finite_column(rows, field)
+            prediction_errors[field] = {
+                'count': len(values),
+                'rmse': (
+                    math.sqrt(
+                        sum(value * value for value in values) / len(values)
+                    )
+                    if values else None
+                ),
+                'p95': percentile(values, 0.95),
+            }
 
     return {
         'row_count': len(rows),
@@ -237,6 +297,18 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
         ),
         'minco_share': minco_share(rows),
         'planner_histogram': planner_counts,
+        'planner_failure_histogram': text_histogram(
+            rows,
+            'planner_failure_reason',
+        ),
+        'guidance_phase_histogram': text_histogram(rows, 'guidance_phase'),
+        'sea_safety_histogram': text_histogram(rows, 'sea_safety_state'),
+        'planner_attempts': planner_attempts,
+        'planner_successes': planner_successes,
+        'planner_success_rate': (
+            planner_successes / planner_attempts if planner_attempts else None
+        ),
+        'prediction_errors': prediction_errors,
         'held_plan_share': (
             held_samples / planner_total if planner_total else None
         ),
@@ -246,6 +318,15 @@ def terminal_metrics(rows, capture_radius=CAPTURE_RADIUS_DEFAULT):
             else None
         ),
         'p95_control_dt': percentile(control_steps, 0.95),
+        'p95_wall_dt': percentile(wall_steps, 0.95),
+        'p95_callback_compute_time': percentile(callback_times, 0.95),
+        'p95_planner_compute_time': percentile(planner_times, 0.95),
+        'minimum_horizontal_min_time': (
+            min(horizontal_min_times) if horizontal_min_times else None
+        ),
+        'minimum_vertical_min_time': (
+            min(vertical_min_times) if vertical_min_times else None
+        ),
         'maximum_retained_plan_age': (
             max(retained_plan_ages) if retained_plan_ages else None
         ),

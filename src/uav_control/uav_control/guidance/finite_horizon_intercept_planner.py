@@ -1,12 +1,48 @@
 """Finite-horizon polynomial trajectory planning for moving interception."""
 
 import math
+import time
 from dataclasses import dataclass, replace
+from enum import Enum
 
 import numpy as np
 from scipy.optimize import minimize
 
 from uav_control.guidance.minco_trajectory import MincoS3Trajectory
+from uav_control.guidance.intercept_reachability import estimate_reachability
+
+
+class PlanningFailureReason(str, Enum):
+    """Auditable terminal-planning outcomes."""
+
+    NONE = 'NONE'
+    HORIZON_INSUFFICIENT = 'HORIZON_INSUFFICIENT'
+    DYNAMIC_LIMIT = 'DYNAMIC_LIMIT'
+    SEA_CLEARANCE = 'SEA_CLEARANCE'
+    TRAJECTORY_INFEASIBLE = 'TRAJECTORY_INFEASIBLE'
+    OPTIMIZATION_FAIL = 'OPTIMIZATION_FAIL'
+    TARGET_SHIFT = 'TARGET_SHIFT'
+    PLAN_EXPIRED = 'PLAN_EXPIRED'
+
+
+@dataclass(frozen=True)
+class PlannerDiagnostics:
+    """Compact diagnostics from the most recent planning call."""
+
+    failure_reason: PlanningFailureReason = PlanningFailureReason.NONE
+    horizontal_min_time: float = math.nan
+    vertical_min_time: float = math.nan
+    sea_safe_min_time: float = math.nan
+    required_time: float = math.nan
+    search_min_time: float = math.nan
+    search_max_time: float = math.nan
+    selected_time: float = math.nan
+    candidates_checked: int = 0
+    total_compute_time: float = 0.0
+    generation_compute_time: float = 0.0
+    optimization_compute_time: float = 0.0
+    optimization_attempted: bool = False
+    optimization_succeeded: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +185,10 @@ class FiniteHorizonInterceptPlanner:
         minco_spatial_radius=0.75,
         minco_constraint_penalty_weight=1000.0,
         minco_quadrature_intervals_per_piece=8,
+        absolute_maximum_duration=None,
+        horizon_extra_margin=0.5,
+        response_delay=0.15,
+        effective_vertical_braking_acceleration=None,
     ):
         """Configure the finite-horizon feasibility search."""
         self.minimum_duration = self._positive(
@@ -161,6 +201,21 @@ class FiniteHorizonInterceptPlanner:
         )
         if self.maximum_duration < self.minimum_duration:
             raise ValueError('maximum duration must not be less than minimum')
+        if absolute_maximum_duration is None:
+            absolute_maximum_duration = self.maximum_duration
+        self.absolute_maximum_duration = self._positive(
+            absolute_maximum_duration,
+            'absolute maximum duration',
+        )
+        if self.absolute_maximum_duration < self.maximum_duration:
+            raise ValueError(
+                'absolute maximum duration must not be less than maximum'
+            )
+        self.horizon_extra_margin = max(
+            float(horizon_extra_margin),
+            0.0,
+        )
+        self.response_delay = max(float(response_delay), 0.0)
         self.duration_step = self._positive(duration_step, 'duration step')
         self.sample_step = self._positive(sample_step, 'sample step')
         self.maximum_horizontal_speed = self._positive(
@@ -178,6 +233,14 @@ class FiniteHorizonInterceptPlanner:
         self.maximum_vertical_acceleration = self._positive(
             maximum_vertical_acceleration,
             'maximum vertical acceleration',
+        )
+        if effective_vertical_braking_acceleration is None:
+            effective_vertical_braking_acceleration = (
+                self.maximum_vertical_acceleration
+            )
+        self.effective_vertical_braking_acceleration = self._positive(
+            effective_vertical_braking_acceleration,
+            'effective vertical braking acceleration',
         )
         self.desired_closing_speed = self._positive(
             desired_closing_speed,
@@ -243,6 +306,7 @@ class FiniteHorizonInterceptPlanner:
         self._last_duration = 0.5 * (
             self.minimum_duration + self.maximum_duration
         )
+        self.last_diagnostics = PlannerDiagnostics()
         self._prewarm_minco_mappings()
 
     @staticmethod
@@ -273,21 +337,45 @@ class FiniteHorizonInterceptPlanner:
             return tuple(value / speed for value in fallback_velocity)
         return 1.0, 0.0, 0.0
 
-    def _duration_candidates(self):
+    def _duration_candidates(self, minimum=None, maximum=None):
+        if minimum is None:
+            minimum = self.minimum_duration
+        if maximum is None:
+            maximum = self.maximum_duration
         count = int(math.floor(
-            (self.maximum_duration - self.minimum_duration)
+            (maximum - minimum)
             / self.duration_step
             + 1e-9
         ))
         durations = [
-            self.minimum_duration + index * self.duration_step
+            minimum + index * self.duration_step
             for index in range(count + 1)
         ]
-        if durations[-1] < self.maximum_duration - 1e-9:
-            durations.append(self.maximum_duration)
+        if durations[-1] < maximum - 1e-9:
+            durations.append(maximum)
         if self._last_duration is not None:
             durations.sort(key=lambda value: abs(value - self._last_duration))
         return durations
+
+    def _capture_contact_position(self, target_position):
+        """Return a sea-safe point inside the configured capture sphere."""
+        capture_compatible_clearance = max(
+            self.sea_surface_z
+            - (target_position[2] - self.capture_radius),
+            self.contact_clearance,
+        )
+        effective_clearance = min(
+            self.preferred_clearance,
+            capture_compatible_clearance,
+        )
+        contact_position = list(target_position)
+        contact_position[2] = min(
+            contact_position[2],
+            self.sea_surface_z - effective_clearance,
+        )
+        if abs(contact_position[2] - target_position[2]) > self.capture_radius:
+            return None
+        return tuple(contact_position)
 
     def _prewarm_minco_mappings(self):
         """Move constant MINCO matrix inversions outside the control loop."""
@@ -358,14 +446,9 @@ class FiniteHorizonInterceptPlanner:
             self.preferred_clearance,
             capture_compatible_clearance,
         )
-        contact_position = list(target_position)
-        contact_position[2] = min(
-            contact_position[2],
-            self.sea_surface_z - effective_clearance,
-        )
-        if abs(contact_position[2] - target_position[2]) > self.capture_radius:
+        contact_position = self._capture_contact_position(target_position)
+        if contact_position is None:
             return None
-        contact_position = tuple(contact_position)
         horizontal_direction = self._direction(
             initial_position[:2],
             contact_position[:2],
@@ -374,7 +457,7 @@ class FiniteHorizonInterceptPlanner:
         terminal_velocity = (
             target_velocity[0] + closing_speed * horizontal_direction[0],
             target_velocity[1] + closing_speed * horizontal_direction[1],
-            min(target_velocity[2], 0.0),
+            min(target_velocity[2], -1e-9),
         )
         axes = tuple(
             QuinticAxis.from_boundary(
@@ -430,7 +513,9 @@ class FiniteHorizonInterceptPlanner:
                     for position in guide_positions_override
                 ]
                 if len(guide_positions) != self.minco_piece_count - 1:
-                    raise ValueError('optimized MINCO waypoint count is invalid')
+                    raise ValueError(
+                        'optimized MINCO waypoint count is invalid'
+                    )
             if piece_durations_override is None:
                 piece_duration = duration / self.minco_piece_count
                 piece_durations = (
@@ -664,7 +749,7 @@ class FiniteHorizonInterceptPlanner:
         )
 
     def _geometrically_optimize_candidate(self, seed_plan, candidate_args):
-        """Deform MINCO waypoints and interval times using unconstrained NLP."""
+        """Optimize MINCO waypoints and interval times."""
         if (
             seed_plan is None
             or seed_plan.minco_trajectory is None
@@ -710,7 +795,9 @@ class FiniteHorizonInterceptPlanner:
         corridor_radii = []
         initial_latents = []
         for curve_offset in waypoint_curve_offsets:
-            offset_norm = math.sqrt(sum(value * value for value in curve_offset))
+            offset_norm = math.sqrt(
+                sum(value * value for value in curve_offset)
+            )
             radius = max(self.minco_spatial_radius, offset_norm, 1e-6)
             desired_offset = min(initial_weight * offset_norm, radius)
             if desired_offset > 1e-9 and offset_norm > 1e-9:
@@ -837,7 +924,18 @@ class FiniteHorizonInterceptPlanner:
         target_state_at_time,
         previous_acceleration=(0.0, 0.0, 0.0),
     ):
-        """Return the earliest feasible trajectory or ``None``."""
+        """
+        Return the earliest feasible trajectory or ``None``.
+
+        The search interval is rebuilt on every call from independent
+        horizontal and vertical reachability bounds.  ``maximum_duration`` is
+        the nominal upper bound; ``absolute_maximum_duration`` is the hard
+        compute/mission cap.
+        """
+        compute_start = time.perf_counter()
+        generation_compute_time = 0.0
+        optimization_compute_time = 0.0
+        optimization_succeeded = False
         initial_position = self._vector(initial_position, 'initial position')
         initial_velocity = self._vector(initial_velocity, 'initial velocity')
         initial_acceleration = self._vector(
@@ -856,7 +954,105 @@ class FiniteHorizonInterceptPlanner:
                 target_state_cache[key] = target_state_at_time(float(time))
             return target_state_cache[key]
 
-        for duration in self._duration_candidates():
+        # Fixed-point evaluation accounts for a moving endpoint without
+        # changing the target-prediction model itself.
+        estimate_time = self.minimum_duration
+        reachability = None
+        contact_position = None
+        for _ in range(4):
+            target_state = cached_target_state(estimate_time)
+            if len(target_state) != 3:
+                raise ValueError(
+                    'target state must contain position, velocity, '
+                    'acceleration'
+                )
+            target_position = self._vector(
+                target_state[0],
+                'target position',
+            )
+            target_velocity = self._vector(
+                target_state[1],
+                'target velocity',
+            )
+            contact_position = self._capture_contact_position(target_position)
+            if contact_position is None:
+                self.last_diagnostics = PlannerDiagnostics(
+                    failure_reason=PlanningFailureReason.SEA_CLEARANCE,
+                    total_compute_time=time.perf_counter() - compute_start,
+                )
+                return None
+            reachability = estimate_reachability(
+                initial_position,
+                initial_velocity,
+                contact_position,
+                target_velocity,
+                self.maximum_horizontal_speed,
+                self.maximum_vertical_speed,
+                self.maximum_horizontal_acceleration,
+                self.maximum_vertical_acceleration,
+                self.effective_vertical_braking_acceleration,
+                self.response_delay,
+                self.absolute_maximum_duration,
+            )
+            required_time = reachability.required_time
+            if not math.isfinite(required_time):
+                break
+            updated_time = max(self.minimum_duration, required_time)
+            if abs(updated_time - estimate_time) <= 0.02:
+                estimate_time = updated_time
+                break
+            estimate_time = min(updated_time, self.absolute_maximum_duration)
+
+        required_time = (
+            reachability.required_time
+            if reachability is not None
+            else math.inf
+        )
+        search_minimum = max(self.minimum_duration, required_time)
+        search_maximum = min(
+            self.absolute_maximum_duration,
+            max(
+                self.maximum_duration,
+                search_minimum + self.horizon_extra_margin,
+            ),
+        )
+        base_diagnostics = dict(
+            horizontal_min_time=(
+                reachability.horizontal_min_time
+                if reachability is not None else math.inf
+            ),
+            vertical_min_time=(
+                reachability.vertical_min_time
+                if reachability is not None else math.inf
+            ),
+            sea_safe_min_time=(
+                reachability.sea_safe_min_time
+                if reachability is not None else math.inf
+            ),
+            required_time=required_time,
+            search_min_time=search_minimum,
+            search_max_time=search_maximum,
+        )
+        if (
+            not math.isfinite(required_time)
+            or search_minimum > self.absolute_maximum_duration + 1e-9
+        ):
+            self.last_diagnostics = PlannerDiagnostics(
+                failure_reason=PlanningFailureReason.HORIZON_INSUFFICIENT,
+                total_compute_time=time.perf_counter() - compute_start,
+                **base_diagnostics,
+            )
+            return None
+
+        candidate_count = 0
+        dynamic_rejection = False
+        sea_rejection = False
+        optimization_attempted = False
+
+        for duration in self._duration_candidates(
+            search_minimum,
+            search_maximum,
+        ):
             target_state = cached_target_state(duration)
             if len(target_state) != 3:
                 raise ValueError(
@@ -909,9 +1105,20 @@ class FiniteHorizonInterceptPlanner:
                         ),
                         target_curve_weight=curve_weight,
                     )
+                    generation_start = time.perf_counter()
                     candidate = self._candidate(
                         **candidate_args,
+                        return_infeasible=True,
                     )
+                    generation_compute_time += (
+                        time.perf_counter() - generation_start
+                    )
+                    candidate_count += 1
+                    if candidate is None:
+                        sea_rejection = True
+                    elif not candidate.dynamically_feasible:
+                        dynamic_rejection = True
+                        candidate = None
                     if candidate is not None:
                         candidate = self._densely_validated_plan(candidate)
                     if candidate is not None:
@@ -920,16 +1127,37 @@ class FiniteHorizonInterceptPlanner:
                             and candidate.minco_trajectory is not None
                             and self.minco_optimization_max_iterations > 0
                         ):
+                            optimization_attempted = True
+                            optimization_start = time.perf_counter()
                             optimized = self._geometrically_optimize_candidate(
                                 candidate,
                                 candidate_args,
+                            )
+                            optimization_compute_time += (
+                                time.perf_counter() - optimization_start
                             )
                             validated_optimized = self._densely_validated_plan(
                                 optimized,
                             )
                             if validated_optimized is not None:
                                 candidate = validated_optimized
+                                optimization_succeeded = True
                         self._last_duration = candidate.duration
+                        self.last_diagnostics = PlannerDiagnostics(
+                            failure_reason=PlanningFailureReason.NONE,
+                            selected_time=candidate.duration,
+                            candidates_checked=candidate_count,
+                            total_compute_time=(
+                                time.perf_counter() - compute_start
+                            ),
+                            generation_compute_time=generation_compute_time,
+                            optimization_compute_time=(
+                                optimization_compute_time
+                            ),
+                            optimization_attempted=optimization_attempted,
+                            optimization_succeeded=optimization_succeeded,
+                            **base_diagnostics,
+                        )
                         return candidate
 
         if (
@@ -940,7 +1168,7 @@ class FiniteHorizonInterceptPlanner:
             # A single long-horizon, low-closing-speed seed bounds rescue
             # optimization cost.  The fast deterministic search above remains
             # the normal online path.
-            duration = self.maximum_duration
+            duration = search_maximum
             target_state = cached_target_state(duration)
             target_position = self._vector(
                 target_state[0],
@@ -981,16 +1209,53 @@ class FiniteHorizonInterceptPlanner:
                 intermediate_target_positions=intermediate_target_positions,
                 target_curve_weight=self.minco_target_curve_weight,
             )
+            generation_start = time.perf_counter()
             seed = self._candidate(
                 **candidate_args,
                 return_infeasible=True,
             )
+            generation_compute_time += time.perf_counter() - generation_start
+            optimization_start = time.perf_counter()
             optimized = self._geometrically_optimize_candidate(
                 seed,
                 candidate_args,
             )
+            optimization_compute_time += (
+                time.perf_counter() - optimization_start
+            )
+            optimization_attempted = True
             optimized = self._densely_validated_plan(optimized)
             if optimized is not None:
+                optimization_succeeded = True
                 self._last_duration = optimized.duration
+                self.last_diagnostics = PlannerDiagnostics(
+                    failure_reason=PlanningFailureReason.NONE,
+                    selected_time=optimized.duration,
+                    candidates_checked=candidate_count + 1,
+                    total_compute_time=time.perf_counter() - compute_start,
+                    generation_compute_time=generation_compute_time,
+                    optimization_compute_time=optimization_compute_time,
+                    optimization_attempted=optimization_attempted,
+                    optimization_succeeded=optimization_succeeded,
+                    **base_diagnostics,
+                )
                 return optimized
+        if dynamic_rejection:
+            failure_reason = PlanningFailureReason.DYNAMIC_LIMIT
+        elif sea_rejection:
+            failure_reason = PlanningFailureReason.SEA_CLEARANCE
+        elif optimization_attempted:
+            failure_reason = PlanningFailureReason.OPTIMIZATION_FAIL
+        else:
+            failure_reason = PlanningFailureReason.TRAJECTORY_INFEASIBLE
+        self.last_diagnostics = PlannerDiagnostics(
+            failure_reason=failure_reason,
+            candidates_checked=candidate_count,
+            total_compute_time=time.perf_counter() - compute_start,
+            generation_compute_time=generation_compute_time,
+            optimization_compute_time=optimization_compute_time,
+            optimization_attempted=optimization_attempted,
+            optimization_succeeded=optimization_succeeded,
+            **base_diagnostics,
+        )
         return None

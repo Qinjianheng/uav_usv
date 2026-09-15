@@ -1,6 +1,11 @@
 import csv
+import copy
+import json
 import math
+import subprocess
+import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +34,11 @@ from uav_usv_interfaces.msg import (
 
 from uav_control.guidance.finite_horizon_intercept_planner import (
     FiniteHorizonInterceptPlanner,
+    PlanningFailureReason,
+)
+from uav_control.guidance.intercept_reachability import (
+    SeaSafetyState,
+    apply_sea_safety_guard,
 )
 from uav_control.guidance.rolling_intercept_guidance import (
     RollingReferenceFilter,
@@ -94,6 +104,16 @@ class TrajectoryImpactSim(Node):
         'estimated_turn_acceleration',
         'estimated_longitudinal_acceleration',
         'control_dt',
+        'sim_dt',
+        'wall_dt',
+        'callback_compute_time',
+        'prediction_compute_time',
+        'planner_compute_time',
+        'minco_generation_compute_time',
+        'minco_optimization_compute_time',
+        'guidance_compute_time',
+        'safety_compute_time',
+        'logging_compute_time',
         'retained_plan_age',
         'distance',
         'horizontal_distance',
@@ -110,7 +130,21 @@ class TrajectoryImpactSim(Node):
         't_go',
         'guidance_altitude_reference',
         'guidance_closing_speed',
+        't_horizontal_min',
+        't_vertical_min',
+        't_sea_safe_min',
+        'planner_search_min_time',
+        'planner_search_max_time',
+        'planner_failure_reason',
+        'guidance_phase',
+        'sea_safety_state',
+        'sea_safety_margin',
         'trajectory_plan_feasible',
+        'planner_attempted',
+        'planner_succeeded',
+        'minco_optimization_attempted',
+        'minco_optimization_succeeded',
+        'plan_hold_active',
         'trajectory_planner',
         'minco_target_curve_weight',
         'minco_constraint_penalty',
@@ -195,10 +229,15 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('terminal_min_closing_speed', 0.3)
         self.declare_parameter('terminal_closing_speed_step', 0.3)
         self.declare_parameter('terminal_plan_duration_step', 0.1)
+        self.declare_parameter('terminal_plan_absolute_max_duration', 3.0)
+        self.declare_parameter('terminal_plan_horizon_extra_margin', 0.5)
         self.declare_parameter('terminal_control_lookahead', 0.15)
         self.declare_parameter('terminal_replan_period', 0.1)
         self.declare_parameter('terminal_plan_max_hold_time', 0.2)
         self.declare_parameter('terminal_plan_target_error_limit', 0.5)
+        self.declare_parameter('terminal_plan_min_remaining_time', 0.2)
+        self.declare_parameter('terminal_plan_failure_limit', 3)
+        self.declare_parameter('enable_async_terminal_planner', True)
         self.declare_parameter('terminal_trajectory_position_gain', 1.2)
         self.declare_parameter('terminal_trajectory_vertical_gain', 1.2)
         self.declare_parameter('enable_minco_planner', True)
@@ -216,6 +255,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('terminal_minimum_clearance', 0.1)
         self.declare_parameter('terminal_safety_response_time', 0.15)
         self.declare_parameter('terminal_safety_margin', 0.02)
+        self.declare_parameter('terminal_safety_warning_margin', 0.15)
+        self.declare_parameter(
+            'terminal_effective_vertical_braking_acceleration',
+            2.5,
+        )
         self.declare_parameter('terminal_descent_release_distance', 4.0)
         self.declare_parameter(
             'terminal_dive_angle',
@@ -289,6 +333,7 @@ class TrajectoryImpactSim(Node):
 
         self.dt = 1.0 / max(float(control_rate_hz), 1.0)
         self.control_dt = self.dt
+        self.sim_dt = self.dt
         self.last_control_callback_time_ns = None
         self.offboard_prestream_cycles = max(
             round(
@@ -496,6 +541,22 @@ class TrajectoryImpactSim(Node):
             ),
             self.dt,
         )
+        self.terminal_plan_absolute_max_duration = max(
+            float(
+                self.get_parameter(
+                    'terminal_plan_absolute_max_duration'
+                ).value
+            ),
+            self.intercept_guidance_horizon_max,
+        )
+        self.terminal_plan_horizon_extra_margin = max(
+            float(
+                self.get_parameter(
+                    'terminal_plan_horizon_extra_margin'
+                ).value
+            ),
+            self.terminal_plan_duration_step,
+        )
         self.terminal_control_lookahead = max(
             float(
                 self.get_parameter(
@@ -525,6 +586,25 @@ class TrajectoryImpactSim(Node):
                 ).value
             ),
             0.01,
+        )
+        self.terminal_plan_min_remaining_time = max(
+            float(
+                self.get_parameter(
+                    'terminal_plan_min_remaining_time'
+                ).value
+            ),
+            self.terminal_control_lookahead,
+        )
+        self.terminal_plan_failure_limit = max(
+            int(
+                self.get_parameter(
+                    'terminal_plan_failure_limit'
+                ).value
+            ),
+            1,
+        )
+        self.enable_async_terminal_planner = bool(
+            self.get_parameter('enable_async_terminal_planner').value
         )
         self.terminal_trajectory_position_gain = max(
             float(
@@ -658,6 +738,14 @@ class TrajectoryImpactSim(Node):
             ),
             0.5 * self.impact_radius,
         )
+        self.terminal_safety_warning_margin = max(
+            float(
+                self.get_parameter(
+                    'terminal_safety_warning_margin'
+                ).value
+            ),
+            0.0,
+        )
         self.terminal_descent_release_distance = max(
             float(
                 self.get_parameter(
@@ -784,6 +872,17 @@ class TrajectoryImpactSim(Node):
                 0.1,
             ),
             self.max_vertical_acceleration,
+        )
+        self.terminal_effective_vertical_braking_acceleration = min(
+            max(
+                float(
+                    self.get_parameter(
+                        'terminal_effective_vertical_braking_acceleration'
+                    ).value
+                ),
+                0.1,
+            ),
+            self.terminal_max_vertical_acceleration,
         )
         requested_guard_margin = max(
             float(self.get_parameter('speed_guard_margin').value),
@@ -1001,8 +1100,24 @@ class TrajectoryImpactSim(Node):
                 minco_quadrature_intervals_per_piece=(
                     self.minco_quadrature_intervals_per_piece
                 ),
+                absolute_maximum_duration=(
+                    self.terminal_plan_absolute_max_duration
+                ),
+                horizon_extra_margin=(
+                    self.terminal_plan_horizon_extra_margin
+                ),
+                response_delay=self.terminal_safety_response_time,
+                effective_vertical_braking_acceleration=(
+                    self.terminal_effective_vertical_braking_acceleration
+                ),
             )
         )
+        self.planner_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix='minco_planner',
+        )
+        self.planner_future = None
+        self.planner_epoch = 0
 
         self.target_position_sub = self.create_subscription(
             Point,
@@ -1207,7 +1322,68 @@ class TrajectoryImpactSim(Node):
         self.measured_vertical_acceleration = 0.0
         self.terminal_mode_active = False
         self.trajectory_plan_active = False
+        self.planner_attempted_this_cycle = False
+        self.planner_succeeded_this_cycle = False
+        self.plan_hold_active = False
+        self.optimization_attempted_this_cycle = False
+        self.optimization_succeeded_this_cycle = False
+        self.intercept_control_cycles = (
+            getattr(self, 'intercept_control_cycles', 0) + 1
+        )
         self.trajectory_planner_type = 'PURSUIT'
+        self.guidance_phase = 'FOLLOW'
+        self.minco_ever_engaged = False
+        self.consecutive_plan_failures = 0
+        self.plan_attempt_count = 0
+        self.plan_success_count = 0
+        self.plan_hold_count = 0
+        self.intercept_control_cycles = 0
+        self.minco_execution_cycles = 0
+        self.optimization_attempt_count = 0
+        self.optimization_success_count = 0
+        self.planner_failure_counts = {}
+        self.planner_failure_reason = PlanningFailureReason.NONE.value
+        self.horizontal_min_time = math.nan
+        self.vertical_min_time = math.nan
+        self.sea_safe_min_time = math.nan
+        self.planner_search_min_time = math.nan
+        self.planner_search_max_time = math.nan
+        self.sea_safety_state = SeaSafetyState.SAFE.value
+        self.sea_safety_margin = math.inf
+        self.first_unrecoverable_safety_detail = ''
+        self.minimum_sea_safety_margin = math.inf
+        self.first_safety_warning_time = None
+        self.first_safety_brake_time = None
+        self.final_relative_speed = math.nan
+        self.final_vertical_relative_speed = math.nan
+        self.wall_dt = self.dt
+        self.last_control_wall_time = None
+        self.callback_compute_time = 0.0
+        self.prediction_compute_time = 0.0
+        self.planner_compute_time = 0.0
+        self.minco_generation_compute_time = 0.0
+        self.minco_optimization_compute_time = 0.0
+        self.guidance_compute_time = 0.0
+        self.safety_compute_time = 0.0
+        self.logging_compute_time = 0.0
+        self.timing_samples = {
+            name: [] for name in (
+                'sim_dt',
+                'wall_dt',
+                'callback_compute_time',
+                'prediction_compute_time',
+                'planner_compute_time',
+                'minco_generation_compute_time',
+                'minco_optimization_compute_time',
+                'guidance_compute_time',
+                'safety_compute_time',
+                'logging_compute_time',
+            )
+        }
+        self.timing_samples_by_phase = {
+            phase: {name: [] for name in self.timing_samples}
+            for phase in ('FOLLOW', 'INTERCEPT')
+        }
         self.retained_terminal_plan = None
         self.retained_terminal_plan_time_ns = None
         self.retained_terminal_plan_age = 0.0
@@ -1288,7 +1464,7 @@ class TrajectoryImpactSim(Node):
                 if self.enable_minco_planner
                 else 'single-piece quintic compatibility mode'
             )
-            + ' | infeasible-plan fallback=pursuit'
+            + ' | infeasible-plan fallback=HOLD/SAFE_WAIT'
         )
         self.get_logger().info(
             'SMOOTH TAKEOFF: velocity control on all axes | '
@@ -1789,6 +1965,11 @@ class TrajectoryImpactSim(Node):
         return progress * progress * (3.0 - 2.0 * progress)
 
     def reset_evaluation(self):
+        self.planner_epoch = getattr(self, 'planner_epoch', 0) + 1
+        planner_future = getattr(self, 'planner_future', None)
+        if planner_future is not None:
+            if planner_future.cancel():
+                self.planner_future = None
         self.completed = False
         self.hit = False
         self.outcome = ''
@@ -1805,7 +1986,36 @@ class TrajectoryImpactSim(Node):
         self.max_observed_horizontal_acceleration = 0.0
         self.max_observed_vertical_acceleration = 0.0
         self.terminal_mode_active = False
+        self.guidance_phase = 'FAR_GUIDANCE'
+        self.minco_ever_engaged = False
+        self.consecutive_plan_failures = 0
+        self.plan_attempt_count = 0
+        self.plan_success_count = 0
+        self.plan_hold_count = 0
+        self.intercept_control_cycles = 0
+        self.minco_execution_cycles = 0
+        self.optimization_attempt_count = 0
+        self.optimization_success_count = 0
+        self.planner_failure_counts = {}
+        self.planner_failure_reason = PlanningFailureReason.NONE.value
+        self.sea_safety_state = SeaSafetyState.SAFE.value
+        self.sea_safety_margin = math.inf
+        self.first_unrecoverable_safety_detail = ''
+        self.minimum_sea_safety_margin = math.inf
+        self.first_safety_warning_time = None
+        self.first_safety_brake_time = None
+        self.final_relative_speed = math.nan
+        self.final_vertical_relative_speed = math.nan
         self.retained_terminal_plan = None
+        for values in getattr(self, 'timing_samples', {}).values():
+            values.clear()
+        for phase_samples in getattr(
+            self,
+            'timing_samples_by_phase',
+            {},
+        ).values():
+            for values in phase_samples.values():
+                values.clear()
         self.retained_terminal_plan_time_ns = None
         self.retained_terminal_plan_age = 0.0
         self.terminal_descent_committed = False
@@ -2467,7 +2677,7 @@ class TrajectoryImpactSim(Node):
         self.planned_max_vertical_acceleration = 0.0
 
     def terminal_trajectory_plan(self, target_x, target_y, target_z):
-        """Search a dynamically feasible, sea-safe 1-2 s intercept plan."""
+        """Search a dynamically feasible, sea-safe dynamic-horizon plan."""
         return self.intercept_trajectory_planner.plan(
             initial_position=(self.sim_x, self.sim_y, self.sim_z),
             initial_velocity=(self.sim_vx, self.sim_vy, self.sim_vz),
@@ -2490,6 +2700,82 @@ class TrajectoryImpactSim(Node):
                 self.command_az,
             ),
         )
+
+    def _terminal_planning_snapshot(self, target_x, target_y, target_z):
+        """Freeze inputs so the planning worker never reads changing state."""
+        predictor = copy.deepcopy(self.target_predictor)
+        target_velocity = (self.target_vx, self.target_vy, self.target_vz)
+        maneuver_enabled = self.enable_maneuver_prediction
+
+        def target_state_at_time(horizon):
+            if maneuver_enabled:
+                state = predictor.predict(
+                    target_x,
+                    target_y,
+                    target_z,
+                    *target_velocity,
+                    horizon,
+                )
+            else:
+                state = (
+                    target_x + target_velocity[0] * horizon,
+                    target_y + target_velocity[1] * horizon,
+                    target_z + target_velocity[2] * horizon,
+                    *target_velocity,
+                )
+            acceleration = (
+                predictor.acceleration(state[3], state[4], horizon)
+                if maneuver_enabled and predictor.maneuver_model_active
+                else (0.0, 0.0, 0.0)
+            )
+            return state[:3], state[3:6], acceleration
+
+        return {
+            'initial_position': (self.sim_x, self.sim_y, self.sim_z),
+            'initial_velocity': (self.sim_vx, self.sim_vy, self.sim_vz),
+            'initial_acceleration': (
+                self.command_ax,
+                self.command_ay,
+                self.command_az,
+            ),
+            'target_state_at_time': target_state_at_time,
+            'previous_acceleration': (
+                self.command_ax,
+                self.command_ay,
+                self.command_az,
+            ),
+        }
+
+    def _run_terminal_planning_job(self, epoch, snapshot):
+        plan = self.intercept_trajectory_planner.plan(**snapshot)
+        return epoch, plan, self.intercept_trajectory_planner.last_diagnostics
+
+    def poll_terminal_trajectory_plan(self, target_x, target_y, target_z):
+        """Poll one worker result or submit a new 10 Hz planning job."""
+        if self.planner_future is not None:
+            if not self.planner_future.done():
+                return None, None, False, False
+            try:
+                epoch, plan, diagnostics = self.planner_future.result()
+            except Exception as error:  # pragma: no cover - ROS log path
+                self.get_logger().error(f'MINCO worker failed: {error}')
+                epoch, plan, diagnostics = self.planner_epoch, None, None
+            self.planner_future = None
+            if epoch != self.planner_epoch:
+                return None, None, False, False
+            return plan, diagnostics, False, True
+
+        snapshot = self._terminal_planning_snapshot(
+            target_x,
+            target_y,
+            target_z,
+        )
+        self.planner_future = self.planner_executor.submit(
+            self._run_terminal_planning_job,
+            self.planner_epoch,
+            snapshot,
+        )
+        return None, None, True, False
 
     def retain_terminal_trajectory_plan(self, plan, timestamp_ns=None):
         """Remember a feasible trajectory for brief replanning dropouts."""
@@ -2531,6 +2817,13 @@ class TrajectoryImpactSim(Node):
             self.retained_terminal_plan.duration - elapsed,
             0.0,
         )
+        if remaining_time < float(
+            getattr(self, 'terminal_plan_min_remaining_time', 0.0)
+        ):
+            self.retained_terminal_plan = None
+            self.retained_terminal_plan_time_ns = None
+            self.retained_terminal_plan_age = 0.0
+            return None
         return self.retained_terminal_plan, sample_time, remaining_time
 
     def retained_plan_matches_target(
@@ -2551,11 +2844,43 @@ class TrajectoryImpactSim(Node):
             target_z,
             remaining_time,
         )[0]
-        endpoint_error = math.hypot(
-            predicted_position[0] - plan.target_position[0],
-            predicted_position[1] - plan.target_position[1],
+        endpoint_error = math.sqrt(sum(
+            (predicted - planned) ** 2
+            for predicted, planned in zip(
+                predicted_position,
+                plan.target_position,
+            )
+        ))
+        descent_speed = max(float(getattr(self, 'sim_vz', 0.0)), 0.0)
+        braking = max(
+            float(
+                getattr(
+                    self,
+                    'terminal_effective_vertical_braking_acceleration',
+                    2.5,
+                )
+            ),
+            0.1,
         )
-        return endpoint_error <= self.terminal_plan_target_error_limit
+        reserve = (
+            float(getattr(self, 'terminal_contact_clearance', 0.05))
+            + float(getattr(self, 'terminal_safety_margin', 0.02))
+        )
+        sea_margin = (
+            float(getattr(self, 'sea_surface_z', 0.0))
+            - float(getattr(self, 'sim_z', -math.inf))
+            - descent_speed
+            * float(getattr(self, 'terminal_safety_response_time', 0.0))
+            - descent_speed * descent_speed / (2.0 * braking)
+            - reserve
+        )
+        return (
+            endpoint_error <= self.terminal_plan_target_error_limit
+            and sea_margin > 0.0
+            and remaining_time >= float(
+                getattr(self, 'terminal_plan_min_remaining_time', 0.0)
+            )
+        )
 
     def pursuit_altitude_reference(self, horizontal_distance, target_z):
         """Follow the terminal dive line while retaining front visibility."""
@@ -2852,6 +3177,12 @@ class TrajectoryImpactSim(Node):
 
     def plan_velocity(self, target_x, target_y, target_z):
         """Generate pursuit guidance or one step of a feasible trajectory."""
+        guidance_start = time.perf_counter()
+        self.planner_attempted_this_cycle = False
+        self.planner_succeeded_this_cycle = False
+        self.plan_hold_active = False
+        self.optimization_attempted_this_cycle = False
+        self.optimization_succeeded_this_cycle = False
         dx = target_x - self.sim_x
         dy = target_y - self.sim_y
         horizontal_distance = math.hypot(dx, dy)
@@ -2893,6 +3224,9 @@ class TrajectoryImpactSim(Node):
                 self.retained_terminal_plan_time_ns = None
                 self.retained_terminal_plan_age = 0.0
                 retained_plan = None
+                self.planner_failure_reason = (
+                    PlanningFailureReason.TARGET_SHIFT.value
+                )
 
         replan_period = float(
             getattr(self, 'terminal_replan_period', 0.0)
@@ -2902,22 +3236,94 @@ class TrajectoryImpactSim(Node):
             or self.retained_terminal_plan_age >= replan_period
         )
         plan = None
+        diagnostics = None
+        attempt_submitted = False
+        attempt_completed = False
         if replan_due:
-            plan = self.terminal_trajectory_plan(
-                target_x,
-                target_y,
-                target_z,
-            )
+            if getattr(self, 'enable_async_terminal_planner', False):
+                (
+                    plan,
+                    diagnostics,
+                    attempt_submitted,
+                    attempt_completed,
+                ) = self.poll_terminal_trajectory_plan(
+                    target_x,
+                    target_y,
+                    target_z,
+                )
+            else:
+                attempt_submitted = True
+                attempt_completed = True
+                plan = self.terminal_trajectory_plan(
+                    target_x,
+                    target_y,
+                    target_z,
+                )
+                planner = getattr(self, 'intercept_trajectory_planner', None)
+                diagnostics = getattr(planner, 'last_diagnostics', None)
+            if attempt_submitted:
+                self.planner_attempted_this_cycle = True
+                self.plan_attempt_count = (
+                    getattr(self, 'plan_attempt_count', 0) + 1
+                )
+            if attempt_completed and diagnostics is None:
+                self.planner_failure_reason = (
+                    PlanningFailureReason.OPTIMIZATION_FAIL.value
+                )
+            if diagnostics is not None:
+                self.planner_compute_time = diagnostics.total_compute_time
+                self.minco_generation_compute_time = (
+                    diagnostics.generation_compute_time
+                )
+                self.minco_optimization_compute_time = (
+                    diagnostics.optimization_compute_time
+                )
+                self.horizontal_min_time = diagnostics.horizontal_min_time
+                self.vertical_min_time = diagnostics.vertical_min_time
+                self.sea_safe_min_time = diagnostics.sea_safe_min_time
+                self.planner_search_min_time = diagnostics.search_min_time
+                self.planner_search_max_time = diagnostics.search_max_time
+                self.planner_failure_reason = diagnostics.failure_reason.value
+                if diagnostics.optimization_attempted:
+                    self.optimization_attempted_this_cycle = True
+                    self.optimization_attempt_count += 1
+                if diagnostics.optimization_succeeded:
+                    self.optimization_succeeded_this_cycle = True
+                    self.optimization_success_count += 1
+            if attempt_completed and plan is None:
+                self.consecutive_plan_failures = (
+                    getattr(self, 'consecutive_plan_failures', 0) + 1
+                )
+                if diagnostics is not None:
+                    reason = diagnostics.failure_reason.value
+                    failure_counts = getattr(
+                        self,
+                        'planner_failure_counts',
+                        {},
+                    )
+                    failure_counts[reason] = failure_counts.get(reason, 0) + 1
+                    self.planner_failure_counts = failure_counts
+            elif attempt_completed:
+                self.planner_succeeded_this_cycle = True
+                self.plan_success_count = (
+                    getattr(self, 'plan_success_count', 0) + 1
+                )
+                self.consecutive_plan_failures = 0
         plan_sample_time = self.terminal_control_lookahead
         plan_time_to_go = plan.duration if plan is not None else 0.0
         retained_plan_active = False
         if plan is not None:
+            self.minco_execution_cycles = (
+                getattr(self, 'minco_execution_cycles', 0) + 1
+            )
             self.retain_terminal_trajectory_plan(plan)
         elif retained_plan is not None:
             plan = retained_plan
             plan_sample_time = retained_sample_time
             plan_time_to_go = retained_time_to_go
             retained_plan_active = True
+            self.plan_hold_active = True
+            self.plan_hold_count = getattr(self, 'plan_hold_count', 0) + 1
         if plan is not None:
             sample = plan.sample(
                 min(plan_sample_time, plan.duration)
@@ -2932,6 +3338,23 @@ class TrajectoryImpactSim(Node):
             if horizontal_distance <= self.terminal_radius:
                 self.terminal_descent_committed = True
             self.trajectory_plan_active = True
+            first_minco_entry = not getattr(self, 'minco_ever_engaged', False)
+            self.minco_ever_engaged = True
+            if first_minco_entry:
+                TrajectoryImpactSim.update_guidance_phase(
+                    self,
+                    'MINCO_ENTRY',
+                )
+            elif horizontal_distance <= self.terminal_radius:
+                TrajectoryImpactSim.update_guidance_phase(
+                    self,
+                    'TERMINAL_MINCO',
+                )
+            else:
+                TrajectoryImpactSim.update_guidance_phase(
+                    self,
+                    'MINCO_TRACKING',
+                )
             self.trajectory_planner_type = plan.planner_type + (
                 '_HOLD' if retained_plan_active else ''
             )
@@ -2968,6 +3391,7 @@ class TrajectoryImpactSim(Node):
             self.intercept_reference_ax = sample.acceleration[0]
             self.intercept_reference_ay = sample.acceleration[1]
             self.intercept_reference_az = sample.acceleration[2]
+            self.guidance_compute_time = time.perf_counter() - guidance_start
             return (
                 desired_vx,
                 desired_vy,
@@ -2979,46 +3403,62 @@ class TrajectoryImpactSim(Node):
                 True,
             )
 
-        # Outside the 1-2 s feasible set, close on the target itself.  This
-        # avoids the steady spatial lead caused by chasing a rolling point
-        # which is already target_velocity * horizon ahead of the USV.
+        # Before first entry, pursuit only drives the vehicle into the 3-D
+        # reachable set.  Once MINCO has been entered it is latched: plan loss
+        # never falls back to a high-speed terminal dive.
         self.reset_trajectory_plan_diagnostics()
-        closing_speed = self.pursuit_closing_speed(
-            horizontal_distance,
-            abs(target_z - self.sim_z),
-            self.terminal_pursuit_max_closing_speed,
-        )
-        desired_vx = self.target_vx + closing_speed * horizontal_los_x
-        desired_vy = self.target_vy + closing_speed * horizontal_los_y
+        if not getattr(self, 'minco_ever_engaged', False):
+            TrajectoryImpactSim.update_guidance_phase(
+                self,
+                'FAR_GUIDANCE',
+            )
+            self.trajectory_planner_type = 'FAR_GUIDANCE'
+            closing_speed = self.pursuit_closing_speed(
+                horizontal_distance,
+                abs(target_z - self.sim_z),
+                self.follow_max_closing_speed,
+            )
+            desired_vx = self.target_vx + closing_speed * horizontal_los_x
+            desired_vy = self.target_vy + closing_speed * horizontal_los_y
+            staging_z = self.pursuit_altitude_reference(
+                horizontal_distance,
+                target_z,
+            )
+            measured_closing_speed = max(
+                self.measured_horizontal_closing_speed(
+                    horizontal_los_x,
+                    horizontal_los_y,
+                ),
+                0.0,
+            )
+            desired_vz = self.pursuit_vertical_velocity(
+                horizontal_distance,
+                target_z,
+                self.target_vz,
+                staging_z,
+                measured_closing_speed,
+            )
+        else:
+            TrajectoryImpactSim.update_guidance_phase(self, 'SAFE_WAIT')
+            self.trajectory_planner_type = 'MINCO_SAFE_WAIT'
+            closing_speed = 0.0
+            desired_vx = self.target_vx
+            desired_vy = self.target_vy
+            staging_z = min(self.sim_z, self.flight_altitude)
+            desired_vz = max(
+                min(
+                    self.altitude_velocity_gain * (staging_z - self.sim_z),
+                    self.max_vertical_speed,
+                ),
+                -self.max_vertical_speed,
+            )
         desired_vx, desired_vy = self.clamp_command_speed(
             desired_vx,
             desired_vy,
         )
-
-        staging_z, terminal_pursuit = (
-            self.terminal_fallback_altitude_reference(
-                horizontal_distance,
-                target_z,
-            )
-        )
-        if terminal_pursuit:
-            self.trajectory_planner_type = 'TERMINAL_PURSUIT'
         self.guidance_altitude_reference = staging_z
         self.guidance_closing_speed = closing_speed
-        measured_closing_speed = max(
-            self.measured_horizontal_closing_speed(
-                horizontal_los_x,
-                horizontal_los_y,
-            ),
-            0.0,
-        )
-        desired_vz = self.pursuit_vertical_velocity(
-            horizontal_distance,
-            target_z,
-            self.target_vz,
-            staging_z,
-            measured_closing_speed,
-        )
+        self.guidance_compute_time = time.perf_counter() - guidance_start
 
         return (
             desired_vx,
@@ -3028,8 +3468,19 @@ class TrajectoryImpactSim(Node):
             intercept_y,
             intercept_z,
             t_go,
-            terminal_pursuit,
+            getattr(self, 'minco_ever_engaged', False),
         )
+
+    def update_guidance_phase(self, phase):
+        """Record and announce only actual guidance-state transitions."""
+        previous = getattr(self, 'guidance_phase', '')
+        self.guidance_phase = str(phase)
+        get_logger = getattr(self, 'get_logger', None)
+        if previous != self.guidance_phase and get_logger is not None:
+            get_logger().info(
+                f'GUIDANCE PHASE: {previous or "UNSET"} -> '
+                f'{self.guidance_phase}'
+            )
 
     def acceleration_limited_velocity(
         self,
@@ -3151,6 +3602,76 @@ class TrajectoryImpactSim(Node):
         self.command_az = (command_vz - base_vz) / control_step
 
         return command_vz
+
+    def apply_final_sea_safety(self, command_vz):
+        """Apply the sea barrier after trajectory and acceleration limits."""
+        started = time.perf_counter()
+        control_step = (
+            self.control_dt if self.enable_gazebo_control else self.dt
+        )
+        result = apply_sea_safety_guard(
+            current_z=self.sim_z,
+            current_vz=self.sim_vz,
+            proposed_vz=command_vz,
+            sea_surface_z=self.sea_surface_z,
+            reserve_clearance=(
+                self.terminal_contact_clearance
+                + self.terminal_safety_margin
+            ),
+            response_delay=self.terminal_safety_response_time,
+            effective_braking_acceleration=(
+                self.terminal_effective_vertical_braking_acceleration
+            ),
+            control_dt=control_step,
+            warning_margin=self.terminal_safety_warning_margin,
+            maximum_vertical_speed=self.max_vertical_speed,
+        )
+        prior_command_vz = command_vz - self.command_az * control_step
+        self.command_vz = result.command_vz
+        self.command_az = (
+            result.command_vz - prior_command_vz
+        ) / control_step
+        self.sea_safety_state = result.state.value
+        self.sea_safety_margin = result.response_margin
+        self.minimum_sea_safety_margin = min(
+            getattr(self, 'minimum_sea_safety_margin', math.inf),
+            result.response_margin,
+        )
+        if (
+            result.state == SeaSafetyState.WARNING
+            and getattr(self, 'first_safety_warning_time', None) is None
+        ):
+            self.first_safety_warning_time = self.sim_time
+            self.get_logger().warn(
+                f'SEA SAFETY WARNING | margin={result.response_margin:.3f} m'
+            )
+        if (
+            result.state in (
+                SeaSafetyState.BRAKE,
+                SeaSafetyState.UNRECOVERABLE,
+            )
+            and getattr(self, 'first_safety_brake_time', None) is None
+        ):
+            self.first_safety_brake_time = self.sim_time
+            self.get_logger().warn(
+                f'SEA SAFETY BRAKE | margin={result.response_margin:.3f} m'
+            )
+        if (
+            result.state == SeaSafetyState.UNRECOVERABLE
+            and not self.first_unrecoverable_safety_detail
+        ):
+            self.first_unrecoverable_safety_detail = (
+                f'z={self.sim_z:.3f}, vz={self.sim_vz:.3f}, '
+                f'clearance={result.clearance:.3f}, '
+                f'immediate_margin={result.immediate_margin:.3f}, '
+                f'response_margin={result.response_margin:.3f}'
+            )
+            self.get_logger().error(
+                'SEA SAFETY UNRECOVERABLE | '
+                + self.first_unrecoverable_safety_detail
+            )
+        self.safety_compute_time = time.perf_counter() - started
+        return result.command_vz
 
     def impact_fraction(self, relative_start, relative_end):
         deltas = [
@@ -3275,7 +3796,7 @@ class TrajectoryImpactSim(Node):
 
         try:
             self.open_csv_log()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self.csv_file = None
             self.csv_writer = None
             self.csv_path = None
@@ -3288,6 +3809,245 @@ class TrajectoryImpactSim(Node):
             f'CSV logging started at X command: {self.csv_path}'
         )
 
+    @staticmethod
+    def _timing_summary(values):
+        finite = sorted(
+            float(value) for value in values if math.isfinite(value)
+        )
+        if not finite:
+            return {'count': 0, 'mean': None, 'p95': None, 'max': None}
+        rank = min(
+            max(math.ceil(0.95 * len(finite)) - 1, 0),
+            len(finite) - 1,
+        )
+        return {
+            'count': len(finite),
+            'mean': sum(finite) / len(finite),
+            'p95': finite[rank],
+            'max': finite[-1],
+        }
+
+    def write_run_artifacts(self, csv_path):
+        """Write one compact summary and exact runtime parameter snapshot."""
+        if csv_path is None:
+            return
+        csv_path = Path(csv_path)
+        summary_path = csv_path.with_name(csv_path.stem + '_summary.json')
+        config_path = csv_path.with_name(csv_path.stem + '_config.yaml')
+        attempts = self.plan_attempt_count
+        cycles = self.intercept_control_cycles
+        prediction_rmse = {}
+        try:
+            with csv_path.open(newline='', encoding='utf-8') as stream:
+                logged_rows = list(csv.DictReader(stream))
+        except OSError:
+            logged_rows = []
+        if self.failure_reason == 'SEA_CONTACT' and logged_rows:
+            tail_path = csv_path.with_name(csv_path.stem + '_sea_tail.csv')
+            timestamps = []
+            for row in logged_rows:
+                try:
+                    timestamps.append(float(row.get('time', '')))
+                except (TypeError, ValueError):
+                    timestamps.append(math.nan)
+            finite_timestamps = [
+                value for value in timestamps if math.isfinite(value)
+            ]
+            if finite_timestamps:
+                cutoff = max(finite_timestamps) - 2.0
+                tail_rows = [
+                    row for row, timestamp in zip(logged_rows, timestamps)
+                    if math.isfinite(timestamp) and timestamp >= cutoff
+                ]
+                tail_fields = [
+                    field for field in (
+                        'time',
+                        'uav_z',
+                        'uav_vz',
+                        'target_z',
+                        'horizontal_distance',
+                        'vertical_error',
+                        't_horizontal_min',
+                        't_vertical_min',
+                        't_go',
+                        'sea_safety_margin',
+                        'trajectory_planner',
+                        'retained_plan_age',
+                        'command_vz',
+                        'command_az',
+                        'sea_safety_state',
+                        'sim_dt',
+                        'wall_dt',
+                        'callback_compute_time',
+                    )
+                    if field in (logged_rows[0] if logged_rows else {})
+                ]
+                try:
+                    with tail_path.open(
+                        'w', newline='', encoding='utf-8'
+                    ) as stream:
+                        writer = csv.DictWriter(stream, fieldnames=tail_fields)
+                        writer.writeheader()
+                        writer.writerows(
+                            {
+                                field: row.get(field, '')
+                                for field in tail_fields
+                            }
+                            for row in tail_rows
+                        )
+                except OSError as error:
+                    self.get_logger().error(
+                        f'Failed to write sea-contact tail: {error}'
+                    )
+        for horizon in ('0p5', '1p0', '2p0'):
+            field = f'guidance_prediction_{horizon}_error'
+            errors = []
+            for row in logged_rows:
+                try:
+                    value = float(row.get(field, ''))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    errors.append(value)
+            prediction_rmse[field] = (
+                math.sqrt(sum(value * value for value in errors) / len(errors))
+                if errors else None
+            )
+        try:
+            git_commit = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            git_dirty = bool(subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip())
+        except (OSError, subprocess.CalledProcessError):
+            git_commit = None
+            git_dirty = None
+        summary = {
+            'csv_file': csv_path.name,
+            'git_commit': git_commit,
+            'git_dirty': git_dirty,
+            'outcome': self.outcome or 'UNFINISHED',
+            'failure_reason': self.failure_reason,
+            'failure_detail': self.failure_detail,
+            'elapsed_time': self.sim_time,
+            'capture_time': self.sim_time if self.hit else None,
+            'relative_speed_at_capture': (
+                self.final_relative_speed if self.hit else None
+            ),
+            'vertical_relative_speed_at_capture': (
+                self.final_vertical_relative_speed if self.hit else None
+            ),
+            'minimum_distance': (
+                self.minimum_distance
+                if math.isfinite(self.minimum_distance) else None
+            ),
+            'closest_horizontal_distance': (
+                self.closest_horizontal_distance
+                if math.isfinite(self.closest_horizontal_distance) else None
+            ),
+            'closest_vertical_error': (
+                self.closest_vertical_error
+                if math.isfinite(self.closest_vertical_error) else None
+            ),
+            'planner': {
+                'attempts': attempts,
+                'successes': self.plan_success_count,
+                'success_rate': (
+                    self.plan_success_count / attempts if attempts else None
+                ),
+                'hold_cycles': self.plan_hold_count,
+                'attempt_rate': attempts / cycles if cycles else None,
+                'execution_rate': (
+                    self.minco_execution_cycles / cycles if cycles else None
+                ),
+                'hold_rate': (
+                    self.plan_hold_count / cycles if cycles else None
+                ),
+                'optimization_attempts': self.optimization_attempt_count,
+                'optimization_successes': self.optimization_success_count,
+                'optimization_success_rate': (
+                    self.optimization_success_count
+                    / self.optimization_attempt_count
+                    if self.optimization_attempt_count else None
+                ),
+                'failure_counts': self.planner_failure_counts,
+                'minco_ever_engaged': self.minco_ever_engaged,
+            },
+            'sea_safety': {
+                'final_state': self.sea_safety_state,
+                'final_response_margin': (
+                    self.sea_safety_margin
+                    if math.isfinite(self.sea_safety_margin) else None
+                ),
+                'minimum_response_margin': (
+                    self.minimum_sea_safety_margin
+                    if math.isfinite(self.minimum_sea_safety_margin)
+                    else None
+                ),
+                'first_warning_time': self.first_safety_warning_time,
+                'first_brake_time': self.first_safety_brake_time,
+                'first_unrecoverable_detail': (
+                    self.first_unrecoverable_safety_detail
+                ),
+            },
+            'timing_seconds': {
+                name: self._timing_summary(values)
+                for name, values in self.timing_samples.items()
+            },
+            'timing_by_phase_seconds': {
+                phase: {
+                    name: self._timing_summary(values)
+                    for name, values in phase_samples.items()
+                }
+                for phase, phase_samples in (
+                    self.timing_samples_by_phase.items()
+                )
+            },
+            'prediction_rmse': prediction_rmse,
+        }
+        parameters = {}
+        # ``Node.list_parameters`` is not part of the ROS 2 Humble Python API.
+        # ``get_parameters_by_prefix('')`` returns every declared parameter
+        # and keeps run-artifact generation portable across Humble builds.
+        for name, parameter in self.get_parameters_by_prefix('').items():
+            value = parameter.value
+            if isinstance(value, tuple):
+                value = list(value)
+            parameters[name] = value
+        config_snapshot = {
+            'trajectory_impact_sim': {'ros__parameters': parameters},
+        }
+        baseline_path = (
+            Path.cwd()
+            / 'src/uav_usv_bringup/config/baseline.yaml'
+        )
+        if baseline_path.is_file():
+            config_snapshot['baseline_yaml_source'] = (
+                baseline_path.read_text(encoding='utf-8')
+            )
+        try:
+            summary_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2) + '\n',
+                encoding='utf-8',
+            )
+            # JSON is valid YAML 1.2 and avoids adding a runtime dependency.
+            config_path.write_text(
+                json.dumps(config_snapshot, ensure_ascii=False, indent=2)
+                + '\n',
+                encoding='utf-8',
+            )
+        except (OSError, ValueError) as error:
+            self.get_logger().error(f'Failed to write run artifacts: {error}')
+
     def close_csv_log(self):
         if self.csv_file is None:
             return
@@ -3297,7 +4057,7 @@ class TrajectoryImpactSim(Node):
         try:
             self.csv_file.flush()
             self.csv_file.close()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             message = f'Failed to close CSV log: {error}'
             if rclpy.ok():
                 self.get_logger().error(message)
@@ -3306,6 +4066,8 @@ class TrajectoryImpactSim(Node):
         finally:
             self.csv_file = None
             self.csv_writer = None
+
+        self.write_run_artifacts(csv_path)
 
         message = f'CSV log saved: {csv_path}'
         if rclpy.ok():
@@ -3326,6 +4088,7 @@ class TrajectoryImpactSim(Node):
     ):
         if self.csv_writer is None:
             return
+        logging_start = time.perf_counter()
 
         if self.log_start_time_ns is None:
             elapsed_time = self.sim_time
@@ -3450,6 +4213,7 @@ class TrajectoryImpactSim(Node):
             else math.nan
         )
 
+        prediction_start = time.perf_counter()
         prediction_evaluations = {
             (model, horizon): self.prediction_error_tracker.evaluate(
                 model,
@@ -3489,6 +4253,7 @@ class TrajectoryImpactSim(Node):
                     for horizon in PREDICTION_HORIZONS
                 },
             )
+        self.prediction_compute_time = time.perf_counter() - prediction_start
         prediction_values = []
         for model in PREDICTION_MODELS:
             for horizon in PREDICTION_HORIZONS:
@@ -3542,6 +4307,16 @@ class TrajectoryImpactSim(Node):
             f'{self.target_predictor.turn_acceleration:.6f}',
             f'{self.target_predictor.speed_acceleration:.6f}',
             f'{self.control_dt:.6f}',
+            f'{self.sim_dt:.6f}',
+            f'{self.wall_dt:.6f}',
+            f'{self.callback_compute_time:.6f}',
+            f'{self.prediction_compute_time:.6f}',
+            f'{self.planner_compute_time:.6f}',
+            f'{self.minco_generation_compute_time:.6f}',
+            f'{self.minco_optimization_compute_time:.6f}',
+            f'{self.guidance_compute_time:.6f}',
+            f'{self.safety_compute_time:.6f}',
+            f'{self.logging_compute_time:.6f}',
             f'{self.retained_terminal_plan_age:.6f}',
             f'{distance:.6f}',
             f'{horizontal_distance:.6f}',
@@ -3558,7 +4333,21 @@ class TrajectoryImpactSim(Node):
             f'{t_go:.6f}',
             f'{self.guidance_altitude_reference:.6f}',
             f'{self.guidance_closing_speed:.6f}',
+            f'{self.horizontal_min_time:.6f}',
+            f'{self.vertical_min_time:.6f}',
+            f'{self.sea_safe_min_time:.6f}',
+            f'{self.planner_search_min_time:.6f}',
+            f'{self.planner_search_max_time:.6f}',
+            self.planner_failure_reason,
+            self.guidance_phase,
+            self.sea_safety_state,
+            f'{self.sea_safety_margin:.6f}',
             '1' if self.trajectory_plan_active else '0',
+            '1' if self.planner_attempted_this_cycle else '0',
+            '1' if self.planner_succeeded_this_cycle else '0',
+            '1' if self.optimization_attempted_this_cycle else '0',
+            '1' if self.optimization_succeeded_this_cycle else '0',
+            '1' if self.plan_hold_active else '0',
             self.trajectory_planner_type,
             f'{self.planned_minco_target_curve_weight:.6f}',
             f'{self.planned_minco_constraint_penalty:.9f}',
@@ -3600,6 +4389,7 @@ class TrajectoryImpactSim(Node):
                 f'{len(row)} values'
             )
         self.csv_writer.writerow(row)
+        self.logging_compute_time = time.perf_counter() - logging_start
 
     def publish_simulation_state(
         self,
@@ -3749,6 +4539,7 @@ class TrajectoryImpactSim(Node):
             else:
                 self.control_dt = self.dt
         self.last_control_callback_time_ns = timestamp_ns
+        self.sim_dt = self.control_dt
         return self.control_dt
 
     def gazebo_timer_callback(self):
@@ -4175,6 +4966,7 @@ class TrajectoryImpactSim(Node):
             desired_vz,
             vertical_acceleration_limit,
         )
+        command_vz = self.apply_final_sea_safety(command_vz)
 
         self.publish_gazebo_velocity_setpoint(
             command_vx,
@@ -4245,7 +5037,7 @@ class TrajectoryImpactSim(Node):
                 f'Command acceleration={command_acceleration:.2f} m/s^2 | '
                 f'Command az={self.command_az:.2f} m/s^2 | '
                 f'UAV acceleration={self.measured_acceleration:.2f} m/s^2 | '
-                f'Mode={"TRAJECTORY" if terminal_mode else "PURSUIT"}'
+                f'Mode={self.guidance_phase}'
             )
 
         if self.sim_time >= self.max_sim_duration:
@@ -4347,6 +5139,8 @@ class TrajectoryImpactSim(Node):
             target_y,
             target_z,
         )
+        self.final_relative_speed = relative_speed
+        self.final_vertical_relative_speed = self.target_vz - self.sim_vz
         self.update_closest_approach((
             target_x - self.sim_x,
             target_y - self.sim_y,
@@ -4430,6 +5224,25 @@ class TrajectoryImpactSim(Node):
         self.close_csv_log()
 
     def timer_callback(self):
+        """Measure wall scheduling and callback compute time."""
+        callback_start = time.perf_counter()
+        if self.last_control_wall_time is not None:
+            measured_wall_dt = callback_start - self.last_control_wall_time
+            if 0.001 <= measured_wall_dt <= 1.0:
+                self.wall_dt = measured_wall_dt
+        self.last_control_wall_time = callback_start
+        try:
+            self._timer_callback_impl()
+        finally:
+            self.callback_compute_time = time.perf_counter() - callback_start
+            for name in self.timing_samples:
+                value = float(getattr(self, name, math.nan))
+                if math.isfinite(value):
+                    self.timing_samples[name].append(value)
+                    phase = 'INTERCEPT' if self.started else 'FOLLOW'
+                    self.timing_samples_by_phase[phase][name].append(value)
+
+    def _timer_callback_impl(self):
         if self.enable_gazebo_control:
             self.gazebo_timer_callback()
             return
@@ -4502,6 +5315,7 @@ class TrajectoryImpactSim(Node):
             desired_vz,
             vertical_acceleration_limit,
         )
+        new_vz = self.apply_final_sea_safety(new_vz)
 
         acceleration_x = (new_vx - old_vx) / self.dt
         acceleration_y = (new_vy - old_vy) / self.dt
@@ -4692,6 +5506,9 @@ class TrajectoryImpactSim(Node):
                 target_z,
             )
         self.close_csv_log()
+        planner_executor = getattr(self, 'planner_executor', None)
+        if planner_executor is not None:
+            planner_executor.shutdown(wait=False, cancel_futures=True)
         return super().destroy_node()
 
 

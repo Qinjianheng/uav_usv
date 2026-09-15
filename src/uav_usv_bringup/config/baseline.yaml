@@ -33,6 +33,10 @@ trajectory_impact_sim:
     terminal_min_closing_speed: 0.3
     terminal_closing_speed_step: 0.3
     terminal_plan_duration_step: 0.1
+    # Reachability chooses the online interval.  Two seconds remains nominal;
+    # three seconds is a hard compute/mission cap, not a relaxed dynamic limit.
+    terminal_plan_absolute_max_duration: 3.0
+    terminal_plan_horizon_extra_margin: 0.5
     # Three-piece minimum-jerk trajectory, replanned at the controller rate.
     enable_minco_planner: true
     minco_piece_count: 3
@@ -51,6 +55,9 @@ trajectory_impact_sim:
     # Never follow a stale manoeuvring-target trajectory for a full horizon.
     terminal_plan_max_hold_time: 0.2
     terminal_plan_target_error_limit: 0.5
+    terminal_plan_min_remaining_time: 0.2
+    terminal_plan_failure_limit: 3
+    enable_async_terminal_planner: true
     # Convert MINCO velocity feed-forward into closed-loop trajectory tracking.
     terminal_trajectory_position_gain: 1.2
     terminal_trajectory_vertical_gain: 1.2
@@ -65,6 +72,10 @@ trajectory_impact_sim:
     # Include command/vehicle response distance in the all-path sea barrier.
     terminal_safety_response_time: 0.15
     terminal_safety_margin: 0.02
+    terminal_safety_warning_margin: 0.15
+    # Conservative effective PX4 vertical braking authority used by both the
+    # reachability gate and final post-limiter sea barrier.
+    terminal_effective_vertical_braking_acceleration: 2.5
     front_camera_max_depression_angle: 0.85
     terminal_max_acceleration: 3.0
     terminal_max_vertical_acceleration: 3.0
@@ -90,9 +101,8 @@ trajectory_impact_sim:
     follow_distance: 5.0
     follow_position_gain: 0.8
     follow_max_closing_speed: 1.5
-    # Interception needs more radial closure authority than following.  The
-    # 2026-09-12 logs show the terminal fallback closing at only 0.2-0.4 m/s
-    # against a 4 m/s target, so the last 1-2 m were never closed.
+    # Retained only for backward-compatible parameter loading.  MINCO failure
+    # no longer enters a high-speed terminal-pursuit fallback.
     terminal_pursuit_max_closing_speed: 3.0
     follow_max_acceleration: 2.5
     altitude_velocity_gain: 1.0

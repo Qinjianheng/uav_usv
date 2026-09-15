@@ -829,6 +829,42 @@ def test_plan_velocity_uses_retained_plan_during_replan_dropout():
     assert controller.terminal_descent_committed is True
 
 
+def test_minco_plan_loss_enters_safe_wait_without_terminal_pursuit():
+    controller = SimpleNamespace(
+        sim_x=0.0,
+        sim_y=0.0,
+        sim_z=-0.8,
+        target_vx=4.0,
+        target_vy=0.0,
+        target_vz=0.0,
+        flight_altitude=-5.0,
+        altitude_velocity_gain=1.0,
+        max_vertical_speed=4.0,
+        terminal_control_lookahead=0.15,
+        terminal_replan_period=0.1,
+        retained_terminal_plan_age=0.0,
+        minco_ever_engaged=True,
+        terminal_trajectory_plan=lambda x, y, z: None,
+        retained_terminal_trajectory_sample=lambda: None,
+        continuous_intercept_solution=lambda x, y, z: (x, y, z, 1.0),
+        clamp_command_speed=lambda vx, vy: (vx, vy),
+        reset_trajectory_plan_diagnostics=lambda: None,
+    )
+
+    command = TrajectoryImpactSim.plan_velocity(
+        controller,
+        1.0,
+        0.0,
+        0.0,
+    )
+
+    assert command[0:2] == pytest.approx((4.0, 0.0))
+    assert command[2] < 0.0
+    assert command[7] is True
+    assert controller.guidance_phase == 'SAFE_WAIT'
+    assert controller.trajectory_planner_type == 'MINCO_SAFE_WAIT'
+
+
 def test_pursuit_keeps_forward_closure_inside_terminal_planning_radius():
     controller = SimpleNamespace(
         max_acceleration=4.8,
