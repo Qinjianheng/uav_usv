@@ -231,6 +231,18 @@ mission_manager_node:
     minimum_plan_remaining_time: 0.20
     plan_recovery_timeout: 0.50
 
+intercept_evaluator_node:
+  ros__parameters:
+    evaluation_rate_hz: 20.0
+    capture_radius: 0.25
+    sea_surface_z: 0.0
+    enable_sea_contact_failure: true
+    maximum_duration: 30.0
+    log_directory: data/experiments/current
+    # Simulation truth is consumed only by this evaluator and by the explicitly
+    # configured truth-control baseline predictor.
+    truth_topic: /target/state
+
 target_kalman_filter:
   ros__parameters:
     frame_id: local_ned

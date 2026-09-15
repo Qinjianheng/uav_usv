@@ -127,3 +127,16 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     assert restored.plan_id == 9
     assert restored.source_age == pytest.approx(0.08)
     assert restored.callback_compute_time == pytest.approx(0.002)
+
+
+def test_intercept_result_is_scoped_to_one_mission():
+    intercept_result = message_class('InterceptResult')
+    message = intercept_result()
+    message.mission_id = 15
+    message.success = False
+    message.outcome = 'FAILURE'
+    message.reason = 'TIMEOUT'
+
+    restored = round_trip(message, intercept_result)
+
+    assert restored.mission_id == 15

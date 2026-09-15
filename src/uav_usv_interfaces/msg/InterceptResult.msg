@@ -1,4 +1,5 @@
 builtin_interfaces/Time stamp
+uint64 mission_id
 bool success
 string outcome
 string reason

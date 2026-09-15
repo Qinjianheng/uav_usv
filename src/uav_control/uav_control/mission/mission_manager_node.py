@@ -185,6 +185,8 @@ class MissionManagerNode(Node):
     def result_callback(self, message):
         if not message.outcome:
             return
+        if message.mission_id not in (0, self.core.mission_id):
+            return
         if message.success:
             self.core.mark_capture(self._now())
         else:
