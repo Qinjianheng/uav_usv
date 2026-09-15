@@ -354,6 +354,13 @@ class TrajectoryTrackerNode(Node):
             rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         self.last_rejection = rejection
         self.last_callback_time = time.perf_counter() - started
+        if rejection == TrajectoryRejectReason.NONE:
+            self._publish_diagnostic(
+                self._ros_seconds(),
+                None,
+                'PLAN_ACCEPTED',
+                self.last_callback_time,
+            )
 
     def _publish_offboard_mode(self, timestamp_us):
         message = OffboardControlMode()

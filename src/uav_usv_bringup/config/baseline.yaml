@@ -224,6 +224,13 @@ trajectory_tracker_node:
     maximum_state_age: 0.125
     frame_id: local_ned
 
+mission_manager_node:
+  ros__parameters:
+    publication_rate_hz: 20.0
+    maximum_tracker_age: 0.125
+    minimum_plan_remaining_time: 0.20
+    plan_recovery_timeout: 0.50
+
 target_kalman_filter:
   ros__parameters:
     frame_id: local_ned
