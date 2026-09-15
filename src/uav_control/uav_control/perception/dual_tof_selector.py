@@ -350,14 +350,18 @@ class DualTofSelector(Node):
             observation.tof_valid,
         )
         if switched or status != self.last_status:
-            log = self.get_logger().info if observation.available else (
-                self.get_logger().warn
-            )
-            log(
+            message = (
                 f'ACTIVE CAMERA={active_message.data} | '
                 f'front RGB/ToF={front.visible}/{front.tof_valid} | '
                 f'down RGB/ToF={down.visible}/{down.tof_valid}'
             )
+            # rclpy identifies a logging call site by source location and
+            # rejects changing its severity between calls.  Keep INFO and
+            # WARN on distinct call sites instead of selecting a bound method.
+            if observation.available:
+                self.get_logger().info(message)
+            else:
+                self.get_logger().warn(message)
         self.last_status = status
 
 

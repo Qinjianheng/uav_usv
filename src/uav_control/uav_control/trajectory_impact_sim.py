@@ -113,6 +113,9 @@ class TrajectoryImpactSim(Node):
         'trajectory_plan_feasible',
         'trajectory_planner',
         'minco_target_curve_weight',
+        'minco_constraint_penalty',
+        'minco_optimization_iterations',
+        'minco_piece_durations',
         'planned_closing_speed',
         'planned_max_horizontal_speed',
         'planned_max_vertical_speed',
@@ -201,6 +204,11 @@ class TrajectoryImpactSim(Node):
         self.declare_parameter('enable_minco_planner', True)
         self.declare_parameter('minco_piece_count', 3)
         self.declare_parameter('minco_target_curve_weight', 0.7)
+        self.declare_parameter('enable_minco_geometric_optimization', True)
+        self.declare_parameter('minco_optimization_max_iterations', 3)
+        self.declare_parameter('minco_spatial_radius', 0.75)
+        self.declare_parameter('minco_constraint_penalty_weight', 1000.0)
+        self.declare_parameter('minco_quadrature_intervals_per_piece', 8)
         self.declare_parameter('terminal_contact_clearance', 0.05)
         # Preferred sea-surface clearance for terminal pursuit.  Zero
         # disables it.  The runtime ceiling is relaxed when necessary so it
@@ -554,6 +562,45 @@ class TrajectoryImpactSim(Node):
                 0.0,
             ),
             1.0,
+        )
+        self.enable_minco_geometric_optimization = bool(
+            self.get_parameter(
+                'enable_minco_geometric_optimization'
+            ).value
+        )
+        self.minco_optimization_max_iterations = min(
+            max(
+                int(
+                    self.get_parameter(
+                        'minco_optimization_max_iterations'
+                    ).value
+                ),
+                0,
+            ),
+            20,
+        )
+        self.minco_spatial_radius = max(
+            float(self.get_parameter('minco_spatial_radius').value),
+            0.05,
+        )
+        self.minco_constraint_penalty_weight = max(
+            float(
+                self.get_parameter(
+                    'minco_constraint_penalty_weight'
+                ).value
+            ),
+            1.0,
+        )
+        self.minco_quadrature_intervals_per_piece = min(
+            max(
+                int(
+                    self.get_parameter(
+                        'minco_quadrature_intervals_per_piece'
+                    ).value
+                ),
+                2,
+            ),
+            40,
         )
         self.terminal_max_acceleration = min(
             max(
@@ -941,6 +988,19 @@ class TrajectoryImpactSim(Node):
                     self.terminal_minimum_clearance,
                     self.terminal_contact_clearance,
                 ),
+                enable_minco_geometric_optimization=(
+                    self.enable_minco_geometric_optimization
+                ),
+                minco_optimization_max_iterations=(
+                    self.minco_optimization_max_iterations
+                ),
+                minco_spatial_radius=self.minco_spatial_radius,
+                minco_constraint_penalty_weight=(
+                    self.minco_constraint_penalty_weight
+                ),
+                minco_quadrature_intervals_per_piece=(
+                    self.minco_quadrature_intervals_per_piece
+                ),
             )
         )
 
@@ -1153,6 +1213,9 @@ class TrajectoryImpactSim(Node):
         self.retained_terminal_plan_age = 0.0
         self.terminal_descent_committed = False
         self.planned_minco_target_curve_weight = 0.0
+        self.planned_minco_constraint_penalty = 0.0
+        self.planned_minco_optimization_iterations = 0
+        self.planned_minco_piece_durations = ()
         self.guidance_altitude_reference = math.nan
         self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
@@ -1217,7 +1280,11 @@ class TrajectoryImpactSim(Node):
             'TERMINAL TRAJECTORY GENERATOR: '
             + (
                 f'MINCO-T3 | pieces={self.minco_piece_count} | '
-                f'target-curve weight={self.minco_target_curve_weight:.2f}'
+                f'target-curve weight={self.minco_target_curve_weight:.2f} | '
+                'geometric optimization='
+                f'{self.enable_minco_geometric_optimization} | '
+                'quadrature='
+                f'{self.minco_quadrature_intervals_per_piece}/piece'
                 if self.enable_minco_planner
                 else 'single-piece quintic compatibility mode'
             )
@@ -2388,6 +2455,9 @@ class TrajectoryImpactSim(Node):
         self.trajectory_plan_active = False
         self.trajectory_planner_type = 'PURSUIT'
         self.planned_minco_target_curve_weight = 0.0
+        self.planned_minco_constraint_penalty = 0.0
+        self.planned_minco_optimization_iterations = 0
+        self.planned_minco_piece_durations = ()
         self.guidance_altitude_reference = math.nan
         self.guidance_closing_speed = 0.0
         self.planned_closing_speed = 0.0
@@ -2867,6 +2937,17 @@ class TrajectoryImpactSim(Node):
             )
             self.planned_minco_target_curve_weight = (
                 plan.target_curve_weight
+            )
+            self.planned_minco_constraint_penalty = (
+                getattr(plan, 'constraint_penalty', 0.0)
+            )
+            self.planned_minco_optimization_iterations = (
+                getattr(plan, 'optimization_iterations', 0)
+            )
+            self.planned_minco_piece_durations = getattr(
+                plan,
+                'piece_durations',
+                (plan.duration,),
             )
             self.guidance_altitude_reference = sample.position[2]
             self.guidance_closing_speed = plan.closing_speed
@@ -3480,6 +3561,12 @@ class TrajectoryImpactSim(Node):
             '1' if self.trajectory_plan_active else '0',
             self.trajectory_planner_type,
             f'{self.planned_minco_target_curve_weight:.6f}',
+            f'{self.planned_minco_constraint_penalty:.9f}',
+            str(self.planned_minco_optimization_iterations),
+            ';'.join(
+                f'{duration:.6f}'
+                for duration in self.planned_minco_piece_durations
+            ),
             f'{self.planned_closing_speed:.6f}',
             f'{self.planned_max_horizontal_speed:.6f}',
             f'{self.planned_max_vertical_speed:.6f}',

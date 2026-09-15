@@ -9,6 +9,17 @@ from uav_control.figure_eight_trajectory import FigureEightTrajectory
 from uav_usv_interfaces.msg import InterceptResult
 
 
+def measured_motion_step(previous_time_ns, current_time_ns, nominal_step):
+    """Return elapsed ROS-clock time while rejecting invalid clock jumps."""
+    nominal_step = float(nominal_step)
+    if previous_time_ns is None:
+        return nominal_step
+    elapsed = (int(current_time_ns) - int(previous_time_ns)) * 1e-9
+    if not math.isfinite(elapsed) or elapsed <= 0.0 or elapsed > 1.0:
+        return nominal_step
+    return elapsed
+
+
 class MovingTarget(Node):
 
     def __init__(self):
@@ -177,6 +188,9 @@ class MovingTarget(Node):
             1.0,
         )
         self.dt = 1.0 / update_rate_hz
+        self.last_motion_update_time_ns = (
+            self.get_clock().now().nanoseconds if self.started else None
+        )
 
         self.timer = self.create_timer(
             self.dt,
@@ -250,6 +264,12 @@ class MovingTarget(Node):
                 )
                 return
             self.started = True
+            get_clock = getattr(self, 'get_clock', None)
+            self.last_motion_update_time_ns = (
+                get_clock().now().nanoseconds
+                if get_clock is not None
+                else None
+            )
             self.get_logger().info(
                 'X received. Moving target motion started.'
             )
@@ -283,33 +303,49 @@ class MovingTarget(Node):
 
         # 更新目标位置
         if self.started and not self.hit:
-            self.elapsed_time += self.dt
-            self.commanded_horizontal_speed = min(
-                self.commanded_horizontal_speed
-                + self.horizontal_acceleration_limit * self.dt,
-                self.cruise_horizontal_speed,
+            now_ns = self.get_clock().now().nanoseconds
+            motion_step = measured_motion_step(
+                self.last_motion_update_time_ns,
+                now_ns,
+                self.dt,
             )
-            if self.figure_eight_trajectory is None:
-                requested_speed = math.hypot(
-                    self.linear_vx,
-                    self.linear_vy,
-                )
-                velocity_scale = (
-                    self.commanded_horizontal_speed / requested_speed
-                    if requested_speed > 1e-9
-                    else 0.0
-                )
-                self.vx = self.linear_vx * velocity_scale
-                self.vy = self.linear_vy * velocity_scale
-                self.x += self.vx * self.dt
-                self.y += self.vy * self.dt
-            else:
-                self.figure_eight_trajectory.set_speed(
+            self.last_motion_update_time_ns = now_ns
+
+            # Integrate delayed callbacks in nominal-sized substeps.  The
+            # elapsed trajectory time still follows the ROS clock, while the
+            # acceleration ramp and curved path retain numerical fidelity.
+            remaining = motion_step
+            while remaining > 1e-12:
+                integration_step = min(remaining, self.dt)
+                self.commanded_horizontal_speed = min(
                     self.commanded_horizontal_speed
+                    + self.horizontal_acceleration_limit * integration_step,
+                    self.cruise_horizontal_speed,
                 )
-                self.x, self.y, self.vx, self.vy = (
-                    self.figure_eight_trajectory.advance(self.dt)
-                )
+                if self.figure_eight_trajectory is None:
+                    requested_speed = math.hypot(
+                        self.linear_vx,
+                        self.linear_vy,
+                    )
+                    velocity_scale = (
+                        self.commanded_horizontal_speed / requested_speed
+                        if requested_speed > 1e-9
+                        else 0.0
+                    )
+                    self.vx = self.linear_vx * velocity_scale
+                    self.vy = self.linear_vy * velocity_scale
+                    self.x += self.vx * integration_step
+                    self.y += self.vy * integration_step
+                else:
+                    self.figure_eight_trajectory.set_speed(
+                        self.commanded_horizontal_speed
+                    )
+                    self.x, self.y, self.vx, self.vy = (
+                        self.figure_eight_trajectory.advance(integration_step)
+                    )
+                remaining -= integration_step
+
+            self.elapsed_time += motion_step
             self.z = (
                 self.initial_z
                 + self.vz * self.elapsed_time

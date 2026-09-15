@@ -8,6 +8,7 @@ position/velocity/acceleration boundary states and intermediate positions.
 """
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,7 +28,8 @@ class MincoS3Trajectory:
     """Piecewise-quintic minimum-jerk trajectory in three dimensions."""
 
     polynomial_degree = 5
-    _mapping_cache = {}
+    _mapping_cache = OrderedDict()
+    _mapping_cache_limit = 256
 
     def __init__(
         self,
@@ -75,12 +77,19 @@ class MincoS3Trajectory:
         mapping = self._mapping_cache.get(cache_key)
         if mapping is None:
             try:
+                # For the small fixed-piece online problem, cache the linear
+                # map after the same nonsingular MINCO system is prewarmed.
+                # Residual checking below guards numerical conditioning.
                 mapping = np.linalg.inv(matrix)
             except np.linalg.LinAlgError as error:
                 raise ValueError(
                     'MINCO coefficient mapping is singular'
                 ) from error
             self._mapping_cache[cache_key] = mapping
+            if len(self._mapping_cache) > self._mapping_cache_limit:
+                self._mapping_cache.popitem(last=False)
+        else:
+            self._mapping_cache.move_to_end(cache_key)
         coefficients = mapping @ values
         residual = np.max(np.abs(matrix @ coefficients - values))
         if not np.all(np.isfinite(coefficients)) or residual > 1e-6:
@@ -90,6 +99,49 @@ class MincoS3Trajectory:
         self.coefficients = coefficients.reshape(self.piece_count, 6, 3)
         self.duration = float(sum(self.durations))
         self._cumulative_times = np.cumsum(self.durations)
+
+    @staticmethod
+    def durations_from_logits(total_duration, logits):
+        """
+        Map Euclidean variables to positive durations with fixed sum.
+
+        This is the fixed-total-time diffeomorphism used by GCOPTER.  The last
+        logit is anchored at zero to remove the softmax translation ambiguity.
+        """
+        total_duration = float(total_duration)
+        logits = np.asarray(tuple(float(value) for value in logits), dtype=float)
+        if (
+            not math.isfinite(total_duration)
+            or total_duration <= 0.0
+            or not np.all(np.isfinite(logits))
+        ):
+            raise ValueError('duration logits and total duration must be finite')
+        augmented = np.concatenate((logits, np.zeros(1, dtype=float)))
+        augmented -= np.max(augmented)
+        weights = np.exp(augmented)
+        durations = total_duration * weights / np.sum(weights)
+        if not np.all(durations > 0.0):
+            raise ValueError('duration transformation must remain positive')
+        return tuple(float(value) for value in durations)
+
+    @staticmethod
+    def map_to_ball(center, radius, latent):
+        """Smoothly map an unconstrained vector into a closed spatial ball."""
+        center = np.asarray(tuple(float(value) for value in center), dtype=float)
+        latent = np.asarray(tuple(float(value) for value in latent), dtype=float)
+        radius = float(radius)
+        if (
+            center.shape != (3,)
+            or latent.shape != (3,)
+            or not np.all(np.isfinite(center))
+            or not np.all(np.isfinite(latent))
+            or not math.isfinite(radius)
+            or radius < 0.0
+        ):
+            raise ValueError('ball mapping requires finite 3-D vectors and radius')
+        squared_norm = float(np.dot(latent, latent))
+        mapped = center + 2.0 * radius * latent / (squared_norm + 1.0)
+        return tuple(float(value) for value in mapped)
 
     @staticmethod
     def _vector(values, name):
@@ -232,6 +284,20 @@ class MincoS3Trajectory:
             tuple(acceleration),
             tuple(jerk),
         )
+
+    def quadrature_samples(self, intervals_per_piece):
+        """Yield trapezoidal samples with their integration weights."""
+        intervals_per_piece = int(intervals_per_piece)
+        if intervals_per_piece < 1:
+            raise ValueError('quadrature intervals per piece must be positive')
+        piece_start = 0.0
+        for duration in self.durations:
+            step = duration / intervals_per_piece
+            for index in range(intervals_per_piece + 1):
+                weight = 0.5 if index in (0, intervals_per_piece) else 1.0
+                time = piece_start + index * step
+                yield self.sample(time), weight * step
+            piece_start += duration
 
     def control_effort(self):
         """Return the exact integral of squared jerk over all pieces."""

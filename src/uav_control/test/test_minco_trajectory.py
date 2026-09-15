@@ -73,6 +73,55 @@ def test_control_effort_is_finite_and_positive():
     assert trajectory.control_effort() > 0.0
 
 
+def test_duration_logits_are_positive_and_preserve_total_time():
+    durations = MincoS3Trajectory.durations_from_logits(
+        2.4,
+        (0.7, -0.4),
+    )
+
+    assert len(durations) == 3
+    assert all(duration > 0.0 for duration in durations)
+    assert sum(durations) == pytest.approx(2.4)
+    assert MincoS3Trajectory.durations_from_logits(
+        3.0,
+        (0.0, 0.0),
+    ) == pytest.approx((1.0, 1.0, 1.0))
+
+
+def test_smooth_spatial_map_remains_inside_ball():
+    center = (1.0, -2.0, 0.5)
+    radius = 0.75
+    mapped = MincoS3Trajectory.map_to_ball(
+        center,
+        radius,
+        (0.8, -0.3, 0.5),
+    )
+    distance = math.sqrt(sum(
+        (value - origin) ** 2
+        for value, origin in zip(mapped, center)
+    ))
+
+    assert distance <= radius + 1e-12
+
+
+def test_piecewise_trapezoidal_quadrature_integrates_total_time():
+    trajectory = MincoS3Trajectory(
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        ((1.0, 0.0, 0.0),),
+        (0.7, 1.1),
+    )
+
+    integrated_one = sum(
+        weight for _sample, weight in trajectory.quadrature_samples(8)
+    )
+    assert integrated_one == pytest.approx(trajectory.duration)
+
+
 @pytest.mark.parametrize(
     'waypoints,durations',
     [
