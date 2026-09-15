@@ -202,6 +202,28 @@ intercept_planner_node:
     quadrature_intervals_per_piece: 6
     frame_id: local_ned
 
+trajectory_tracker_node:
+  ros__parameters:
+    control_rate_hz: 20.0
+    maximum_plan_age: 0.125
+    minimum_remaining_time: 0.20
+    maximum_position_error: 0.30
+    maximum_velocity_error: 0.50
+    target_endpoint_tolerance: 0.50
+    position_gain: 1.2
+    # These are shared physical limits and must match the planner values.
+    maximum_horizontal_speed: 6.5
+    maximum_vertical_speed: 4.0
+    maximum_horizontal_acceleration: 3.0
+    maximum_vertical_acceleration: 3.0
+    sea_surface_z: 0.0
+    # contact_clearance (0.05 m) + terminal_safety_margin (0.02 m).
+    reserve_clearance: 0.07
+    safety_response_delay: 0.15
+    vertical_braking_acceleration: 2.5
+    maximum_state_age: 0.125
+    frame_id: local_ned
+
 target_kalman_filter:
   ros__parameters:
     frame_id: local_ned

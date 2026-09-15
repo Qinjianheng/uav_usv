@@ -41,6 +41,8 @@ setup(
             'uav_control.tracking.target_predictor_node:main',
             'intercept_planner_node = '
             'uav_control.guidance.intercept_planner_node:main',
+            'trajectory_tracker_node = '
+            'uav_control.control.trajectory_tracker_node:main',
             'front_tof_monitor = '
             'uav_control.perception.front_tof_monitor:main',
             'rgbd_target_localizer = '

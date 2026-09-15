@@ -1,0 +1,19 @@
+builtin_interfaces/Time stamp
+
+uint64 mission_id
+uint64 plan_id
+uint64 prediction_sequence_id
+
+string status
+string rejection_reason
+
+float64 callback_compute_time
+float64 source_age
+float64 remaining_time
+
+string safety_state
+float64 safety_margin
+
+geometry_msgs/Point reference_position
+geometry_msgs/Vector3 command_velocity
+geometry_msgs/Vector3 command_acceleration

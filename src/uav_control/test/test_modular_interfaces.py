@@ -110,3 +110,20 @@ def test_mission_state_constants_are_machine_parseable():
     assert mission_state.INIT == 0
     assert mission_state.MINCO_READY != mission_state.MINCO_TRACKING
     assert mission_state.SAFE_WAIT != mission_state.FAILURE
+
+
+def test_controller_diagnostic_carries_plan_identity_and_timing():
+    controller_diagnostic = message_class('ControllerDiagnostic')
+    message = controller_diagnostic()
+    message.mission_id = 2
+    message.plan_id = 9
+    message.source_age = 0.08
+    message.callback_compute_time = 0.002
+    message.status = 'TRACKING'
+
+    restored = round_trip(message, controller_diagnostic)
+
+    assert restored.mission_id == 2
+    assert restored.plan_id == 9
+    assert restored.source_age == pytest.approx(0.08)
+    assert restored.callback_compute_time == pytest.approx(0.002)
