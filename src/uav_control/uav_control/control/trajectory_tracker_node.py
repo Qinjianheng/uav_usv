@@ -7,14 +7,16 @@ from dataclasses import replace
 import rclpy
 from builtin_interfaces.msg import Time
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleCommand, VehicleLocalPosition, VehicleStatus
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
+from std_msgs.msg import Bool
 from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptTrajectory
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
-from uav_usv_interfaces.msg import TargetPrediction
+from uav_usv_interfaces.msg import TargetPrediction, TargetState
 
+from .flight_guidance import FlightGuidanceCore, FlightKinematicState
 from .trajectory_tracking import PolynomialSegmentData
 from .trajectory_tracking import PolynomialTrajectory
 from .trajectory_tracking import TrackerKinematicState
@@ -86,6 +88,21 @@ def tracker_state_from_message(message, received_stamp):
     )
 
 
+def flight_target_from_message(message):
+    """Convert the launch-selected current target source for flight guidance."""
+    values = (
+        float(message.position.x),
+        float(message.position.y),
+        float(message.position.z),
+        float(message.velocity.x),
+        float(message.velocity.y),
+        float(message.velocity.z),
+    )
+    if not message.valid or not all(math.isfinite(value) for value in values):
+        raise ValueError('target state is invalid')
+    return FlightKinematicState(values[:3], values[3:])
+
+
 def command_to_setpoint(command, timestamp_us):
     """Map the post-guard command to a PX4 position-feedforward setpoint."""
     message = TrajectorySetpoint()
@@ -105,6 +122,25 @@ def hold_setpoint(state, timestamp_us):
     message.timestamp = int(timestamp_us)
     message.position = [float(value) for value in state.position]
     message.velocity = [0.0, 0.0, 0.0]
+    message.acceleration = [math.nan, math.nan, math.nan]
+    message.jerk = [math.nan, math.nan, math.nan]
+    message.yaw = math.nan
+    message.yawspeed = math.nan
+    return message
+
+
+def flight_command_to_setpoint(command, timestamp_us):
+    """Map non-MINCO flight guidance without mixing PX4 control modes."""
+    message = TrajectorySetpoint()
+    message.timestamp = int(timestamp_us)
+    if command.mode == 'VELOCITY':
+        message.position = [math.nan, math.nan, math.nan]
+        message.velocity = [float(value) for value in command.velocity]
+    elif command.mode == 'POSITION':
+        message.position = [float(value) for value in command.position]
+        message.velocity = [math.nan, math.nan, math.nan]
+    else:
+        raise ValueError(f'unsupported flight command mode: {command.mode}')
     message.acceleration = [math.nan, math.nan, math.nan]
     message.jerk = [math.nan, math.nan, math.nan]
     message.yaw = math.nan
@@ -170,6 +206,18 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('vertical_braking_acceleration', 2.5)
         self.declare_parameter('maximum_state_age', 0.125)
         self.declare_parameter('frame_id', 'local_ned')
+        self.declare_parameter('target_state_topic', '/target/state')
+        self.declare_parameter('offboard_prestream_time', 2.0)
+        self.declare_parameter('px4_command_retry_time', 1.0)
+        self.declare_parameter('vehicle_status_timeout', 2.0)
+        self.declare_parameter('flight_altitude', -5.0)
+        self.declare_parameter('takeoff_tolerance', 0.5)
+        self.declare_parameter('takeoff_settle_time', 1.0)
+        self.declare_parameter('takeoff_maximum_vertical_speed', 1.5)
+        self.declare_parameter('takeoff_maximum_vertical_acceleration', 1.0)
+        self.declare_parameter('follow_distance', 5.0)
+        self.declare_parameter('follow_position_gain', 0.8)
+        self.declare_parameter('altitude_velocity_gain', 1.0)
 
         control_rate = float(self.get_parameter('control_rate_hz').value)
         if not math.isfinite(control_rate) or control_rate <= 0.0:
@@ -178,6 +226,26 @@ class TrajectoryTrackerNode(Node):
             self.get_parameter('maximum_state_age').value
         )
         self.expected_frame_id = str(self.get_parameter('frame_id').value)
+        self.target_state_topic = str(
+            self.get_parameter('target_state_topic').value
+        )
+        self.offboard_prestream_cycles = max(
+            int(round(
+                self.get_parameter('offboard_prestream_time').value
+                * control_rate
+            )),
+            1,
+        )
+        self.px4_command_retry_cycles = max(
+            int(round(
+                self.get_parameter('px4_command_retry_time').value
+                * control_rate
+            )),
+            1,
+        )
+        self.vehicle_status_timeout = float(
+            self.get_parameter('vehicle_status_timeout').value
+        )
         self.tracker = TrajectoryTrackerCore(
             maximum_plan_age=self.get_parameter('maximum_plan_age').value,
             minimum_remaining_time=self.get_parameter(
@@ -216,6 +284,47 @@ class TrajectoryTrackerNode(Node):
             ).value,
             control_dt=1.0 / control_rate,
         )
+        self.flight_guidance = FlightGuidanceCore(
+            flight_altitude=self.get_parameter('flight_altitude').value,
+            takeoff_tolerance=self.get_parameter('takeoff_tolerance').value,
+            takeoff_settle_time=self.get_parameter(
+                'takeoff_settle_time'
+            ).value,
+            takeoff_maximum_vertical_speed=self.get_parameter(
+                'takeoff_maximum_vertical_speed'
+            ).value,
+            takeoff_maximum_vertical_acceleration=self.get_parameter(
+                'takeoff_maximum_vertical_acceleration'
+            ).value,
+            follow_distance=self.get_parameter('follow_distance').value,
+            follow_position_gain=self.get_parameter(
+                'follow_position_gain'
+            ).value,
+            altitude_velocity_gain=self.get_parameter(
+                'altitude_velocity_gain'
+            ).value,
+            maximum_horizontal_speed=self.get_parameter(
+                'maximum_horizontal_speed'
+            ).value,
+            maximum_vertical_speed=self.get_parameter(
+                'maximum_vertical_speed'
+            ).value,
+            maximum_horizontal_acceleration=self.get_parameter(
+                'maximum_horizontal_acceleration'
+            ).value,
+            maximum_vertical_acceleration=self.get_parameter(
+                'maximum_vertical_acceleration'
+            ).value,
+            sea_surface_z=self.get_parameter('sea_surface_z').value,
+            reserve_clearance=self.get_parameter('reserve_clearance').value,
+            safety_response_delay=self.get_parameter(
+                'safety_response_delay'
+            ).value,
+            vertical_braking_acceleration=self.get_parameter(
+                'vertical_braking_acceleration'
+            ).value,
+            control_dt=1.0 / control_rate,
+        )
 
         state_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -229,10 +338,28 @@ class TrajectoryTrackerNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        latched_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         self.uav_sub = self.create_subscription(
             VehicleLocalPosition,
             '/fmu/out/vehicle_local_position_v1',
             self.uav_callback,
+            state_qos,
+        )
+        self.vehicle_status_sub = self.create_subscription(
+            VehicleStatus,
+            '/fmu/out/vehicle_status_v4',
+            self.vehicle_status_callback,
+            state_qos,
+        )
+        self.target_state_sub = self.create_subscription(
+            TargetState,
+            self.target_state_topic,
+            self.target_state_callback,
             state_qos,
         )
         self.trajectory_sub = self.create_subscription(
@@ -269,6 +396,11 @@ class TrajectoryTrackerNode(Node):
             '/fmu/in/trajectory_setpoint',
             10,
         )
+        self.vehicle_command_pub = self.create_publisher(
+            VehicleCommand,
+            '/fmu/in/vehicle_command',
+            10,
+        )
         self.reference_pub = self.create_publisher(
             TrajectorySetpoint,
             '/control/reference',
@@ -279,15 +411,40 @@ class TrajectoryTrackerNode(Node):
             '/control/diagnostic',
             reliable_qos,
         )
+        self.flight_ready_pub = self.create_publisher(
+            Bool,
+            '/simulation/impact/flight_ready',
+            latched_qos,
+        )
+        self.takeoff_complete_pub = self.create_publisher(
+            Bool,
+            '/control/takeoff_complete',
+            latched_qos,
+        )
+        self.far_guidance_pub = self.create_publisher(
+            Bool,
+            '/control/far_guidance_available',
+            reliable_qos,
+        )
         self.timer = self.create_timer(1.0 / control_rate, self.timer_callback)
 
         self.latest_state = None
         self.latest_prediction = None
+        self.latest_target_state = None
         self.latest_planner_diagnostic = None
+        self.vehicle_status_stamp = None
+        self.offboard_active = False
+        self.vehicle_armed = False
         self.mission_id = 0
         self.mission_state = MissionState.INIT
+        self.mission_state_name = 'INIT'
         self.last_rejection = TrajectoryRejectReason.NONE
         self.last_callback_time = 0.0
+        self.control_counter = 0
+        self.preflight_counter = 0
+        self.last_timer_stamp = None
+        self.flight_ready = False
+        self.takeoff_complete_sent = False
         self.get_logger().info(
             'Trajectory tracker ready | rate='
             f'{control_rate:.1f} Hz | plan age<='
@@ -308,6 +465,23 @@ class TrajectoryTrackerNode(Node):
             self._ros_seconds(),
         )
 
+    def vehicle_status_callback(self, message):
+        self.vehicle_status_stamp = self._ros_seconds()
+        self.offboard_active = (
+            message.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        )
+        self.vehicle_armed = (
+            message.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        )
+
+    def target_state_callback(self, message):
+        if message.frame_id != self.expected_frame_id:
+            return
+        try:
+            self.latest_target_state = flight_target_from_message(message)
+        except ValueError:
+            self.latest_target_state = None
+
     def prediction_callback(self, message):
         if message.valid and message.frame_id == self.expected_frame_id:
             self.latest_prediction = message
@@ -319,9 +493,12 @@ class TrajectoryTrackerNode(Node):
         new_mission_id = int(message.mission_id)
         if new_mission_id != self.mission_id:
             self.tracker.reset()
+            self.flight_guidance.reset()
             self.last_rejection = TrajectoryRejectReason.NONE
+            self.takeoff_complete_sent = False
         self.mission_id = new_mission_id
         self.mission_state = int(message.state)
+        self.mission_state_name = str(message.state_name) or 'INIT'
 
     def trajectory_callback(self, message):
         started = time.perf_counter()
@@ -362,17 +539,52 @@ class TrajectoryTrackerNode(Node):
                 self.last_callback_time,
             )
 
-    def _publish_offboard_mode(self, timestamp_us):
+    def _publish_offboard_mode(self, timestamp_us, velocity_control=False):
         message = OffboardControlMode()
         message.timestamp = int(timestamp_us)
-        message.position = True
-        message.velocity = False
+        message.position = not bool(velocity_control)
+        message.velocity = bool(velocity_control)
         message.acceleration = False
         message.attitude = False
         message.body_rate = False
         message.thrust_and_torque = False
         message.direct_actuator = False
         self.offboard_pub.publish(message)
+
+    def _publish_vehicle_command(self, command, param1, param2=0.0):
+        message = VehicleCommand()
+        message.timestamp = self._timestamp_us()
+        message.command = int(command)
+        message.param1 = float(param1)
+        message.param2 = float(param2)
+        message.target_system = 1
+        message.target_component = 1
+        message.source_system = 1
+        message.source_component = 1
+        message.from_external = True
+        self.vehicle_command_pub.publish(message)
+
+    @staticmethod
+    def _publish_bool(publisher, value):
+        message = Bool()
+        message.data = bool(value)
+        publisher.publish(message)
+
+    def _request_flight_mode(self):
+        retry_due = self.control_counter % self.px4_command_retry_cycles == 0
+        if not retry_due:
+            return
+        if not self.offboard_active:
+            self._publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                1.0,
+                6.0,
+            )
+        if not self.vehicle_armed:
+            self._publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0,
+            )
 
     def _publish_diagnostic(self, now, command, status, callback_time):
         message = ControllerDiagnostic()
@@ -407,6 +619,7 @@ class TrajectoryTrackerNode(Node):
         started = time.perf_counter()
         now = self._ros_seconds()
         if self.latest_state is None:
+            self._publish_bool(self.flight_ready_pub, False)
             self._publish_diagnostic(
                 now,
                 None,
@@ -415,6 +628,7 @@ class TrajectoryTrackerNode(Node):
             )
             return
         if now - self.latest_state.stamp > self.maximum_state_age:
+            self._publish_bool(self.flight_ready_pub, False)
             self._publish_diagnostic(
                 now,
                 None,
@@ -422,25 +636,138 @@ class TrajectoryTrackerNode(Node):
                 time.perf_counter() - started,
             )
             return
-        if self.mission_state not in self.CONTROL_STATES:
-            self._publish_diagnostic(
-                now,
-                None,
-                'INACTIVE',
-                time.perf_counter() - started,
-            )
-            return
-
         current = replace(self.latest_state, stamp=now)
-        command = self.tracker.command(current, self.mission_id)
+        flight_state = FlightKinematicState(
+            current.position,
+            current.velocity,
+        )
         timestamp_us = self._timestamp_us()
-        self._publish_offboard_mode(timestamp_us)
-        if command is None:
-            setpoint = hold_setpoint(current, timestamp_us)
-            status = 'NO_VALID_PLAN'
+        dt = self.tracker.control_dt
+        if self.last_timer_stamp is not None:
+            measured_dt = now - self.last_timer_stamp
+            if 0.001 <= measured_dt <= 0.25:
+                dt = measured_dt
+        self.last_timer_stamp = now
+        self.control_counter += 1
+
+        if self.mission_state in (MissionState.INIT, MissionState.GROUND_HOLD):
+            flight_command = self.flight_guidance.command(
+                self.mission_state_name,
+                flight_state,
+                self.latest_target_state,
+                dt,
+            )
+            self._publish_offboard_mode(timestamp_us, velocity_control=False)
+            setpoint = flight_command_to_setpoint(
+                flight_command,
+                timestamp_us,
+            )
+            self.preflight_counter += 1
+            mode_retry_due = (
+                self.preflight_counter >= self.offboard_prestream_cycles
+                and (
+                    self.preflight_counter - self.offboard_prestream_cycles
+                ) % self.px4_command_retry_cycles == 0
+            )
+            if mode_retry_due and not self.offboard_active:
+                self._publish_vehicle_command(
+                    VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                    1.0,
+                    6.0,
+                )
+            if (
+                self.vehicle_armed
+                and self.preflight_counter % self.px4_command_retry_cycles == 0
+            ):
+                self._publish_vehicle_command(
+                    VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                    0.0,
+                )
+            status_fresh = (
+                self.vehicle_status_stamp is not None
+                and now - self.vehicle_status_stamp
+                <= self.vehicle_status_timeout
+            )
+            ready = self.offboard_active and not self.vehicle_armed and status_fresh
+            self._publish_bool(self.flight_ready_pub, ready)
+            if ready and not self.flight_ready:
+                self.get_logger().info(
+                    'FLIGHT READY | PX4 is disarmed in OFFBOARD ground hold'
+                )
+            self.flight_ready = ready
+            status = self.mission_state_name
+            command = flight_command
+        elif self.mission_state in (
+            MissionState.TAKEOFF,
+            MissionState.FOLLOW,
+            MissionState.FAR_GUIDANCE,
+        ):
+            self._publish_bool(self.flight_ready_pub, False)
+            self._request_flight_mode()
+            flight_command = self.flight_guidance.command(
+                self.mission_state_name,
+                flight_state,
+                self.latest_target_state,
+                dt,
+            )
+            velocity_control = flight_command.mode == 'VELOCITY'
+            self._publish_offboard_mode(
+                timestamp_us,
+                velocity_control=velocity_control,
+            )
+            setpoint = flight_command_to_setpoint(
+                flight_command,
+                timestamp_us,
+            )
+            self._publish_bool(
+                self.takeoff_complete_pub,
+                flight_command.takeoff_complete,
+            )
+            self._publish_bool(
+                self.far_guidance_pub,
+                flight_command.far_guidance_available,
+            )
+            if (
+                flight_command.takeoff_complete
+                and not self.takeoff_complete_sent
+            ):
+                self.takeoff_complete_sent = True
+                self.get_logger().info('TAKEOFF COMPLETE | entering FOLLOW')
+            status = self.mission_state_name
+            command = flight_command
+        elif self.mission_state in self.CONTROL_STATES:
+            self._publish_bool(self.flight_ready_pub, False)
+            self._request_flight_mode()
+            command = self.tracker.command(current, self.mission_id)
+            if command is None:
+                setpoint = hold_setpoint(current, timestamp_us)
+                self._publish_offboard_mode(
+                    timestamp_us,
+                    velocity_control=False,
+                )
+                status = 'NO_VALID_PLAN'
+            else:
+                setpoint = command_to_setpoint(command, timestamp_us)
+                self._publish_offboard_mode(
+                    timestamp_us,
+                    velocity_control=False,
+                )
+                status = 'TRACKING'
         else:
-            setpoint = command_to_setpoint(command, timestamp_us)
-            status = 'TRACKING'
+            self._publish_bool(self.flight_ready_pub, False)
+            flight_command = self.flight_guidance.command(
+                'HOLD',
+                flight_state,
+                None,
+                dt,
+            )
+            self._publish_offboard_mode(timestamp_us, velocity_control=False)
+            setpoint = flight_command_to_setpoint(
+                flight_command,
+                timestamp_us,
+            )
+            status = self.mission_state_name
+            command = flight_command
         self.setpoint_pub.publish(setpoint)
         self.reference_pub.publish(setpoint)
         self._publish_diagnostic(

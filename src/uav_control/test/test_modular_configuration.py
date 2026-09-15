@@ -1,0 +1,59 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+
+CONFIG_FILE = (
+    Path(__file__).parents[2]
+    / 'uav_usv_bringup'
+    / 'config'
+    / 'baseline.yaml'
+)
+
+
+def parameters(config, node):
+    return config[node]['ros__parameters']
+
+
+def test_shared_dynamic_and_safety_limits_are_synchronized():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    planner = parameters(config, 'intercept_planner_node')
+    tracker = parameters(config, 'trajectory_tracker_node')
+    evaluator = parameters(config, 'intercept_evaluator_node')
+
+    for name in (
+        'maximum_horizontal_speed',
+        'maximum_vertical_speed',
+        'maximum_horizontal_acceleration',
+        'maximum_vertical_acceleration',
+    ):
+        assert tracker[name] == pytest.approx(planner[name])
+    assert tracker['sea_surface_z'] == pytest.approx(planner['sea_surface_z'])
+    assert evaluator['sea_surface_z'] == pytest.approx(planner['sea_surface_z'])
+    assert evaluator['capture_radius'] == pytest.approx(planner['capture_radius'])
+
+
+def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    target = parameters(config, 'moving_target')
+    planner = parameters(config, 'intercept_planner_node')
+    tracker = parameters(config, 'trajectory_tracker_node')
+
+    assert target['horizontal_speed'] == pytest.approx(4.0)
+    derived_maximum_age = (
+        planner['endpoint_tolerance'] / target['horizontal_speed']
+    )
+    assert planner['maximum_input_age'] <= derived_maximum_age
+    assert tracker['maximum_plan_age'] <= derived_maximum_age
+
+
+def test_truth_control_source_is_explicit_and_shared_by_launch_parameters():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    predictor = parameters(config, 'target_predictor_node')
+    tracker = parameters(config, 'trajectory_tracker_node')
+    evaluator = parameters(config, 'intercept_evaluator_node')
+
+    assert predictor['target_state_source'] == 'simulation_truth'
+    assert predictor['simulation_truth_topic'] == tracker['target_state_topic']
+    assert evaluator['truth_topic'] == tracker['target_state_topic']

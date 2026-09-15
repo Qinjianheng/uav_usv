@@ -5,8 +5,10 @@ from px4_msgs.msg import VehicleLocalPosition
 from uav_usv_interfaces.msg import InterceptTrajectory, PolynomialSegment
 
 from uav_control.control.trajectory_tracker_node import command_to_setpoint
+from uav_control.control.trajectory_tracker_node import flight_command_to_setpoint
 from uav_control.control.trajectory_tracker_node import trajectory_from_message
 from uav_control.control.trajectory_tracker_node import tracker_state_from_message
+from uav_control.control.flight_guidance import FlightGuidanceCommand
 from uav_control.control.trajectory_tracking import TrackingCommand
 
 
@@ -90,3 +92,21 @@ def test_invalid_message_is_rejected_before_reaching_tracker_core():
 
     with pytest.raises(ValueError, match='invalid trajectory message'):
         trajectory_from_message(message)
+
+
+def test_flight_velocity_command_does_not_activate_position_control():
+    command = FlightGuidanceCommand(
+        mode='VELOCITY',
+        position=(1.0, 2.0, -5.0),
+        velocity=(3.0, 4.0, -1.0),
+        acceleration=(0.0, 0.0, 0.0),
+        takeoff_complete=False,
+        far_guidance_available=True,
+        safety_state='SAFE',
+        safety_margin=1.0,
+    )
+
+    message = flight_command_to_setpoint(command, timestamp_us=99)
+
+    assert all(math.isnan(value) for value in message.position)
+    assert list(message.velocity) == pytest.approx([3.0, 4.0, -1.0])

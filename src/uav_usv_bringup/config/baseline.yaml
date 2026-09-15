@@ -205,6 +205,18 @@ intercept_planner_node:
 trajectory_tracker_node:
   ros__parameters:
     control_rate_hz: 20.0
+    target_state_topic: /target/state
+    offboard_prestream_time: 2.0
+    px4_command_retry_time: 1.0
+    vehicle_status_timeout: 2.0
+    flight_altitude: -5.0
+    takeoff_tolerance: 0.5
+    takeoff_settle_time: 1.0
+    takeoff_maximum_vertical_speed: 1.5
+    takeoff_maximum_vertical_acceleration: 1.0
+    follow_distance: 5.0
+    follow_position_gain: 0.8
+    altitude_velocity_gain: 1.0
     maximum_plan_age: 0.125
     minimum_remaining_time: 0.20
     maximum_position_error: 0.30
