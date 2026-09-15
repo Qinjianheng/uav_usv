@@ -151,12 +151,115 @@ source "${PX4_GZ_ENV}"
 export GZ_SIM_RESOURCE_PATH="${CUSTOM_GZ_MODELS}:${GZ_SIM_RESOURCE_PATH:-}"
 export PX4_GZ_MODELS="${CUSTOM_GZ_MODELS}"
 
+LAB_SESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/uav_usv_lab.XXXXXX")"
+LAB_RESTART_MARKER="${LAB_SESSION_DIR}/restarting"
+
+stop_lab_component()
+{
+    local component_name="$1"
+    local pid_file="${LAB_SESSION_DIR}/${component_name}.pid"
+    local component_pid=""
+    local component_pgid=""
+    local command_console_pgid=""
+
+    if [[ ! -r "${pid_file}" ]]; then
+        echo "Cannot restart: missing ${component_name} session PID." >&2
+        return 1
+    fi
+    read -r component_pid <"${pid_file}"
+    if ! [[ "${component_pid}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Cannot restart: invalid ${component_name} session PID." >&2
+        return 1
+    fi
+    if ! kill -0 "${component_pid}" 2>/dev/null; then
+        return 0
+    fi
+
+    component_pgid="$(
+        ps -o pgid= -p "${component_pid}" | tr -d '[:space:]'
+    )"
+    command_console_pgid="$(
+        ps -o pgid= -p "${BASHPID}" | tr -d '[:space:]'
+    )"
+    if ! [[ "${component_pgid}" =~ ^[1-9][0-9]*$ ]] \
+        || [[ "${component_pgid}" == "${command_console_pgid}" ]]; then
+        echo "Cannot safely stop ${component_name} process group." >&2
+        return 1
+    fi
+
+    echo "Stopping ${component_name}..."
+    kill -INT -- "-${component_pgid}" 2>/dev/null
+}
+
+lab_components_stopped()
+{
+    local component_name=""
+    local component_pid=""
+    local pid_file=""
+
+    for component_name in experiment dds px4 gazebo; do
+        pid_file="${LAB_SESSION_DIR}/${component_name}.pid"
+        if [[ -r "${pid_file}" ]]; then
+            read -r component_pid <"${pid_file}"
+            if [[ "${component_pid}" =~ ^[1-9][0-9]*$ ]] \
+                && kill -0 "${component_pid}" 2>/dev/null; then
+                return 1
+            fi
+        fi
+    done
+    return 0
+}
+
+restart_lab()
+{
+    local component_name=""
+    local restart_ready=false
+
+    : >"${LAB_RESTART_MARKER}"
+    for component_name in experiment dds px4 gazebo; do
+        if ! stop_lab_component "${component_name}"; then
+            echo "Restart aborted; close the experiment windows manually." >&2
+            rm -f "${LAB_RESTART_MARKER}"
+            return 1
+        fi
+    done
+
+    for _ in {1..50}; do
+        if lab_components_stopped \
+            && ! timeout 1s gz topic -e -t /world/default/clock -n 1 \
+                >/dev/null 2>&1; then
+            restart_ready=true
+            break
+        fi
+        sleep 0.2
+    done
+    if ! ${restart_ready}; then
+        echo "Restart aborted: a Gazebo/PX4 component is still running." >&2
+        echo "Close the remaining simulation windows, then rerun uav_lab.sh." >&2
+        rm -f "${LAB_RESTART_MARKER}"
+        return 1
+    fi
+
+    rm -f \
+        "${LAB_RESTART_MARKER}" \
+        "${LAB_SESSION_DIR}/experiment.pid" \
+        "${LAB_SESSION_DIR}/dds.pid" \
+        "${LAB_SESSION_DIR}/px4.pid" \
+        "${LAB_SESSION_DIR}/gazebo.pid"
+    rmdir "${LAB_SESSION_DIR}" 2>/dev/null || true
+    echo "Previous simulation stopped. Starting a clean session..."
+    exec "${BASH_SOURCE[0]}" --no-build
+}
+
 echo "Starting Gazebo ocean world..."
 gnome-terminal --title="Gazebo Ocean" -- bash -lc "
+printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/gazebo.pid' &&
 source '${PX4_GZ_ENV}' &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 gz sim -r '${OCEAN_WORLD}';
-exec bash"
+component_status=\$?;
+if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
+exit \${component_status}"
 
 echo "Waiting for Gazebo ocean world..."
 gazebo_ready=false
@@ -176,6 +279,7 @@ fi
 
 echo "Starting PX4 SITL in standalone Gazebo mode..."
 gnome-terminal --title="PX4 SITL" -- bash -lc "
+printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/px4.pid' &&
 source '${PX4_GZ_ENV}' &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
@@ -185,7 +289,9 @@ export PX4_GZ_WORLD=default &&
 export PX4_GZ_MODEL_POSE='0,0,0,0,0,1.57079632679' &&
 cd '${PX4_ROOT}' &&
 make px4_sitl gz_x500_mono_cam;
-exec bash"
+component_status=\$?;
+if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
+exit \${component_status}"
 
 echo "Waiting up to ${CAMERA_STARTUP_TIMEOUT} seconds for PX4 and dual ToF..."
 camera_topics_ready=false
@@ -236,20 +342,26 @@ echo "Configuring PX4 vertical speed envelope to" \
 
 echo "Starting Micro XRCE-DDS Agent..."
 gnome-terminal --title="Micro XRCE-DDS Agent" -- bash -lc "
+printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/dds.pid' &&
 MicroXRCEAgent udp4 -p 8888;
-exec bash"
+component_status=\$?;
+if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
+exit \${component_status}"
 
 echo "Waiting 5 seconds for DDS connection..."
 sleep 5
 
 echo "Starting UAV-USV baseline experiment..."
 gnome-terminal --title="UAV-USV experiment" -- bash -lc "
+printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/experiment.pid' &&
 export UAV_USV_WS='${WS_ROOT}' &&
 source /opt/ros/humble/setup.bash &&
 source '${WS_ROOT}/install/setup.bash' &&
 cd '${WS_ROOT}' &&
 ros2 launch uav_usv_bringup baseline_intercept.launch.py;
-exec bash"
+component_status=\$?;
+if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
+exit \${component_status}"
 
 echo "Waiting up to ${FLIGHT_READY_TIMEOUT} seconds for OFFBOARD ground hold..."
 flight_ready=false
@@ -313,10 +425,11 @@ echo
 echo "Two-stage control is ready; PX4 is disarmed in OFFBOARD ground hold."
 echo "  X: start UAV takeoff and USV motion simultaneously"
 echo "  Y: start interception after FOLLOW MODE"
+echo "  R: stop this simulation and restart a clean session"
 echo "  Q: leave this command console"
 
 while true; do
-    read -r -p "Command [X/Y/Q]: " command
+    read -r -p "Command [X/Y/R/Q]: " command
     command=${command^^}
 
     case "${command}" in
@@ -326,12 +439,15 @@ while true; do
         Y)
             publish_command Y
             ;;
+        R)
+            restart_lab
+            ;;
         Q)
             echo "Command console closed; experiment terminals remain open."
             break
             ;;
         *)
-            echo "Please enter X, Y, or Q."
+            echo "Please enter X, Y, R, or Q."
             ;;
     esac
 done
