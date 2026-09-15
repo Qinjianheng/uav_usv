@@ -337,7 +337,7 @@ class InterceptPlannerNode(Node):
         self.completed_plan_count = 0
         self.completion_times = deque(maxlen=100)
         self.request_slot = LatestRequestSlot()
-        self.executor = ThreadPoolExecutor(
+        self.worker_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix='fast_minco',
         )
@@ -534,13 +534,13 @@ class InterceptPlannerNode(Node):
         if self.future is None:
             request = self.request_slot.take()
             if request is not None:
-                self.future = self.executor.submit(
+                self.future = self.worker_executor.submit(
                     self._run_request,
                     request,
                 )
 
     def destroy_node(self):
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.worker_executor.shutdown(wait=False, cancel_futures=True)
         return super().destroy_node()
 
 

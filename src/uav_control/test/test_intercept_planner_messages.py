@@ -1,5 +1,8 @@
 """Message conversion tests for the independent interception planner."""
 
+import ast
+import inspect
+
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
 from uav_usv_interfaces.msg import PredictedTargetPoint, TargetPrediction
@@ -8,6 +11,24 @@ from uav_control.guidance.fast_minco_planner import FastMincoPlanner
 from uav_control.guidance.intercept_planner_node import plan_to_message
 from uav_control.guidance.intercept_planner_node import prediction_from_message
 from uav_control.guidance.intercept_planner_node import uav_state_from_message
+import uav_control.guidance.intercept_planner_node as planner_node_module
+
+
+def test_planner_node_does_not_shadow_rclpy_executor_property():
+    tree = ast.parse(inspect.getsource(planner_node_module.InterceptPlannerNode))
+    assignments = [
+        target.attr
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (
+            node.targets if isinstance(node, ast.Assign) else [node.target]
+        )
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == 'self'
+    ]
+
+    assert 'executor' not in assignments
 
 
 def test_planner_input_conversion_preserves_prediction_source_stamp():
