@@ -8,8 +8,11 @@ from uav_control.tracking.maneuvering_target_predictor import (
 )
 
 
-def test_falls_back_to_constant_velocity_until_turn_is_observed():
-    predictor = ManeuveringTargetPredictor(minimum_updates=3)
+def test_falls_back_to_constant_horizontal_velocity_until_turn_is_observed():
+    predictor = ManeuveringTargetPredictor(
+        minimum_updates=3,
+        vertical_velocity_decay_time=1.0,
+    )
 
     predicted = predictor.predict(
         1.0,
@@ -21,7 +24,38 @@ def test_falls_back_to_constant_velocity_until_turn_is_observed():
         2.0,
     )
 
-    assert predicted == pytest.approx((7.0, 10.0, 0.3, 3.0, 4.0, 0.2))
+    assert predicted[:2] == pytest.approx((7.0, 10.0))
+    assert predicted[3:5] == pytest.approx((3.0, 4.0))
+    assert predicted[2] == pytest.approx(-0.1 + 0.2 * (1.0 - math.exp(-2.0)))
+    assert predicted[5] == pytest.approx(0.2 * math.exp(-2.0))
+
+
+def test_vertical_velocity_decays_and_displacement_is_bounded():
+    predictor = ManeuveringTargetPredictor(
+        vertical_velocity_decay_time=0.5,
+        maximum_vertical_displacement=0.30,
+        vertical_observation_margin=0.30,
+    )
+    predictor.update_vertical(0.0, 2.0, 0.0)
+
+    predicted = predictor.predict(0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0)
+
+    assert abs(predicted[2]) <= 0.30
+    assert abs(predicted[5]) < 0.01
+
+
+def test_vertical_prediction_respects_recent_observation_envelope():
+    predictor = ManeuveringTargetPredictor(
+        vertical_velocity_decay_time=1.0,
+        maximum_vertical_displacement=1.0,
+        vertical_observation_margin=0.10,
+    )
+    predictor.update_vertical(-0.05, 0.4, 0.0)
+    predictor.update_vertical(0.05, 0.4, 0.1)
+
+    predicted = predictor.predict(0.0, 0.0, 0.05, 1.0, 0.0, 0.4, 3.0)
+
+    assert predicted[2] == pytest.approx(0.15)
 
 
 def test_constant_turn_prediction_matches_circular_motion():

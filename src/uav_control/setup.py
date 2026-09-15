@@ -37,6 +37,8 @@ setup(
             'uav_control.analysis.intercept_outcome_analysis:main',
             'target_kalman_filter = '
             'uav_control.tracking.target_kalman_filter:main',
+            'target_predictor_node = '
+            'uav_control.tracking.target_predictor_node:main',
             'front_tof_monitor = '
             'uav_control.perception.front_tof_monitor:main',
             'rgbd_target_localizer = '

@@ -1,6 +1,7 @@
 """Bounded short-horizon prediction for an independently manoeuvring target."""
 
 import math
+from collections import deque
 
 
 class ManeuveringTargetPredictor:
@@ -28,6 +29,10 @@ class ManeuveringTargetPredictor:
         max_longitudinal_acceleration=2.0,
         acceleration_decay_time=1.0,
         integration_step=0.02,
+        vertical_velocity_decay_time=0.75,
+        maximum_vertical_displacement=0.5,
+        vertical_observation_margin=0.25,
+        vertical_history_window=1.0,
     ):
         """Configure turn-rate filtering and the curved forecast horizon."""
         self.turn_rate_filter_alpha = self._bounded_value(
@@ -77,6 +82,22 @@ class ManeuveringTargetPredictor:
             integration_step,
             'integration step',
         )
+        self.vertical_velocity_decay_time = self._positive_value(
+            vertical_velocity_decay_time,
+            'vertical velocity decay time',
+        )
+        self.maximum_vertical_displacement = self._positive_value(
+            maximum_vertical_displacement,
+            'maximum vertical displacement',
+        )
+        self.vertical_observation_margin = self._positive_value(
+            vertical_observation_margin,
+            'vertical observation margin',
+        )
+        self.vertical_history_window = self._positive_value(
+            vertical_history_window,
+            'vertical history window',
+        )
 
         self.turn_rate = 0.0
         self.turn_acceleration = 0.0
@@ -86,6 +107,8 @@ class ManeuveringTargetPredictor:
         self.previous_vy = None
         self.previous_timestamp = None
         self.previous_raw_turn_rate = None
+        self.vertical_history = deque()
+        self.previous_vertical_timestamp = None
 
     @staticmethod
     def _positive_value(value, name):
@@ -198,6 +221,58 @@ class ManeuveringTargetPredictor:
         self.previous_timestamp = timestamp
         return updated
 
+    def update_vertical(self, z, vz, timestamp):
+        """Record one observed vertical state without using route knowledge."""
+        z = float(z)
+        vz = float(vz)
+        timestamp = float(timestamp)
+        if not all(math.isfinite(value) for value in (z, vz, timestamp)):
+            return False
+        if (
+            self.previous_vertical_timestamp is not None
+            and timestamp <= self.previous_vertical_timestamp
+        ):
+            return False
+
+        self.vertical_history.append((timestamp, z, vz))
+        oldest_allowed = timestamp - self.vertical_history_window
+        while (
+            self.vertical_history
+            and self.vertical_history[0][0] < oldest_allowed
+        ):
+            self.vertical_history.popleft()
+        self.previous_vertical_timestamp = timestamp
+        return True
+
+    def _predict_vertical(self, z, vz, horizon):
+        decay = math.exp(-horizon / self.vertical_velocity_decay_time)
+        displacement = (
+            vz * self.vertical_velocity_decay_time * (1.0 - decay)
+        )
+        displacement = max(
+            min(displacement, self.maximum_vertical_displacement),
+            -self.maximum_vertical_displacement,
+        )
+        predicted_z = z + displacement
+        predicted_vz = vz * decay
+
+        if self.vertical_history:
+            observed_z = [sample[1] for sample in self.vertical_history]
+            lower = min(observed_z) - self.vertical_observation_margin
+            upper = max(observed_z) + self.vertical_observation_margin
+            bounded_z = max(min(predicted_z, upper), lower)
+            if bounded_z != predicted_z:
+                moving_outward = (
+                    bounded_z >= upper and predicted_vz > 0.0
+                ) or (
+                    bounded_z <= lower and predicted_vz < 0.0
+                )
+                if moving_outward:
+                    predicted_vz = 0.0
+            predicted_z = bounded_z
+
+        return predicted_z, predicted_vz
+
     @staticmethod
     def _constant_turn_state(x, y, speed, heading, turn_rate, dt):
         if abs(turn_rate) <= 1e-6:
@@ -232,15 +307,21 @@ class ManeuveringTargetPredictor:
         if horizon == 0.0:
             return x, y, z, vx, vy, vz
 
+        predicted_z, predicted_vz = self._predict_vertical(
+            z,
+            vz,
+            horizon,
+        )
+
         speed = math.hypot(vx, vy)
         if not self.maneuver_model_active or speed < self.minimum_speed:
             return (
                 x + vx * horizon,
                 y + vy * horizon,
-                z + vz * horizon,
+                predicted_z,
                 vx,
                 vy,
-                vz,
+                predicted_vz,
             )
 
         heading = math.atan2(vy, vx)
@@ -266,10 +347,10 @@ class ManeuveringTargetPredictor:
             return (
                 predicted_x + predicted_vx * straight_time,
                 predicted_y + predicted_vy * straight_time,
-                z + vz * horizon,
+                predicted_z,
                 predicted_vx,
                 predicted_vy,
-                vz,
+                predicted_vz,
             )
         predicted_x = x
         predicted_y = y
@@ -316,15 +397,23 @@ class ManeuveringTargetPredictor:
         straight_time = horizon - curved_time
         predicted_x += predicted_vx * straight_time
         predicted_y += predicted_vy * straight_time
-        predicted_z = z + vz * horizon
         return (
             predicted_x,
             predicted_y,
             predicted_z,
             predicted_vx,
             predicted_vy,
-            vz,
+            predicted_vz,
         )
+
+    def vertical_acceleration(self, initial_vz, horizon):
+        """Return acceleration from the decaying vertical-velocity model."""
+        initial_vz = float(initial_vz)
+        horizon = max(float(horizon), 0.0)
+        if not math.isfinite(initial_vz) or not math.isfinite(horizon):
+            raise ValueError('vertical acceleration inputs must be finite')
+        decay = math.exp(-horizon / self.vertical_velocity_decay_time)
+        return -initial_vz * decay / self.vertical_velocity_decay_time
 
     def acceleration(self, predicted_vx, predicted_vy, horizon):
         """Return bounded horizontal acceleration at a prediction horizon."""

@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Bool, String
 from uav_control.figure_eight_trajectory import FigureEightTrajectory
-from uav_usv_interfaces.msg import InterceptResult
+from uav_usv_interfaces.msg import InterceptResult, TargetState
 
 
 def measured_motion_step(previous_time_ns, current_time_ns, nominal_step):
@@ -18,6 +18,27 @@ def measured_motion_step(previous_time_ns, current_time_ns, nominal_step):
     if not math.isfinite(elapsed) or elapsed <= 0.0 or elapsed > 1.0:
         return nominal_step
     return elapsed
+
+
+def target_state_message(stamp_seconds, position, velocity):
+    """Build a timestamped truth state without exposing future motion."""
+    nanoseconds = round(float(stamp_seconds) * 1e9)
+    message = TargetState()
+    message.stamp.sec = nanoseconds // 1_000_000_000
+    message.stamp.nanosec = nanoseconds % 1_000_000_000
+    message.frame_id = 'local_ned'
+    message.position.x = float(position[0])
+    message.position.y = float(position[1])
+    message.position.z = float(position[2])
+    message.velocity.x = float(velocity[0])
+    message.velocity.y = float(velocity[1])
+    message.velocity.z = float(velocity[2])
+    message.acceleration.x = 0.0
+    message.acceleration.y = 0.0
+    message.acceleration.z = 0.0
+    message.covariance = [0.0] * 36
+    message.valid = True
+    return message
 
 
 class MovingTarget(Node):
@@ -59,6 +80,11 @@ class MovingTarget(Node):
             Vector3,
             '/target/velocity',
             10
+        )
+        self.state_pub = self.create_publisher(
+            TargetState,
+            '/target/state',
+            10,
         )
 
         self.hit_sub = self.create_subscription(
@@ -383,6 +409,12 @@ class MovingTarget(Node):
             )
 
         self.velocity_pub.publish(velocity_msg)
+        state_stamp = self.get_clock().now().nanoseconds * 1e-9
+        self.state_pub.publish(target_state_message(
+            stamp_seconds=state_stamp,
+            position=(position_msg.x, position_msg.y, position_msg.z),
+            velocity=(velocity_msg.x, velocity_msg.y, velocity_msg.z),
+        ))
 
         if not self.gazebo_world_paused:
             self.update_gazebo_visualization()

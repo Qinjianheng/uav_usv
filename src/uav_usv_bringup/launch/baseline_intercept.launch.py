@@ -44,6 +44,13 @@ def generate_launch_description():
         ),
         Node(
             package='uav_control',
+            executable='target_predictor_node',
+            name='target_predictor_node',
+            output='screen',
+            parameters=[config_file],
+        ),
+        Node(
+            package='uav_control',
             executable='target_kalman_filter',
             name='target_kalman_filter',
             output='screen',
