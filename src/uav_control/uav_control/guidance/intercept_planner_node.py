@@ -221,7 +221,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
-        self.declare_parameter('maximum_horizontal_speed', 6.5)
+        self.declare_parameter('maximum_horizontal_speed', 7.0)
         self.declare_parameter('maximum_vertical_speed', 4.0)
         self.declare_parameter('maximum_horizontal_acceleration', 3.0)
         self.declare_parameter('maximum_vertical_acceleration', 3.0)

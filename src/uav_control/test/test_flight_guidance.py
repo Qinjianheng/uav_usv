@@ -91,6 +91,28 @@ def test_follow_tracks_behind_four_mps_target_within_limits():
     assert command.far_guidance_available
 
 
+def test_default_far_guidance_uses_six_point_two_mps_soft_limit():
+    guidance = FlightGuidanceCore(
+        flight_altitude=-5.0,
+        maximum_horizontal_acceleration=100.0,
+        control_dt=0.05,
+    )
+    target = state(
+        (100.0, 0.0, -5.0),
+        (0.0, 0.0, 0.0),
+    )
+
+    command = guidance.command(
+        'FAR_GUIDANCE',
+        state((0.0, 0.0, -5.0)),
+        target,
+        0.05,
+    )
+
+    assert command.velocity[0] == pytest.approx(6.2)
+    assert command.velocity[1] == pytest.approx(0.0)
+
+
 def test_missing_target_uses_position_hold_not_fast_pursuit():
     guidance = FlightGuidanceCore(flight_altitude=-5.0)
 

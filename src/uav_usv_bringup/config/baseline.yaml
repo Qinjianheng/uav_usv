@@ -188,8 +188,8 @@ intercept_planner_node:
     maximum_duration: 4.0
     duration_margin: 0.35
     sample_step: 0.05
-    # Match max_speed-speed_guard_margin and terminal hard limits above.
-    maximum_horizontal_speed: 6.5
+    # Hard MINCO feasibility limit matches the 7 m/s vehicle envelope.
+    maximum_horizontal_speed: 7.0
     maximum_vertical_speed: 4.0
     maximum_horizontal_acceleration: 3.0
     maximum_vertical_acceleration: 3.0
@@ -237,8 +237,10 @@ trajectory_tracker_node:
     terminal_replacement_position_error: 0.15
     max_observation_yaw_rate: 1.0
     position_gain: 1.2
-    # These are shared physical limits and must match the planner values.
-    maximum_horizontal_speed: 6.5
+    # MINCO hard limit matches the planner and 7 m/s vehicle envelope.
+    maximum_horizontal_speed: 7.0
+    # Keep non-MINCO FOLLOW/FAR_GUIDANCE below the hard speed envelope.
+    guidance_maximum_horizontal_speed: 6.2
     maximum_vertical_speed: 4.0
     maximum_horizontal_acceleration: 3.0
     maximum_vertical_acceleration: 3.0

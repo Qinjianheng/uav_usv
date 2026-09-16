@@ -105,6 +105,49 @@ def test_terminal_replacement_uses_stricter_position_error():
     assert terminal == TrajectoryRejectReason.STATE_POSITION_MISMATCH
 
 
+def test_default_minco_tracker_uses_seven_mps_hard_limit():
+    tracker = TrajectoryTrackerCore(position_gain=0.0)
+
+    trajectory = PolynomialTrajectory(
+        mission_id=4,
+        plan_id=9,
+        prediction_sequence_id=3,
+        source_stamp=10.0,
+        generated_stamp=10.01,
+        valid_until=12.0,
+        segments=(
+            PolynomialSegmentData(
+                2.0,
+                (
+                    0.0, 8.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ),
+            ),
+        ),
+        terminal_position=(16.0, 0.0, -1.0),
+        terminal_velocity=(8.0, 0.0, 0.0),
+        target_state_source='simulation_truth',
+    )
+
+    current = state(
+        stamp=10.05,
+        position=(0.4, 0.0, -1.0),
+        velocity=(8.0, 0.0, 0.0),
+    )
+
+    assert tracker.accept(
+        trajectory,
+        current,
+        mission_id=4,
+    ) == TrajectoryRejectReason.NONE
+
+    command = tracker.command(current, mission_id=4)
+
+    assert command.velocity[0] == pytest.approx(7.0)
+    assert command.velocity[1] == pytest.approx(0.0)
+
+
 def test_final_sea_guard_overrides_unsafe_descent_command():
     tracker = TrajectoryTrackerCore(
         maximum_plan_age=0.125,

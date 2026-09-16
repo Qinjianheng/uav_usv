@@ -155,7 +155,7 @@ class TrajectoryTrackerCore:
         target_endpoint_tolerance=0.50,
         expected_frame_id='local_ned',
         position_gain=1.2,
-        maximum_horizontal_speed=6.5,
+        maximum_horizontal_speed=7.0,
         maximum_vertical_speed=4.0,
         maximum_horizontal_acceleration=3.0,
         maximum_vertical_acceleration=3.0,

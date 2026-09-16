@@ -44,7 +44,7 @@ class FlightGuidanceCore:
         follow_distance=5.0,
         follow_position_gain=0.8,
         altitude_velocity_gain=1.0,
-        maximum_horizontal_speed=6.5,
+        maximum_horizontal_speed=6.2,
         maximum_vertical_speed=4.0,
         maximum_horizontal_acceleration=3.0,
         maximum_vertical_acceleration=3.0,

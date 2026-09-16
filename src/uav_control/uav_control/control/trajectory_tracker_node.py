@@ -240,7 +240,11 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('maximum_velocity_error', 0.50)
         self.declare_parameter('target_endpoint_tolerance', 0.50)
         self.declare_parameter('position_gain', 1.2)
-        self.declare_parameter('maximum_horizontal_speed', 6.5)
+        self.declare_parameter('maximum_horizontal_speed', 7.0)
+        self.declare_parameter(
+            'guidance_maximum_horizontal_speed',
+            6.2,
+        )
         self.declare_parameter('maximum_vertical_speed', 4.0)
         self.declare_parameter('maximum_horizontal_acceleration', 3.0)
         self.declare_parameter('maximum_vertical_acceleration', 3.0)
@@ -368,7 +372,7 @@ class TrajectoryTrackerNode(Node):
                 'altitude_velocity_gain'
             ).value,
             maximum_horizontal_speed=self.get_parameter(
-                'maximum_horizontal_speed'
+                'guidance_maximum_horizontal_speed'
             ).value,
             maximum_vertical_speed=self.get_parameter(
                 'maximum_vertical_speed'
