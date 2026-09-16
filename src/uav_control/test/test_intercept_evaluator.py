@@ -13,6 +13,11 @@ def state(position, velocity=(0.0, 0.0, 0.0)):
     return KinematicState(tuple(position), tuple(velocity))
 
 
+def test_csv_separates_prediction_and_trajectory_age():
+    assert 'prediction_age' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'trajectory_age' in ExperimentArtifactWriter.CSV_FIELDS
+
+
 def test_capture_is_detected_between_truth_samples():
     evaluator = InterceptEvaluatorCore(capture_radius=0.25)
     evaluator.begin(mission_id=4, now=10.0)

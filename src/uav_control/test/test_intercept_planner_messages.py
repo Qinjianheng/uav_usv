@@ -209,6 +209,29 @@ def test_planner_input_conversion_preserves_prediction_source_stamp():
     prediction = prediction_from_message(message)
 
     assert prediction.source_stamp == pytest.approx(12.1)
+
+
+def test_terminal_freeze_uses_contact_stamp_minus_current_ros_time():
+    """Catch freeze decisions that subtract the prediction source time."""
+    observed = []
+
+    class RecordingPolicy:
+        def decide(self, mission_state, remaining_t_go=None):
+            observed.append(remaining_t_go)
+            return SimpleNamespace(terminal_mode=True, submit=False)
+
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.intercept_requested = True
+    node.latest_prediction = SimpleNamespace(source_stamp=10.0)
+    node.contact_schedule = ContactTimeSchedule(freeze_time=0.30)
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node.request_policy = RecordingPolicy()
+    node.mission_state = 7
+    node._ros_seconds = lambda: 10.75
+
+    node._planning_tick(terminal_tick=True)
+
+    assert observed == pytest.approx([0.25])
     assert prediction.valid_until == pytest.approx(12.225)
     assert prediction.samples[0].relative_time == pytest.approx(1.0)
     assert prediction.samples[0].position == pytest.approx((4.0, 0.0, 0.0))

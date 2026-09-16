@@ -153,6 +153,8 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     message.mission_id = 2
     message.plan_id = 9
     message.source_age = 0.08
+    message.prediction_age = 0.03
+    message.trajectory_age = 0.08
     message.callback_compute_time = 0.002
     message.status = 'TRACKING'
     message.target_distance = 1.8
@@ -164,6 +166,8 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     assert restored.mission_id == 2
     assert restored.plan_id == 9
     assert restored.source_age == pytest.approx(0.08)
+    assert restored.prediction_age == pytest.approx(0.03)
+    assert restored.trajectory_age == pytest.approx(0.08)
     assert restored.callback_compute_time == pytest.approx(0.002)
     assert restored.target_distance == pytest.approx(1.8)
     assert restored.remaining_t_go == pytest.approx(0.8)

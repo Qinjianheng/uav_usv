@@ -764,9 +764,9 @@ class InterceptPlannerNode(Node):
         if not self.intercept_requested:
             return
         remaining = None
-        if self.latest_prediction is not None:
+        if self.contact_schedule.contact_stamp is not None:
             remaining = self.contact_schedule.remaining_t_go(
-                self.latest_prediction.source_stamp
+                self._ros_seconds()
             )
         decision = self.request_policy.decide(
             self.mission_state,

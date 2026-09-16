@@ -599,7 +599,7 @@ class ExperimentArtifactWriter:
         'target_vx', 'target_vy', 'target_vz',
         'distance', 'horizontal_distance', 'vertical_error',
         'relative_speed', 'closing_speed',
-        'controller_status', 'plan_id', 'plan_source_age',
+        'controller_status', 'plan_id', 'prediction_age', 'trajectory_age',
         'tracker_rejection_reason',
         'plan_prediction_sequence_id', 'latest_prediction_sequence_id',
         'planner_source_age_at_publish',

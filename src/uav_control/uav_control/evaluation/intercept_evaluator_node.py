@@ -565,7 +565,12 @@ class InterceptEvaluatorNode(Node):
                 controller.planned_capture_margin if controller else 0.0
             ),
             'target_yaw': controller.target_yaw if controller else math.nan,
-            'plan_source_age': controller.source_age if controller else 0.0,
+            'prediction_age': (
+                controller.prediction_age if controller else 0.0
+            ),
+            'trajectory_age': (
+                controller.trajectory_age if controller else 0.0
+            ),
             'sea_safety_state': (
                 controller.safety_state if controller else ''
             ),

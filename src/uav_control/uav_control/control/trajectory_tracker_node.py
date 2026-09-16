@@ -699,13 +699,19 @@ class TrajectoryTrackerNode(Node):
         if active is not None:
             message.plan_id = active.plan_id
             message.prediction_sequence_id = active.prediction_sequence_id
-            message.source_age = max(now - active.source_stamp, 0.0)
+            message.trajectory_age = max(now - active.source_stamp, 0.0)
+            message.source_age = message.trajectory_age
             message.remaining_time = max(active.valid_until - now, 0.0)
             message.selected_t_go = active.selected_t_go
             message.contact_stamp = _seconds_to_time(active.contact_stamp)
             message.remaining_t_go = max(active.contact_stamp - now, 0.0)
             message.terminal_mode = active.terminal_mode
             message.planned_capture_margin = active.planned_capture_margin
+        if self.latest_prediction is not None:
+            message.prediction_age = max(
+                now - _stamp_seconds(self.latest_prediction.source_stamp),
+                0.0,
+            )
         message.terminal_mode = bool(
             message.terminal_mode or self.terminal_mode_latched
         )

@@ -9,6 +9,8 @@ string rejection_reason
 
 float64 callback_compute_time
 float64 source_age
+float64 prediction_age
+float64 trajectory_age
 float64 remaining_time
 float64 target_distance
 float64 selected_t_go
