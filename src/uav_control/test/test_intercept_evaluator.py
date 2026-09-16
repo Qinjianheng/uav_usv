@@ -21,6 +21,17 @@ def test_csv_separates_prediction_and_trajectory_age():
 def test_csv_records_planner_failure_diagnostics():
     assert 'planner_failure_reason' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_failure_detail' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_required_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_search_min_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_search_max_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert (
+        'planner_available_prediction_duration'
+        in ExperimentArtifactWriter.CSV_FIELDS
+    )
+    assert (
+        'planner_locked_remaining_t_go'
+        in ExperimentArtifactWriter.CSV_FIELDS
+    )
 
 
 def test_capture_is_detected_between_truth_samples():

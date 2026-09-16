@@ -776,6 +776,29 @@ class InterceptPlannerNode(Node):
             message.planned_capture_margin = float(
                 planned_capture_margin
             )
+
+        message.required_time = float(
+            diagnostics.required_time
+        )
+        message.search_min_time = float(
+            diagnostics.search_min_time
+        )
+        message.search_max_time = float(
+            diagnostics.search_max_time
+        )
+        message.available_prediction_duration = float(
+            job.request.prediction.end_stamp
+            - job.request.trajectory_start_stamp
+        )
+        message.locked_remaining_t_go = (
+            float(
+                job.request.contact_stamp
+                - job.request.trajectory_start_stamp
+            )
+            if job.request.contact_stamp is not None
+            else math.nan
+        )
+
         message.candidate_count = diagnostics.candidates_checked
         message.replaced_request_count = (
             self.request_slot.replaced_request_count

@@ -127,6 +127,11 @@ def test_planner_diagnostic_carries_publish_age_and_completion_delay():
     message.remaining_t_go = 2.7
     message.terminal_mode = False
     message.planned_capture_margin = 0.18
+    message.required_time = 1.42
+    message.search_min_time = 1.42
+    message.search_max_time = 1.20
+    message.available_prediction_duration = 3.85
+    message.locked_remaining_t_go = 0.90
 
     restored = round_trip(message, diagnostic)
 
@@ -137,6 +142,11 @@ def test_planner_diagnostic_carries_publish_age_and_completion_delay():
     assert restored.contact_stamp.sec == 103
     assert restored.remaining_t_go == pytest.approx(2.7)
     assert restored.planned_capture_margin == pytest.approx(0.18)
+    assert restored.required_time == pytest.approx(1.42)
+    assert restored.search_min_time == pytest.approx(1.42)
+    assert restored.search_max_time == pytest.approx(1.20)
+    assert restored.available_prediction_duration == pytest.approx(3.85)
+    assert restored.locked_remaining_t_go == pytest.approx(0.90)
 
 
 def test_mission_state_constants_are_machine_parseable():

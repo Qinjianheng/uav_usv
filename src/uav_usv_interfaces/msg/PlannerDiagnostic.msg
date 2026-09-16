@@ -37,6 +37,11 @@ builtin_interfaces/Time contact_stamp
 float64 remaining_t_go
 bool terminal_mode
 float64 planned_capture_margin
+float64 required_time
+float64 search_min_time
+float64 search_max_time
+float64 available_prediction_duration
+float64 locked_remaining_t_go
 uint32 candidate_count
 uint64 replaced_request_count
 uint64 completed_plan_count

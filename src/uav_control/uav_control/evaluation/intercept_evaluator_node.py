@@ -556,6 +556,27 @@ class InterceptEvaluatorNode(Node):
                 self.latest_planner_diagnostic.failure_detail
                 if self.latest_planner_diagnostic else ''
             ),
+            'planner_required_time': (
+                self.latest_planner_diagnostic.required_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_search_min_time': (
+                self.latest_planner_diagnostic.search_min_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_search_max_time': (
+                self.latest_planner_diagnostic.search_max_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_available_prediction_duration': (
+                self.latest_planner_diagnostic
+                .available_prediction_duration
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_locked_remaining_t_go': (
+                self.latest_planner_diagnostic.locked_remaining_t_go
+                if self.latest_planner_diagnostic else math.nan
+            ),
             'planner_source_age_at_publish': (
                 self.latest_planner_diagnostic.input_age_at_publish
                 if self.latest_planner_diagnostic else 0.0
