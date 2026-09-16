@@ -22,8 +22,15 @@ def test_shared_dynamic_and_safety_limits_are_synchronized():
     tracker = parameters(config, 'trajectory_tracker_node')
     evaluator = parameters(config, 'intercept_evaluator_node')
 
+    assert planner['maximum_horizontal_speed'] == pytest.approx(7.0)
+    assert tracker['maximum_horizontal_speed'] == pytest.approx(6.5)
+    assert tracker['guidance_maximum_horizontal_speed'] == pytest.approx(6.2)
+    assert (
+        tracker['maximum_horizontal_speed']
+        < planner['maximum_horizontal_speed']
+    )
+
     for name in (
-        'maximum_horizontal_speed',
         'maximum_vertical_speed',
         'maximum_horizontal_acceleration',
         'maximum_vertical_acceleration',

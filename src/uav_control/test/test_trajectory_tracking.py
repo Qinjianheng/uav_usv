@@ -105,7 +105,7 @@ def test_terminal_replacement_uses_stricter_position_error():
     assert terminal == TrajectoryRejectReason.STATE_POSITION_MISMATCH
 
 
-def test_default_minco_tracker_uses_seven_mps_hard_limit():
+def test_default_minco_tracker_limits_command_to_six_point_five_mps():
     tracker = TrajectoryTrackerCore(position_gain=0.0)
 
     trajectory = PolynomialTrajectory(
@@ -144,7 +144,7 @@ def test_default_minco_tracker_uses_seven_mps_hard_limit():
 
     command = tracker.command(current, mission_id=4)
 
-    assert command.velocity[0] == pytest.approx(7.0)
+    assert command.velocity[0] == pytest.approx(6.5)
     assert command.velocity[1] == pytest.approx(0.0)
 
 

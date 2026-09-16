@@ -237,9 +237,9 @@ trajectory_tracker_node:
     terminal_replacement_position_error: 0.15
     max_observation_yaw_rate: 1.0
     position_gain: 1.2
-    # MINCO hard limit matches the planner and 7 m/s vehicle envelope.
-    maximum_horizontal_speed: 7.0
-    # Keep non-MINCO FOLLOW/FAR_GUIDANCE below the hard speed envelope.
+    # Keep executed PX4 commands below the 7 m/s planning envelope.
+    maximum_horizontal_speed: 6.5
+    # Keep non-MINCO FOLLOW/FAR_GUIDANCE below the tracker command limit.
     guidance_maximum_horizontal_speed: 6.2
     maximum_vertical_speed: 4.0
     maximum_horizontal_acceleration: 3.0
