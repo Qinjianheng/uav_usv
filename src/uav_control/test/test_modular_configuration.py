@@ -49,6 +49,17 @@ def test_shadow_perception_rates_are_below_control_rate():
     assert front['analysis_rate_hz'] == pytest.approx(5.0)
 
 
+def test_terminal_planning_uses_fast_rate_and_short_freeze_window():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    planner = parameters(config, 'intercept_planner_node')
+
+    assert planner['planning_rate_hz'] == pytest.approx(5.0)
+    assert planner['terminal_planning_rate_hz'] == pytest.approx(10.0)
+    assert planner['minimum_duration'] == pytest.approx(1.0)
+    assert planner['terminal_minimum_duration'] == pytest.approx(0.30)
+    assert planner['terminal_freeze_time'] == pytest.approx(0.30)
+
+
 def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     target = parameters(config, 'moving_target')

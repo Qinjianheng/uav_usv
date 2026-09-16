@@ -95,6 +95,8 @@ class PlannerRequest:
     prediction: PredictionSeries
     uav: UavKinematicState
     contact_stamp: float = None
+    terminal_mode: bool = False
+    minimum_duration: float = None
 
     @property
     def source_stamp(self):
@@ -125,11 +127,82 @@ class LatestRequestSlot:
             return request
 
 
+@dataclass(frozen=True)
+class PlanningDecision:
+    """One cadence decision for normal or committed terminal planning."""
+
+    submit: bool
+    terminal_mode: bool
+    minimum_duration: float
+
+
+def terminal_mode_for_plan(
+    mission_state,
+    request_terminal_mode=False,
+    remaining_t_go=None,
+    terminal_time_threshold=1.0,
+    terminal_state=7,
+):
+    """Return the shared terminal-state decision used by planner outputs."""
+    return bool(
+        request_terminal_mode
+        or int(mission_state) == int(terminal_state)
+        or (
+            remaining_t_go is not None
+            and float(remaining_t_go)
+            <= float(terminal_time_threshold) + 1e-9
+        )
+    )
+
+
+class PlanningRequestPolicy:
+    """Select normal/terminal planning without changing motion limits."""
+
+    def __init__(
+        self,
+        normal_minimum_duration=1.0,
+        terminal_minimum_duration=0.30,
+        terminal_freeze_time=0.30,
+        terminal_time_threshold=1.0,
+        terminal_state=7,
+    ):
+        self.normal_minimum_duration = float(normal_minimum_duration)
+        self.terminal_minimum_duration = float(terminal_minimum_duration)
+        self.terminal_freeze_time = float(terminal_freeze_time)
+        self.terminal_time_threshold = float(terminal_time_threshold)
+        self.terminal_state = int(terminal_state)
+
+    def decide(self, mission_state, remaining_t_go=None):
+        terminal = terminal_mode_for_plan(
+            mission_state=mission_state,
+            remaining_t_go=remaining_t_go,
+            terminal_time_threshold=self.terminal_time_threshold,
+            terminal_state=self.terminal_state,
+        )
+        if terminal:
+            submit = (
+                remaining_t_go is not None
+                and float(remaining_t_go)
+                > self.terminal_freeze_time + 1e-9
+            )
+            return PlanningDecision(
+                submit=submit,
+                terminal_mode=True,
+                minimum_duration=self.terminal_minimum_duration,
+            )
+        return PlanningDecision(
+            submit=True,
+            terminal_mode=False,
+            minimum_duration=self.normal_minimum_duration,
+        )
+
+
 class ContactTimeSchedule:
     """Keep one absolute contact time across rolling prediction snapshots."""
 
-    def __init__(self, terminal_threshold=1.0):
+    def __init__(self, terminal_threshold=1.0, freeze_time=0.30):
         self.terminal_threshold = max(float(terminal_threshold), 0.0)
+        self.freeze_time = max(float(freeze_time), 0.0)
         self.contact_stamp = None
 
     def reset(self):
@@ -158,6 +231,11 @@ class ContactTimeSchedule:
             remaining is not None
             and remaining <= self.terminal_threshold + 1e-9
         )
+
+    def should_replan(self, source_stamp):
+        """Allow terminal refreshes only before the final freeze window."""
+        remaining = self.remaining_t_go(source_stamp)
+        return remaining is None or remaining > self.freeze_time + 1e-9
 
 
 def validate_input(request, now, maximum_age):
@@ -188,13 +266,19 @@ def validate_target_shift(
     latest_prediction,
     intercept_time,
     tolerance,
+    contact_stamp=None,
 ):
     """Reject a plan when a newer prediction moved its contact endpoint."""
     if latest_prediction is None:
         return FastPlanningFailure.PREDICTION_STALE
     if latest_prediction.mission_id != request.mission_id:
         return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
-    contact_stamp = request.prediction.source_stamp + float(intercept_time)
+    if contact_stamp is None:
+        contact_stamp = (
+            request.prediction.source_stamp + float(intercept_time)
+        )
+    else:
+        contact_stamp = float(contact_stamp)
     try:
         planned_position = request.prediction.state_at_absolute_time(
             contact_stamp

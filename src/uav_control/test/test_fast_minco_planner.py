@@ -117,6 +117,30 @@ def test_preferred_contact_duration_is_tried_before_rolling_horizon_defaults():
     assert outcome.plan.duration == pytest.approx(2.2)
 
 
+def test_terminal_minimum_duration_allows_locked_subsecond_plan():
+    """Catch terminal planning being blocked by the normal one-second floor."""
+    planner = make_planner(
+        maximum_horizontal_acceleration=20.0,
+        maximum_vertical_acceleration=20.0,
+    )
+
+    outcome = planner.plan(
+        initial_position=(0.0, 0.0, -0.1),
+        initial_velocity=(2.0, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=lambda horizon: (
+            (0.2 + 2.0 * horizon, 0.0, -0.1),
+            (2.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ),
+        preferred_duration=0.8,
+        minimum_duration_override=0.30,
+    )
+
+    assert outcome.plan is not None
+    assert outcome.plan.duration == pytest.approx(0.8)
+
+
 def test_horizontal_and_vertical_dynamic_failures_are_distinct():
     horizontal = make_planner(
         maximum_horizontal_speed=2.1,

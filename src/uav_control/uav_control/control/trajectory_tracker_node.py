@@ -80,6 +80,13 @@ def trajectory_from_message(message):
     )
 
 
+def trajectory_for_mission(trajectory, mission_state):
+    """Make the mission's committed terminal state authoritative."""
+    if int(mission_state) == MissionState.TERMINAL_MINCO:
+        return replace(trajectory, terminal_mode=True)
+    return trajectory
+
+
 def tracker_state_from_message(message, received_stamp):
     """Use ROS receipt time, not the unrelated PX4 boot timestamp."""
     values = []
@@ -504,6 +511,7 @@ class TrajectoryTrackerNode(Node):
         self.takeoff_complete_sent = False
         self.last_target_yaw = None
         self.terminal_hold_position = None
+        self.terminal_mode_latched = False
         self.get_logger().info(
             'Trajectory tracker ready | rate='
             f'{control_rate:.1f} Hz | plan age<='
@@ -557,11 +565,15 @@ class TrajectoryTrackerNode(Node):
             self.takeoff_complete_sent = False
             self.last_target_yaw = None
             self.terminal_hold_position = None
+            self.terminal_mode_latched = False
         self.mission_id = new_mission_id
         self.mission_state = int(message.state)
         self.mission_state_name = str(message.state_name) or 'INIT'
+        if self.mission_state == MissionState.TERMINAL_MINCO:
+            self.terminal_mode_latched = True
         if self.mission_state in self.TERMINAL_STATES:
             self.tracker.reset()
+            self.terminal_mode_latched = False
             if self.latest_state is not None:
                 safe_z = min(
                     self.latest_state.position[2],
@@ -578,6 +590,10 @@ class TrajectoryTrackerNode(Node):
         rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         try:
             trajectory = trajectory_from_message(message)
+            trajectory = trajectory_for_mission(
+                trajectory,
+                self.mission_state,
+            )
         except (TypeError, ValueError):
             rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         else:
@@ -610,6 +626,11 @@ class TrajectoryTrackerNode(Node):
                             else None
                         ),
                     )
+                    if (
+                        rejection == TrajectoryRejectReason.NONE
+                        and trajectory.terminal_mode
+                    ):
+                        self.terminal_mode_latched = True
         self.last_rejection = rejection
         self.last_callback_time = time.perf_counter() - started
         self._publish_diagnostic(
@@ -685,6 +706,9 @@ class TrajectoryTrackerNode(Node):
             message.remaining_t_go = max(active.contact_stamp - now, 0.0)
             message.terminal_mode = active.terminal_mode
             message.planned_capture_margin = active.planned_capture_margin
+        message.terminal_mode = bool(
+            message.terminal_mode or self.terminal_mode_latched
+        )
         if self.latest_target_state is not None and self.latest_state is not None:
             relative = tuple(
                 target - current

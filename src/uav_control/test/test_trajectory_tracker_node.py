@@ -64,6 +64,36 @@ def test_trajectory_conversion_preserves_source_time_and_coefficients():
     )
 
 
+def test_terminal_mission_forces_trajectory_and_diagnostic_terminal_mode():
+    """Catch TERMINAL_MINCO publishing terminal_mode=False downstream."""
+    trajectory = trajectory_from_message(make_trajectory_message())
+    terminal = trajectory_tracker_node.trajectory_for_mission(
+        trajectory,
+        MissionState.TERMINAL_MINCO,
+    )
+    node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
+    node.mission_id = 3
+    node.mission_state = MissionState.TERMINAL_MINCO
+    node.tracker = TrajectoryTrackerCore()
+    node.tracker.active_trajectory = terminal
+    node.latest_target_state = None
+    node.latest_state = None
+    node.last_target_yaw = None
+    node.last_rejection = trajectory_tracker_node.TrajectoryRejectReason.NONE
+    node.terminal_mode_latched = True
+    published = []
+    node.diagnostic_pub = type(
+        'Publisher',
+        (),
+        {'publish': lambda _self, message: published.append(message)},
+    )()
+
+    node._publish_diagnostic(100.5, None, 'TRACKING', 0.001)
+
+    assert terminal.terminal_mode
+    assert published[0].terminal_mode
+
+
 def test_uav_conversion_uses_ros_receipt_time_not_px4_boot_time():
     message = VehicleLocalPosition()
     message.timestamp = 9_999_999

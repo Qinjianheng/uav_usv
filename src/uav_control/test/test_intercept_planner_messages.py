@@ -46,6 +46,7 @@ def test_planner_submission_and_completion_use_independent_timers():
             timer_callbacks.append(callback.attr)
 
     assert 'planning_timer_callback' in timer_callbacks
+    assert 'terminal_planning_timer_callback' in timer_callbacks
     assert 'completion_timer_callback' in timer_callbacks
 
 

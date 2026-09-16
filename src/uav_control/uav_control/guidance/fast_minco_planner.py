@@ -252,6 +252,21 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
     def plan(self, *args, **kwargs):
         """Return the first feasible candidate within the hard deadline."""
         preferred_duration = kwargs.pop('preferred_duration', None)
+        minimum_duration_override = kwargs.pop(
+            'minimum_duration_override',
+            None,
+        )
+        normal_minimum_duration = self.minimum_duration
+        if minimum_duration_override is not None:
+            minimum_duration_override = self._finite_positive(
+                minimum_duration_override,
+                'minimum duration override',
+            )
+            if minimum_duration_override > self.maximum_duration:
+                raise ValueError(
+                    'minimum duration override exceeds maximum duration'
+                )
+            self.minimum_duration = minimum_duration_override
         self._preferred_duration = (
             None if preferred_duration is None else float(preferred_duration)
         )
@@ -267,6 +282,7 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         finally:
             self._active_deadline = None
             self._preferred_duration = None
+            self.minimum_duration = normal_minimum_duration
 
         if plan is None:
             return FastPlanningOutcome(

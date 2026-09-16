@@ -209,3 +209,68 @@ def test_contact_schedule_resets_between_missions():
 
     assert schedule.contact_stamp is None
     assert schedule.preferred_t_go(10.2) is None
+
+
+def test_terminal_contact_stamp_counts_down_without_drifting():
+    """Catch terminal replans replacing the locked absolute contact time."""
+    schedule = planner_pipeline.ContactTimeSchedule(
+        terminal_threshold=1.0,
+        freeze_time=0.30,
+    )
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+
+    remaining = [
+        schedule.remaining_t_go(stamp)
+        for stamp in (10.2, 10.4, 10.6)
+    ]
+
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert remaining == pytest.approx((0.8, 0.6, 0.4))
+
+
+@pytest.mark.parametrize(
+    ('remaining', 'expected'),
+    ((0.31, True), (0.30, False), (0.20, False)),
+)
+def test_terminal_replanning_stops_at_freeze_boundary(remaining, expected):
+    """Catch a new terminal plan replacing the final committed trajectory."""
+    schedule = planner_pipeline.ContactTimeSchedule(
+        terminal_threshold=1.0,
+        freeze_time=0.30,
+    )
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+
+    assert schedule.should_replan(11.0 - remaining) is expected
+
+
+def test_terminal_mission_with_point_eight_seconds_allows_planner_request():
+    policy = planner_pipeline.PlanningRequestPolicy(
+        terminal_minimum_duration=0.30,
+    )
+
+    decision = policy.decide(
+        mission_state=7,
+        remaining_t_go=0.8,
+    )
+
+    assert decision.submit
+    assert decision.minimum_duration == pytest.approx(0.30)
+    assert decision.terminal_mode
+
+
+@pytest.mark.parametrize(
+    ('mission_state', 'remaining_t_go'),
+    ((7, 2.0), (6, 0.8)),
+)
+def test_planner_marks_terminal_from_mission_or_remaining_time(
+    mission_state,
+    remaining_t_go,
+):
+    """Catch planner trajectories disagreeing with terminal mission state."""
+    assert planner_pipeline.terminal_mode_for_plan(
+        mission_state=mission_state,
+        request_terminal_mode=False,
+        remaining_t_go=remaining_t_go,
+        terminal_time_threshold=1.0,
+        terminal_state=7,
+    )

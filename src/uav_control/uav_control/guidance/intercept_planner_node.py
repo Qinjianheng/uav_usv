@@ -23,7 +23,9 @@ from .fast_minco_planner import FastPlanningOutcome
 from .finite_horizon_intercept_planner import PlannerDiagnostics
 from .planner_pipeline import LatestRequestSlot, PlannerRequest
 from .planner_pipeline import ContactTimeSchedule
+from .planner_pipeline import PlanningRequestPolicy
 from .planner_pipeline import PredictionSample, PredictionSeries
+from .planner_pipeline import terminal_mode_for_plan
 from .planner_pipeline import UavKinematicState, validate_input
 from .planner_pipeline import validate_plan_arrival, validate_target_shift
 from .planner_pipeline import validate_total_deadline
@@ -208,8 +210,11 @@ class InterceptPlannerNode(Node):
     def __init__(self):
         super().__init__('intercept_planner_node')
         self.declare_parameter('planning_rate_hz', 5.0)
+        self.declare_parameter('terminal_planning_rate_hz', 10.0)
         self.declare_parameter('completion_poll_rate_hz', 100.0)
         self.declare_parameter('minimum_duration', 1.0)
+        self.declare_parameter('terminal_minimum_duration', 0.30)
+        self.declare_parameter('terminal_freeze_time', 0.30)
         self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
@@ -253,6 +258,12 @@ class InterceptPlannerNode(Node):
         )
         self.terminal_time_threshold = float(
             self.get_parameter('terminal_time_threshold').value
+        )
+        self.terminal_minimum_duration = float(
+            self.get_parameter('terminal_minimum_duration').value
+        )
+        self.terminal_freeze_time = float(
+            self.get_parameter('terminal_freeze_time').value
         )
         self.planner = FastMincoPlanner(
             minimum_duration=self.get_parameter('minimum_duration').value,
@@ -350,6 +361,20 @@ class InterceptPlannerNode(Node):
             1.0 / planning_rate_hz,
             self.planning_timer_callback,
         )
+        terminal_planning_rate_hz = float(
+            self.get_parameter('terminal_planning_rate_hz').value
+        )
+        if (
+            not math.isfinite(terminal_planning_rate_hz)
+            or terminal_planning_rate_hz <= 0.0
+        ):
+            raise ValueError(
+                'terminal_planning_rate_hz must be finite and positive'
+            )
+        self.terminal_planning_timer = self.create_timer(
+            1.0 / terminal_planning_rate_hz,
+            self.terminal_planning_timer_callback,
+        )
         completion_poll_rate_hz = float(
             self.get_parameter('completion_poll_rate_hz').value
         )
@@ -382,6 +407,14 @@ class InterceptPlannerNode(Node):
         self.last_submitted_key = None
         self.contact_schedule = ContactTimeSchedule(
             terminal_threshold=self.terminal_time_threshold,
+            freeze_time=self.terminal_freeze_time,
+        )
+        self.request_policy = PlanningRequestPolicy(
+            normal_minimum_duration=self.planner.minimum_duration,
+            terminal_minimum_duration=self.terminal_minimum_duration,
+            terminal_freeze_time=self.terminal_freeze_time,
+            terminal_time_threshold=self.terminal_time_threshold,
+            terminal_state=MissionState.TERMINAL_MINCO,
         )
         self.get_logger().info(
             'Fast MINCO planner ready | rate='
@@ -414,7 +447,7 @@ class InterceptPlannerNode(Node):
             message.intercept_requested and not message.completed
         )
 
-    def _current_request(self):
+    def _current_request(self, decision):
         if self.latest_prediction is None or self.latest_uav is None:
             return None
         return PlannerRequest(
@@ -422,6 +455,8 @@ class InterceptPlannerNode(Node):
             prediction=self.latest_prediction,
             uav=self.latest_uav,
             contact_stamp=self.contact_schedule.contact_stamp,
+            terminal_mode=decision.terminal_mode,
+            minimum_duration=decision.minimum_duration,
         )
 
     def _run_request(self, request):
@@ -433,13 +468,18 @@ class InterceptPlannerNode(Node):
             self.maximum_input_age,
         )
         if failure == FastPlanningFailure.NONE:
+            minimum_duration = (
+                self.planner.minimum_duration
+                if request.minimum_duration is None
+                else request.minimum_duration
+            )
             preferred_duration = None
             if request.contact_stamp is not None:
                 remaining = (
                     request.contact_stamp
                     - request.prediction.source_stamp
                 )
-                if remaining >= self.planner.minimum_duration:
+                if remaining >= minimum_duration:
                     preferred_duration = remaining
             outcome = self.planner.plan(
                 initial_position=request.uav.position,
@@ -447,6 +487,10 @@ class InterceptPlannerNode(Node):
                 initial_acceleration=request.uav.acceleration,
                 target_state_at_time=request.prediction.state_at,
                 preferred_duration=preferred_duration,
+                minimum_duration_override=(
+                    minimum_duration
+                    if request.terminal_mode else None
+                ),
             )
         else:
             outcome = FastPlanningOutcome(
@@ -518,6 +562,7 @@ class InterceptPlannerNode(Node):
                 request=job.request,
                 latest_prediction=self.latest_prediction,
                 intercept_time=outcome.plan.duration,
+                contact_stamp=job.request.contact_stamp,
                 tolerance=self.endpoint_tolerance,
             )
             if shift_failure != FastPlanningFailure.NONE:
@@ -529,7 +574,12 @@ class InterceptPlannerNode(Node):
 
         contact_stamp = self.contact_schedule.contact_stamp
         remaining_t_go = 0.0
-        terminal_mode = False
+        terminal_mode = terminal_mode_for_plan(
+            mission_state=self.mission_state,
+            request_terminal_mode=job.request.terminal_mode,
+            terminal_time_threshold=self.terminal_time_threshold,
+            terminal_state=MissionState.TERMINAL_MINCO,
+        )
         planned_capture_margin = 0.0
         if outcome.plan is not None:
             preferred_duration = (
@@ -549,9 +599,16 @@ class InterceptPlannerNode(Node):
                 outcome.plan.duration,
                 rescheduled=rescheduled,
             )
-            remaining_t_go = max(contact_stamp - publish_stamp, 0.0)
-            terminal_mode = (
-                remaining_t_go <= self.terminal_time_threshold + 1e-9
+            remaining_t_go = max(
+                contact_stamp - job.request.prediction.source_stamp,
+                0.0,
+            )
+            terminal_mode = terminal_mode_for_plan(
+                mission_state=self.mission_state,
+                request_terminal_mode=terminal_mode,
+                remaining_t_go=remaining_t_go,
+                terminal_time_threshold=self.terminal_time_threshold,
+                terminal_state=MissionState.TERMINAL_MINCO,
             )
             try:
                 target_position = job.request.prediction.state_at_absolute_time(
@@ -654,20 +711,23 @@ class InterceptPlannerNode(Node):
             self._publish_job(self.future.result())
             self.future = None
 
-    def planning_timer_callback(self):
-
+    def _planning_tick(self, terminal_tick):
         if not self.intercept_requested:
             return
-        if self.mission_state == MissionState.TERMINAL_MINCO:
-            return
-        if (
-            self.latest_prediction is not None
-            and self.contact_schedule.is_terminal(
+        remaining = None
+        if self.latest_prediction is not None:
+            remaining = self.contact_schedule.remaining_t_go(
                 self.latest_prediction.source_stamp
             )
-        ):
+        decision = self.request_policy.decide(
+            self.mission_state,
+            remaining_t_go=remaining,
+        )
+        if decision.terminal_mode != bool(terminal_tick):
             return
-        current = self._current_request()
+        if not decision.submit:
+            return
+        current = self._current_request(decision)
         if current is not None:
             key = (
                 current.mission_id,
@@ -684,6 +744,12 @@ class InterceptPlannerNode(Node):
                     self._run_request,
                     request,
                 )
+
+    def planning_timer_callback(self):
+        self._planning_tick(terminal_tick=False)
+
+    def terminal_planning_timer_callback(self):
+        self._planning_tick(terminal_tick=True)
 
     def destroy_node(self):
         self.worker_executor.shutdown(wait=False, cancel_futures=True)

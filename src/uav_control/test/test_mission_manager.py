@@ -101,6 +101,18 @@ def test_terminal_minco_latches_when_contact_is_near():
     assert accepted
     assert core.phase == MissionPhase.TERMINAL_MINCO
 
+    core.observe_tracker(
+        mission_id=core.mission_id,
+        plan_id=3,
+        status='PLAN_ACCEPTED',
+        source_age=0.02,
+        remaining_time=1.4,
+        target_distance=2.5,
+        now=5.1,
+    )
+
+    assert core.phase == MissionPhase.TERMINAL_MINCO
+
 
 def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
     core = MissionManagerCore(
