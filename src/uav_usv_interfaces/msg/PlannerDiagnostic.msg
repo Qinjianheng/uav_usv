@@ -38,6 +38,9 @@ float64 remaining_t_go
 bool terminal_mode
 float64 planned_capture_margin
 float64 required_time
+float64 horizontal_min_time
+float64 vertical_min_time
+float64 sea_safe_min_time
 float64 search_min_time
 float64 search_max_time
 float64 available_prediction_duration

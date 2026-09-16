@@ -22,6 +22,9 @@ def test_csv_records_planner_failure_diagnostics():
     assert 'planner_failure_reason' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_failure_detail' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_required_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_horizontal_min_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_vertical_min_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_sea_safe_min_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_search_min_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_search_max_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert (

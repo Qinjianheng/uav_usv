@@ -560,6 +560,18 @@ class InterceptEvaluatorNode(Node):
                 self.latest_planner_diagnostic.required_time
                 if self.latest_planner_diagnostic else math.nan
             ),
+            'planner_horizontal_min_time': (
+                self.latest_planner_diagnostic.horizontal_min_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_vertical_min_time': (
+                self.latest_planner_diagnostic.vertical_min_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_sea_safe_min_time': (
+                self.latest_planner_diagnostic.sea_safe_min_time
+                if self.latest_planner_diagnostic else math.nan
+            ),
             'planner_search_min_time': (
                 self.latest_planner_diagnostic.search_min_time
                 if self.latest_planner_diagnostic else math.nan

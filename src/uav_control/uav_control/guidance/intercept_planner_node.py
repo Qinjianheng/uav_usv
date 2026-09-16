@@ -780,6 +780,15 @@ class InterceptPlannerNode(Node):
         message.required_time = float(
             diagnostics.required_time
         )
+        message.horizontal_min_time = float(
+            diagnostics.horizontal_min_time
+        )
+        message.vertical_min_time = float(
+            diagnostics.vertical_min_time
+        )
+        message.sea_safe_min_time = float(
+            diagnostics.sea_safe_min_time
+        )
         message.search_min_time = float(
             diagnostics.search_min_time
         )
