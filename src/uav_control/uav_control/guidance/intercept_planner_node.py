@@ -569,6 +569,7 @@ class InterceptPlannerNode(Node):
     def _publish_job(self, job):
         publish_stamp = self._ros_seconds()
         outcome = job.outcome
+        candidate_contact_stamp = None
         if outcome.plan is not None:
             arrival_failure = validate_plan_arrival(
                 job.request,
@@ -582,11 +583,35 @@ class InterceptPlannerNode(Node):
                     diagnostics=outcome.diagnostics,
                 )
         if outcome.plan is not None:
+            candidate_contact_stamp = (
+                job.request.trajectory_start_stamp + outcome.plan.duration
+            )
+            if job.request.contact_stamp is not None:
+                contact_delay = (
+                    candidate_contact_stamp - job.request.contact_stamp
+                )
+                contact_allowed = (
+                    abs(contact_delay) <= 1e-9
+                    or (
+                        job.request.terminal_mode
+                        and 0.0 < contact_delay
+                        <= self.contact_schedule.terminal_max_reschedule_delay
+                    )
+                )
+                if not contact_allowed:
+                    outcome = FastPlanningOutcome(
+                        plan=None,
+                        failure=(
+                            FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+                        ),
+                        diagnostics=outcome.diagnostics,
+                    )
+        if outcome.plan is not None:
             shift_failure = validate_target_shift(
                 request=job.request,
                 latest_prediction=self.latest_prediction,
                 intercept_time=outcome.plan.duration,
-                contact_stamp=job.request.contact_stamp,
+                contact_stamp=candidate_contact_stamp,
                 tolerance=self.endpoint_tolerance,
             )
             if shift_failure != FastPlanningFailure.NONE:

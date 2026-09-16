@@ -2,24 +2,156 @@
 
 import ast
 import inspect
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
+from uav_usv_interfaces.msg import PlannerDiagnostic
 from uav_usv_interfaces.msg import PredictedTargetPoint, TargetPrediction
 
 from uav_control.guidance.fast_minco_planner import FastMincoPlanner
 from uav_control.guidance.fast_minco_planner import FastPlanningFailure
 from uav_control.guidance.fast_minco_planner import FastPlanningOutcome
+from uav_control.guidance.finite_horizon_intercept_planner import InterceptPlan
 from uav_control.guidance.finite_horizon_intercept_planner import PlannerDiagnostics
+from uav_control.guidance.intercept_planner_node import PlannerJobResult
 from uav_control.guidance.intercept_planner_node import plan_to_message
 from uav_control.guidance.intercept_planner_node import prediction_from_message
 from uav_control.guidance.intercept_planner_node import uav_state_from_message
+from uav_control.guidance.minco_trajectory import MincoS3Trajectory
+from uav_control.guidance.planner_pipeline import ContactTimeSchedule
 from uav_control.guidance.planner_pipeline import PlannerRequest
 from uav_control.guidance.planner_pipeline import PredictionSample
 from uav_control.guidance.planner_pipeline import PredictionSeries
 from uav_control.guidance.planner_pipeline import UavKinematicState
 import uav_control.guidance.intercept_planner_node as planner_node_module
+
+
+class RecordingPublisher:
+    """Collect messages at the ROS publisher boundary."""
+
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
+def make_publish_test_plan(duration=1.2):
+    """Return one complete MINCO plan for publication behavior tests."""
+    trajectory = MincoS3Trajectory(
+        start_position=(0.0, 0.0, -1.0),
+        start_velocity=(0.0, 0.0, 0.0),
+        start_acceleration=(0.0, 0.0, 0.0),
+        end_position=(duration, 0.0, -0.1),
+        end_velocity=(1.0, 0.0, 0.0),
+        end_acceleration=(0.0, 0.0, 0.0),
+        durations=(duration,),
+    )
+    return InterceptPlan(
+        axes=(),
+        duration=duration,
+        closing_speed=0.0,
+        target_position=(duration, 0.0, -0.1),
+        target_velocity=(1.0, 0.0, 0.0),
+        target_acceleration=(0.0, 0.0, 0.0),
+        maximum_horizontal_speed=1.0,
+        maximum_vertical_speed=1.0,
+        maximum_horizontal_acceleration=1.0,
+        maximum_vertical_acceleration=1.0,
+        cost=0.0,
+        minco_trajectory=trajectory,
+        planner_type='MINCO_T3_FAST',
+        piece_durations=(duration,),
+    )
+
+
+def make_publish_test_prediction(sequence_id, shifted_at_candidate=False):
+    """Return a prediction equal at 11.0 and optionally shifted at 11.2."""
+    candidate_x = 2.2 if shifted_at_candidate else 1.2
+    final_x = 3.0 if shifted_at_candidate else 2.0
+    return PredictionSeries(
+        mission_id=2,
+        sequence_id=sequence_id,
+        source_stamp=10.0,
+        valid_until=12.0,
+        samples=(
+            PredictionSample(
+                0.0, (0.0, 0.0, -0.1), (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                1.0, (1.0, 0.0, -0.1), (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                1.2, (candidate_x, 0.0, -0.1), (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                2.0, (final_x, 0.0, -0.1), (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        ),
+        source='simulation_truth',
+    )
+
+
+def run_publish_test(terminal_mode, latest_prediction):
+    """Run one completed planner job through the real publication gate."""
+    prediction = make_publish_test_prediction(sequence_id=4)
+    schedule = ContactTimeSchedule(terminal_max_reschedule_delay=0.30)
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+    request = PlannerRequest(
+        mission_id=2,
+        prediction=prediction,
+        uav=UavKinematicState(
+            stamp=10.0,
+            position=(0.0, 0.0, -1.0),
+            velocity=(0.0, 0.0, 0.0),
+            acceleration=(0.0, 0.0, 0.0),
+        ),
+        trajectory_start_stamp=10.0,
+        contact_stamp=11.0,
+        terminal_mode=terminal_mode,
+        minimum_duration=0.30 if terminal_mode else 1.0,
+    )
+    trajectory_pub = RecordingPublisher()
+    diagnostic_pub = RecordingPublisher()
+    node = SimpleNamespace(
+        _ros_seconds=lambda: 10.05,
+        maximum_input_age=0.125,
+        endpoint_tolerance=0.5,
+        latest_prediction=latest_prediction,
+        contact_schedule=schedule,
+        mission_state=0,
+        terminal_time_threshold=1.0,
+        planned_capture_radius=0.35,
+        completed_plan_count=0,
+        completion_times=deque(maxlen=100),
+        _completion_frequency=lambda: 0.0,
+        plan_id=0,
+        request_slot=SimpleNamespace(replaced_request_count=0),
+        diagnostic_pub=diagnostic_pub,
+        trajectory_pub=trajectory_pub,
+        frame_id='local_ned',
+    )
+    job = PlannerJobResult(
+        request=request,
+        outcome=FastPlanningOutcome(
+            plan=make_publish_test_plan(),
+            failure=FastPlanningFailure.NONE,
+            diagnostics=PlannerDiagnostics(),
+        ),
+        planning_started_stamp=10.01,
+        generated_stamp=10.03,
+        compute_time=0.02,
+    )
+
+    planner_node_module.InterceptPlannerNode._publish_job(node, job)
+
+    return node, schedule, trajectory_pub, diagnostic_pub
 
 
 def test_planner_node_does_not_shadow_rclpy_executor_property():
@@ -213,6 +345,38 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
         (10.35, 0.0, -0.1)
     )
     assert planner.maximum_duration_override == pytest.approx(1.1)
+
+
+def test_terminal_reschedule_validates_shift_at_candidate_contact():
+    """Catch stale-target validation using the old locked contact time."""
+    node, schedule, trajectory_pub, diagnostic_pub = run_publish_test(
+        terminal_mode=True,
+        latest_prediction=make_publish_test_prediction(
+            sequence_id=5,
+            shifted_at_candidate=True,
+        ),
+    )
+
+    assert trajectory_pub.messages == []
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert diagnostic_pub.messages[-1].result == (
+        PlannerDiagnostic.RESULT_FAILURE
+    )
+    assert node.plan_id == 1
+
+
+def test_normal_plan_cannot_publish_endpoint_after_locked_contact():
+    """Catch a normal replacement contradicting its locked contact metadata."""
+    _, schedule, trajectory_pub, diagnostic_pub = run_publish_test(
+        terminal_mode=False,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+    )
+
+    assert trajectory_pub.messages == []
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert diagnostic_pub.messages[-1].result == (
+        PlannerDiagnostic.RESULT_FAILURE
+    )
 
 
 def test_minco_plan_message_contains_reconstructable_coefficients():
