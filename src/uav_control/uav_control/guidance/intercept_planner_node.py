@@ -477,56 +477,6 @@ class InterceptPlannerNode(Node):
             planning_started_stamp,
             self.maximum_input_age,
         )
-        if failure == FastPlanningFailure.NONE:
-            minimum_duration = (
-                self.planner.minimum_duration
-                if request.minimum_duration is None
-                else request.minimum_duration
-            )
-            preferred_duration = None
-            maximum_duration_override = None
-            if request.contact_stamp is not None:
-                remaining = (
-                    request.contact_stamp
-                    - request.trajectory_start_stamp
-                )
-                if request.terminal_mode:
-                    preferred_duration = remaining
-                    minimum_duration = remaining
-                    maximum_duration_override = min(
-                        remaining + self.terminal_max_reschedule_delay,
-                        self.planner.maximum_duration,
-                    )
-                elif remaining >= minimum_duration:
-                    preferred_duration = remaining
-            outcome = self.planner.plan(
-                initial_position=request.uav.position,
-                initial_velocity=request.uav.velocity,
-                initial_acceleration=request.uav.acceleration,
-                target_state_at_time=(
-                    lambda horizon: request.prediction
-                    .state_at_absolute_time(
-                        request.trajectory_start_stamp + horizon
-                    )
-                ),
-                preferred_duration=preferred_duration,
-                minimum_duration_override=(
-                    minimum_duration
-                    if request.terminal_mode else None
-                ),
-                maximum_duration_override=maximum_duration_override,
-            )
-        else:
-            outcome = FastPlanningOutcome(
-                plan=None,
-                failure=failure,
-                diagnostics=PlannerDiagnostics(),
-            )
-        elapsed = time.perf_counter() - monotonic_start
-        deadline_failure = validate_total_deadline(
-            elapsed,
-            self.hard_deadline_seconds,
-        )
         if (
             outcome.plan is not None
             and deadline_failure != FastPlanningFailure.NONE

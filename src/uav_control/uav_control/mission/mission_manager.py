@@ -122,7 +122,7 @@ class MissionManagerCore:
         mission_id,
         plan_id,
         status,
-        source_age,
+        prediction_age,
         remaining_time,
         now,
         target_distance=math.inf,
@@ -131,7 +131,7 @@ class MissionManagerCore:
         now = float(now)
         current_mission = int(mission_id) == self.mission_id
         fresh = (
-            0.0 <= float(source_age) <= self.maximum_tracker_age
+            0.0 <= float(prediction_age) <= self.maximum_tracker_age
             and float(remaining_time) >= self.minimum_plan_remaining_time
         )
         tracking = (

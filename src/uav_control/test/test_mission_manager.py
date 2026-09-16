@@ -39,7 +39,7 @@ def test_only_fresh_current_tracker_acceptance_enters_minco_ready():
         mission_id=99,
         plan_id=12,
         status='TRACKING',
-        source_age=0.02,
+        prediction_age=0.02,
         remaining_time=1.0,
         now=4.1,
     )
@@ -47,7 +47,7 @@ def test_only_fresh_current_tracker_acceptance_enters_minco_ready():
         mission_id=core.mission_id,
         plan_id=12,
         status='TRACKING',
-        source_age=0.20,
+        prediction_age=0.20,
         remaining_time=1.0,
         now=4.2,
     )
@@ -55,7 +55,7 @@ def test_only_fresh_current_tracker_acceptance_enters_minco_ready():
         mission_id=core.mission_id,
         plan_id=13,
         status='PLAN_ACCEPTED',
-        source_age=0.02,
+        prediction_age=0.02,
         remaining_time=1.5,
         now=4.3,
     )
@@ -79,7 +79,7 @@ def test_terminal_minco_latches_when_contact_is_near():
         mission_id=core.mission_id,
         plan_id=1,
         status='TRACKING',
-        source_age=0.02,
+        prediction_age=0.02,
         remaining_time=2.0,
         target_distance=3.0,
         now=4.1,
@@ -91,7 +91,7 @@ def test_terminal_minco_latches_when_contact_is_near():
         mission_id=core.mission_id,
         plan_id=2,
         status='PLAN_ACCEPTED',
-        source_age=0.02,
+        prediction_age=0.02,
         remaining_time=0.8,
         target_distance=1.8,
         now=5.0,
@@ -105,7 +105,7 @@ def test_terminal_minco_latches_when_contact_is_near():
         mission_id=core.mission_id,
         plan_id=3,
         status='PLAN_ACCEPTED',
-        source_age=0.02,
+        prediction_age=0.02,
         remaining_time=1.4,
         target_distance=2.5,
         now=5.1,
@@ -124,7 +124,7 @@ def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
         core.mission_id,
         1,
         'TRACKING',
-        source_age=0.01,
+        prediction_age=0.01,
         remaining_time=1.0,
         now=4.1,
     )
@@ -134,7 +134,7 @@ def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
         core.mission_id,
         1,
         'NO_VALID_PLAN',
-        source_age=0.3,
+        prediction_age=0.3,
         remaining_time=0.0,
         now=4.4,
     )
@@ -146,7 +146,7 @@ def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
         core.mission_id,
         2,
         'TRACKING',
-        source_age=0.01,
+        prediction_age=0.01,
         remaining_time=0.8,
         now=4.8,
     )
@@ -161,7 +161,7 @@ def test_safe_wait_can_reestablish_far_guidance_when_geometry_allows():
         core.mission_id,
         1,
         'TRACKING',
-        source_age=0.01,
+        prediction_age=0.01,
         remaining_time=1.0,
         now=4.1,
     )
@@ -170,7 +170,7 @@ def test_safe_wait_can_reestablish_far_guidance_when_geometry_allows():
         core.mission_id,
         1,
         'NO_VALID_PLAN',
-        source_age=0.3,
+        prediction_age=0.3,
         remaining_time=0.0,
         now=4.2,
     )

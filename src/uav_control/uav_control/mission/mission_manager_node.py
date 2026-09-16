@@ -173,7 +173,7 @@ class MissionManagerNode(Node):
             mission_id=message.mission_id,
             plan_id=message.plan_id,
             status=message.status,
-            source_age=message.source_age,
+            prediction_age=message.prediction_age,
             remaining_time=message.remaining_time,
             now=self._now(),
             target_distance=message.target_distance,
