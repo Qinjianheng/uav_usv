@@ -256,7 +256,13 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             'minimum_duration_override',
             None,
         )
+        maximum_duration_override = kwargs.pop(
+            'maximum_duration_override',
+            None,
+        )
         normal_minimum_duration = self.minimum_duration
+        normal_maximum_duration = self.maximum_duration
+        normal_absolute_maximum_duration = self.absolute_maximum_duration
         if minimum_duration_override is not None:
             minimum_duration_override = self._finite_positive(
                 minimum_duration_override,
@@ -267,6 +273,12 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
                     'minimum duration override exceeds maximum duration'
                 )
             self.minimum_duration = minimum_duration_override
+        if maximum_duration_override is not None:
+            self.maximum_duration = self._finite_positive(
+                maximum_duration_override,
+                'maximum duration override',
+            )
+            self.absolute_maximum_duration = self.maximum_duration
         self._preferred_duration = (
             None if preferred_duration is None else float(preferred_duration)
         )
@@ -283,6 +295,8 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             self._active_deadline = None
             self._preferred_duration = None
             self.minimum_duration = normal_minimum_duration
+            self.maximum_duration = normal_maximum_duration
+            self.absolute_maximum_duration = normal_absolute_maximum_duration
 
         if plan is None:
             return FastPlanningOutcome(

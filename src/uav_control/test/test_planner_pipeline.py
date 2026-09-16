@@ -249,6 +249,37 @@ def test_terminal_contact_stamp_counts_down_without_drifting():
     assert remaining == pytest.approx((0.8, 0.6, 0.4))
 
 
+def test_contact_schedule_accepts_only_bounded_forward_reschedules():
+    """Catch a terminal plan moving an already committed contact too far."""
+    schedule = planner_pipeline.ContactTimeSchedule(
+        terminal_threshold=1.0,
+        freeze_time=0.30,
+        terminal_max_reschedule_delay=0.30,
+    )
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+
+    assert schedule.accept_plan(
+        source_stamp=10.0,
+        selected_t_go=1.2,
+        rescheduled=True,
+    ) == pytest.approx(11.2)
+    assert schedule.accept_plan(
+        source_stamp=10.0,
+        selected_t_go=4.0,
+        rescheduled=True,
+    ) == pytest.approx(11.2)
+    assert schedule.accept_plan(
+        source_stamp=10.0,
+        selected_t_go=1.2,
+        rescheduled=True,
+    ) == pytest.approx(11.2)
+    assert schedule.accept_plan(
+        source_stamp=10.0,
+        selected_t_go=1.1,
+        rescheduled=True,
+    ) == pytest.approx(11.2)
+
+
 @pytest.mark.parametrize(
     ('remaining', 'expected'),
     ((0.31, True), (0.30, False), (0.20, False)),

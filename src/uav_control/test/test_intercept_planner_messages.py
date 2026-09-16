@@ -148,8 +148,12 @@ def test_planner_request_uses_latest_uav_stamp_as_minco_start():
 def test_planner_queries_prediction_at_absolute_minco_contact_time():
     class CapturingPlanner:
         minimum_duration = 0.10
+        maximum_duration = 4.0
 
         def plan(self, **kwargs):
+            self.maximum_duration_override = kwargs[
+                'maximum_duration_override'
+            ]
             self.target_at_quarter_second = kwargs['target_state_at_time'](
                 0.25
             )
@@ -190,12 +194,16 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
             acceleration=(0.0, 0.0, 0.0),
         ),
         trajectory_start_stamp=10.10,
+        contact_stamp=10.90,
+        terminal_mode=True,
+        minimum_duration=0.30,
     )
     planner = CapturingPlanner()
     node = SimpleNamespace(
         planner=planner,
         maximum_input_age=0.20,
         hard_deadline_seconds=1.0,
+        terminal_max_reschedule_delay=0.30,
         _ros_seconds=lambda: 10.15,
     )
 
@@ -204,6 +212,7 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
     assert planner.target_at_quarter_second[0] == pytest.approx(
         (10.35, 0.0, -0.1)
     )
+    assert planner.maximum_duration_override == pytest.approx(1.1)
 
 
 def test_minco_plan_message_contains_reconstructable_coefficients():

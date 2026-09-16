@@ -141,6 +141,41 @@ def test_terminal_minimum_duration_allows_locked_subsecond_plan():
     assert outcome.plan.duration == pytest.approx(0.8)
 
 
+def test_terminal_bounded_search_fails_instead_of_selecting_late_plan():
+    """Catch terminal fallback searching past the 0.30 s contact window."""
+    planner = make_planner(maximum_duration=4.0)
+
+    def target(_horizon):
+        return (
+            (2.0, 0.0, -0.1),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )
+
+    unbounded = planner.plan(
+        initial_position=(0.0, 0.0, -1.0),
+        initial_velocity=(0.0, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=target,
+        preferred_duration=0.8,
+        minimum_duration_override=0.8,
+    )
+    bounded = planner.plan(
+        initial_position=(0.0, 0.0, -1.0),
+        initial_velocity=(0.0, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=target,
+        preferred_duration=0.8,
+        minimum_duration_override=0.8,
+        maximum_duration_override=1.1,
+    )
+
+    assert unbounded.plan is not None
+    assert unbounded.plan.duration > 1.1
+    assert bounded.plan is None
+    assert bounded.failure == FastPlanningFailure.HORIZON_INSUFFICIENT
+
+
 def test_horizontal_and_vertical_dynamic_failures_are_distinct():
     horizontal = make_planner(
         maximum_horizontal_speed=2.1,

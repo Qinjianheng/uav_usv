@@ -217,6 +217,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('minimum_duration', 1.0)
         self.declare_parameter('terminal_minimum_duration', 0.30)
         self.declare_parameter('terminal_freeze_time', 0.30)
+        self.declare_parameter('terminal_max_reschedule_delay', 0.30)
         self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
@@ -266,6 +267,9 @@ class InterceptPlannerNode(Node):
         )
         self.terminal_freeze_time = float(
             self.get_parameter('terminal_freeze_time').value
+        )
+        self.terminal_max_reschedule_delay = float(
+            self.get_parameter('terminal_max_reschedule_delay').value
         )
         self.planner = FastMincoPlanner(
             minimum_duration=self.get_parameter('minimum_duration').value,
@@ -410,6 +414,9 @@ class InterceptPlannerNode(Node):
         self.contact_schedule = ContactTimeSchedule(
             terminal_threshold=self.terminal_time_threshold,
             freeze_time=self.terminal_freeze_time,
+            terminal_max_reschedule_delay=(
+                self.terminal_max_reschedule_delay
+            ),
         )
         self.request_policy = PlanningRequestPolicy(
             normal_minimum_duration=self.planner.minimum_duration,
@@ -477,12 +484,20 @@ class InterceptPlannerNode(Node):
                 else request.minimum_duration
             )
             preferred_duration = None
+            maximum_duration_override = None
             if request.contact_stamp is not None:
                 remaining = (
                     request.contact_stamp
                     - request.trajectory_start_stamp
                 )
-                if remaining >= minimum_duration:
+                if request.terminal_mode:
+                    preferred_duration = remaining
+                    minimum_duration = remaining
+                    maximum_duration_override = min(
+                        remaining + self.terminal_max_reschedule_delay,
+                        self.planner.maximum_duration,
+                    )
+                elif remaining >= minimum_duration:
                     preferred_duration = remaining
             outcome = self.planner.plan(
                 initial_position=request.uav.position,
@@ -499,6 +514,7 @@ class InterceptPlannerNode(Node):
                     minimum_duration
                     if request.terminal_mode else None
                 ),
+                maximum_duration_override=maximum_duration_override,
             )
         else:
             outcome = FastPlanningOutcome(
@@ -599,8 +615,8 @@ class InterceptPlannerNode(Node):
                 )
             )
             rescheduled = (
-                preferred_duration is not None
-                and abs(outcome.plan.duration - preferred_duration) > 0.05
+                job.request.terminal_mode
+                and preferred_duration is not None
             )
             contact_stamp = self.contact_schedule.accept_plan(
                 job.request.trajectory_start_stamp,

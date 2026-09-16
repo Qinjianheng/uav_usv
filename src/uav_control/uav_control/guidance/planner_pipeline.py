@@ -201,9 +201,17 @@ class PlanningRequestPolicy:
 class ContactTimeSchedule:
     """Keep one absolute contact time across rolling prediction snapshots."""
 
-    def __init__(self, terminal_threshold=1.0, freeze_time=0.30):
+    def __init__(
+        self,
+        terminal_threshold=1.0,
+        freeze_time=0.30,
+        terminal_max_reschedule_delay=0.30,
+    ):
         self.terminal_threshold = max(float(terminal_threshold), 0.0)
         self.freeze_time = max(float(freeze_time), 0.0)
+        self.terminal_max_reschedule_delay = float(
+            terminal_max_reschedule_delay
+        )
         self.contact_stamp = None
 
     def reset(self):
@@ -211,7 +219,12 @@ class ContactTimeSchedule:
 
     def accept_plan(self, source_stamp, selected_t_go, rescheduled=False):
         candidate = float(source_stamp) + float(selected_t_go)
-        if self.contact_stamp is None or bool(rescheduled):
+        if self.contact_stamp is None:
+            self.contact_stamp = candidate
+        elif bool(rescheduled) and (
+            0.0 < candidate - self.contact_stamp
+            <= self.terminal_max_reschedule_delay
+        ):
             self.contact_stamp = candidate
         return self.contact_stamp
 
