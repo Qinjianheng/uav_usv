@@ -472,11 +472,107 @@ class InterceptPlannerNode(Node):
     def _run_request(self, request):
         planning_started_stamp = self._ros_seconds()
         monotonic_start = time.perf_counter()
+
         failure = validate_input(
             request,
             planning_started_stamp,
             self.maximum_input_age,
         )
+
+        if failure == FastPlanningFailure.NONE:
+            minimum_duration = (
+                self.planner.minimum_duration
+                if request.minimum_duration is None
+                else request.minimum_duration
+            )
+
+            available_prediction_duration = (
+                request.prediction.end_stamp
+                - request.trajectory_start_stamp
+            )
+
+            preferred_duration = None
+            maximum_duration_override = min(
+                self.planner.maximum_duration,
+                available_prediction_duration,
+            )
+
+            horizon_insufficient = (
+                not math.isfinite(available_prediction_duration)
+                or available_prediction_duration
+                < minimum_duration - 1e-9
+            )
+
+            if request.contact_stamp is not None:
+                remaining = (
+                    request.contact_stamp
+                    - request.trajectory_start_stamp
+                )
+
+                if request.terminal_mode:
+                    preferred_duration = remaining
+                    minimum_duration = remaining
+
+                    if (
+                        remaining <= 0.0
+                        or available_prediction_duration
+                        < remaining - 1e-9
+                    ):
+                        horizon_insufficient = True
+                    else:
+                        maximum_duration_override = min(
+                            remaining
+                            + self.terminal_max_reschedule_delay,
+                            self.planner.maximum_duration,
+                            available_prediction_duration,
+                        )
+
+                elif remaining >= minimum_duration:
+                    preferred_duration = remaining
+
+            if horizon_insufficient:
+                outcome = FastPlanningOutcome(
+                    plan=None,
+                    failure=FastPlanningFailure.HORIZON_INSUFFICIENT,
+                    diagnostics=PlannerDiagnostics(),
+                )
+            else:
+                outcome = self.planner.plan(
+                    initial_position=request.uav.position,
+                    initial_velocity=request.uav.velocity,
+                    initial_acceleration=request.uav.acceleration,
+                    target_state_at_time=(
+                        lambda horizon: request.prediction
+                        .state_at_absolute_time(
+                            request.trajectory_start_stamp
+                            + horizon
+                        )
+                    ),
+                    preferred_duration=preferred_duration,
+                    minimum_duration_override=(
+                        minimum_duration
+                        if request.terminal_mode
+                        else None
+                    ),
+                    maximum_duration_override=(
+                        maximum_duration_override
+                    ),
+                )
+
+        else:
+            outcome = FastPlanningOutcome(
+                plan=None,
+                failure=failure,
+                diagnostics=PlannerDiagnostics(),
+            )
+
+        elapsed = time.perf_counter() - monotonic_start
+
+        deadline_failure = validate_total_deadline(
+            elapsed,
+            self.hard_deadline_seconds,
+        )
+
         if (
             outcome.plan is not None
             and deadline_failure != FastPlanningFailure.NONE
@@ -486,19 +582,23 @@ class InterceptPlannerNode(Node):
                 failure=deadline_failure,
                 diagnostics=outcome.diagnostics,
             )
+
         generated_stamp = self._ros_seconds()
+
         if outcome.plan is not None:
             arrival_failure = validate_plan_arrival(
                 request,
                 generated_stamp,
                 self.maximum_input_age,
             )
+
             if arrival_failure != FastPlanningFailure.NONE:
                 outcome = FastPlanningOutcome(
                     plan=None,
                     failure=arrival_failure,
                     diagnostics=outcome.diagnostics,
                 )
+
         return PlannerJobResult(
             request=request,
             outcome=outcome,
@@ -706,9 +806,22 @@ class InterceptPlannerNode(Node):
             self.trajectory_pub.publish(trajectory)
 
     def completion_timer_callback(self):
-        if self.future is not None and self.future.done():
-            self._publish_job(self.future.result())
-            self.future = None
+        if self.future is None or not self.future.done():
+            return
+
+        future = self.future
+        self.future = None
+
+        try:
+            job = future.result()
+        except Exception as exc:
+            self.get_logger().error(
+                'Planner worker failed: '
+                f'{type(exc).__name__}: {exc}'
+            )
+            return
+
+        self._publish_job(job)
 
     def _planning_tick(self, terminal_tick):
         if not self.intercept_requested:

@@ -28,15 +28,15 @@ class PredictionSeries:
     samples: tuple
     source: str
 
-@property
-def end_stamp(self):
-    """Return the absolute end time covered by prediction samples."""
-    if not self.samples:
-        return float(self.source_stamp)
-    return float(self.source_stamp) + max(
-        float(sample.relative_time)
-        for sample in self.samples
-    )
+    @property
+    def end_stamp(self):
+        """Return the absolute end time covered by prediction samples."""
+        if not self.samples:
+            return float(self.source_stamp)
+        return float(self.source_stamp) + max(
+            float(sample.relative_time)
+            for sample in self.samples
+        )
 
     @staticmethod
     def _blend(first, second, fraction):

@@ -144,7 +144,7 @@ def test_fast_valid_plan_flows_tracker_to_mission_and_truth_evaluator():
         mission_id=manager.mission_id,
         plan_id=7,
         status='PLAN_ACCEPTED',
-        source_age=0.05,
+        prediction_age=0.05,
         remaining_time=1.95,
         now=10.05,
     )

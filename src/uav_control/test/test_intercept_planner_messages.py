@@ -377,7 +377,8 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
     assert planner.target_at_quarter_second[0] == pytest.approx(
         (10.35, 0.0, -0.1)
     )
-    assert planner.maximum_duration_override == pytest.approx(1.1)
+    # Prediction ends at 11.0, so only 0.9 s remains from trajectory start 10.1.
+    assert planner.maximum_duration_override == pytest.approx(0.9)
 
 
 def test_terminal_reschedule_validates_shift_at_candidate_contact():
