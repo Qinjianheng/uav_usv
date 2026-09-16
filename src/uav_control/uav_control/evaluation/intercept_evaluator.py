@@ -602,6 +602,7 @@ class ExperimentArtifactWriter:
         'controller_status', 'plan_id', 'prediction_age', 'trajectory_age',
         'tracker_rejection_reason',
         'plan_prediction_sequence_id', 'latest_prediction_sequence_id',
+        'planner_failure_reason', 'planner_failure_detail',
         'planner_source_age_at_publish',
         'planner_completion_to_publish_delay',
         'selected_t_go', 'contact_stamp', 'remaining_t_go',

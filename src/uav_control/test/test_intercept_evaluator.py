@@ -18,6 +18,11 @@ def test_csv_separates_prediction_and_trajectory_age():
     assert 'trajectory_age' in ExperimentArtifactWriter.CSV_FIELDS
 
 
+def test_csv_records_planner_failure_diagnostics():
+    assert 'planner_failure_reason' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_failure_detail' in ExperimentArtifactWriter.CSV_FIELDS
+
+
 def test_capture_is_detected_between_truth_samples():
     evaluator = InterceptEvaluatorCore(capture_radius=0.25)
     evaluator.begin(mission_id=4, now=10.0)

@@ -485,6 +485,7 @@ class InterceptEvaluatorNode(Node):
         self.runtime_performance = RuntimePerformanceAccumulator()
         self.terminal_pause_result = None
         self.latest_tracker_rejection_reason = ''
+        self.latest_planner_diagnostic = None
         self.writer = ExperimentArtifactWriter(
             self.log_directory,
             mission_id,
@@ -546,6 +547,14 @@ class InterceptEvaluatorNode(Node):
             'latest_prediction_sequence_id': (
                 self.latest_prediction.sequence_id
                 if self.latest_prediction else 0
+            ),
+            'planner_failure_reason': (
+                self._failure_name(self.latest_planner_diagnostic)
+                if self.latest_planner_diagnostic else ''
+            ),
+            'planner_failure_detail': (
+                self.latest_planner_diagnostic.failure_detail
+                if self.latest_planner_diagnostic else ''
             ),
             'planner_source_age_at_publish': (
                 self.latest_planner_diagnostic.input_age_at_publish
