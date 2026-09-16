@@ -116,7 +116,7 @@ class TargetPredictorNode(Node):
         )
         self.declare_parameter('frame_id', 'local_ned')
         self.declare_parameter('update_rate_hz', 20.0)
-        self.declare_parameter('prediction_horizon', 3.0)
+        self.declare_parameter('prediction_horizon', 4.0)
         self.declare_parameter('prediction_sample_period', 0.1)
         self.declare_parameter('input_timeout', 0.125)
         self.declare_parameter('turn_rate_filter_alpha', 0.25)

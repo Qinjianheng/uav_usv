@@ -108,6 +108,12 @@ class PlannerEventAccumulator:
             event['failure_reason'] == 'DEADLINE_EXCEEDED'
             for event in events
         )
+        failure_histogram = {}
+        for event in events:
+            if event['success']:
+                continue
+            reason = event['failure_reason']
+            failure_histogram[reason] = failure_histogram.get(reason, 0) + 1
         executed_successes = sum(
             key in self._executed_plan_ids and event['success']
             for key, event in self._planner_events.items()
@@ -124,6 +130,9 @@ class PlannerEventAccumulator:
             'planner_succeeded': succeeded,
             'planner_failed': failed,
             'planner_deadline': deadlines,
+            'planner_failure_histogram': dict(sorted(
+                failure_histogram.items()
+            )),
             'attempt_rate': (
                 len(events) / elapsed_time if elapsed_time > 0.0 else 0.0
             ),

@@ -51,7 +51,7 @@ class PredictionEngine:
     def __init__(
         self,
         predictor=None,
-        horizon=3.0,
+        horizon=4.0,
         sample_period=0.1,
         input_timeout=0.125,
         source='simulation_truth',

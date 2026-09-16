@@ -195,7 +195,7 @@ class InterceptPlannerNode(Node):
         super().__init__('intercept_planner_node')
         self.declare_parameter('planning_rate_hz', 5.0)
         self.declare_parameter('minimum_duration', 1.0)
-        self.declare_parameter('maximum_duration', 3.0)
+        self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
         self.declare_parameter('maximum_horizontal_speed', 6.5)

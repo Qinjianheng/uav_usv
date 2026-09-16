@@ -33,9 +33,10 @@ trajectory_impact_sim:
     terminal_min_closing_speed: 0.3
     terminal_closing_speed_step: 0.3
     terminal_plan_duration_step: 0.1
-    # Reachability chooses the online interval.  Two seconds remains nominal;
-    # three seconds is a hard compute/mission cap, not a relaxed dynamic limit.
-    terminal_plan_absolute_max_duration: 3.0
+    # Reachability chooses the online interval.  Four seconds covers the
+    # acceleration-limited five-metre terminal descent while remaining a hard
+    # compute/mission cap rather than a relaxed dynamic limit.
+    terminal_plan_absolute_max_duration: 4.0
     terminal_plan_horizon_extra_margin: 0.5
     # Three-piece minimum-jerk trajectory, replanned at the controller rate.
     enable_minco_planner: true
@@ -152,7 +153,7 @@ target_predictor_node:
     prediction_topic: /planning/target_prediction
     frame_id: local_ned
     update_rate_hz: 20.0
-    prediction_horizon: 3.0
+    prediction_horizon: 4.0
     prediction_sample_period: 0.1
     input_timeout: 0.125
     # Horizontal BCTRA settings match the existing controller baseline.
@@ -176,7 +177,10 @@ intercept_planner_node:
   ros__parameters:
     planning_rate_hz: 5.0
     minimum_duration: 1.0
-    maximum_duration: 3.0
+    # The previous 3.0 s cap rejected five-metre terminal descents whose
+    # minimum-time bound was feasible but whose jerk-continuous MINCO profile
+    # needed roughly 3.2 s to respect the 3 m/s^2 vertical acceleration limit.
+    maximum_duration: 4.0
     duration_margin: 0.35
     sample_step: 0.05
     # Match max_speed-speed_guard_margin and terminal hard limits above.

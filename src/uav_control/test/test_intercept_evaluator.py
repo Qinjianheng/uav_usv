@@ -96,6 +96,9 @@ def test_planner_statistics_are_unique_per_plan_event():
     assert summary['planner_succeeded'] == 1
     assert summary['planner_failed'] == 1
     assert summary['planner_deadline'] == 1
+    assert summary['planner_failure_histogram'] == {
+        'DEADLINE_EXCEEDED': 1,
+    }
     assert summary['attempt_rate'] == pytest.approx(1.0)
     assert summary['execution_rate'] == pytest.approx(1.0)
     assert summary['hold_rate'] == pytest.approx(1.0 / 3.0)
@@ -108,6 +111,7 @@ def test_empty_event_rates_are_numeric_not_null():
     assert summary['execution_rate'] == 0.0
     assert summary['hold_rate'] == 0.0
     assert summary['actual_completion_hz'] == 0.0
+    assert summary['planner_failure_histogram'] == {}
 
 
 def test_artifact_writer_creates_csv_summary_and_config(tmp_path):

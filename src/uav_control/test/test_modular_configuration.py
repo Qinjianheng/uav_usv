@@ -57,3 +57,18 @@ def test_truth_control_source_is_explicit_and_shared_by_launch_parameters():
     assert predictor['target_state_source'] == 'simulation_truth'
     assert predictor['simulation_truth_topic'] == tracker['target_state_topic']
     assert evaluator['truth_topic'] == tracker['target_state_topic']
+
+
+def test_prediction_horizon_covers_vertical_intercept_duration():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    legacy = parameters(config, 'trajectory_impact_sim')
+    predictor = parameters(config, 'target_predictor_node')
+    planner = parameters(config, 'intercept_planner_node')
+
+    # A five-metre, acceleration-limited descent with a near-zero terminal
+    # vertical speed needs more than the old three-second hard cap.
+    assert planner['maximum_duration'] >= 3.5
+    assert predictor['prediction_horizon'] >= planner['maximum_duration']
+    assert legacy['terminal_plan_absolute_max_duration'] == pytest.approx(
+        planner['maximum_duration']
+    )
