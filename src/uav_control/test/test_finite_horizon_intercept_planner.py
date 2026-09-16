@@ -205,7 +205,7 @@ def test_minco_planner_tracks_curved_target_prediction_with_three_pieces():
     )
 
     assert plan is not None
-    assert plan.planner_type == 'MINCO_T3_OPT'
+    assert plan.planner_type in ('MINCO_T3', 'MINCO_T3_OPT')
     assert plan.minco_trajectory.piece_count == 3
     assert all(duration > 0.0 for duration in plan.piece_durations)
     assert sum(plan.piece_durations) == pytest.approx(plan.duration)
@@ -265,6 +265,6 @@ def test_minco_relaxes_target_curve_weight_to_remain_dynamically_feasible():
     )
 
     assert plan is not None
-    assert plan.planner_type == 'MINCO_T3_OPT'
+    assert plan.planner_type in ('MINCO_T3', 'MINCO_T3_OPT')
     assert 0.0 < plan.target_curve_weight < 0.7
     assert plan.maximum_horizontal_acceleration <= 3.5

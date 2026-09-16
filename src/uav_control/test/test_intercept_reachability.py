@@ -8,6 +8,7 @@ from uav_control.guidance.finite_horizon_intercept_planner import (
 )
 from uav_control.guidance.intercept_reachability import (
     SeaSafetyState,
+    _velocity_envelope_integral,
     apply_sea_safety_guard,
     estimate_reachability,
 )
@@ -72,6 +73,30 @@ def test_safe_altitude_keeps_a_safe_command_unchanged():
 
     assert result.state == SeaSafetyState.SAFE
     assert result.command_vz == pytest.approx(0.3)
+
+
+def test_velocity_envelope_integral_is_exact_at_off_grid_switch():
+    upper = _velocity_envelope_integral(
+        duration=1.0,
+        initial_velocity=0.0,
+        final_velocity=0.2,
+        maximum_speed=10.0,
+        positive_acceleration=1.0,
+        negative_acceleration=2.0,
+        maximize=True,
+    )
+    lower = _velocity_envelope_integral(
+        duration=1.0,
+        initial_velocity=0.0,
+        final_velocity=-0.2,
+        maximum_speed=10.0,
+        positive_acceleration=2.0,
+        negative_acceleration=1.0,
+        maximize=False,
+    )
+
+    assert upper == pytest.approx(0.3933333333333333, abs=1e-12)
+    assert lower == pytest.approx(-0.3933333333333333, abs=1e-12)
 
 
 def test_dynamic_horizon_reports_insufficient_absolute_horizon():

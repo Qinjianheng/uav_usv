@@ -53,38 +53,62 @@ def _velocity_envelope_integral(
     negative_acceleration,
     maximize,
 ):
-    """
-    Integrate the extremal bounded-velocity envelope.
-
-    The upper envelope is ``min(v0+a*t, vf+b*(T-t), vmax)``.  The
-    corresponding lower envelope is its sign-reversed counterpart.  A fixed
-    96-interval trapezoid is deterministic and sufficiently conservative for
-    a horizon gate; every accepted polynomial is still densely checked later.
-    """
+    """Integrate the exact piecewise-affine bounded-velocity envelope."""
     duration = max(float(duration), 0.0)
     if duration <= 0.0:
         return 0.0
-    intervals = 96
-    step = duration / intervals
 
-    def envelope(time):
-        if maximize:
-            return min(
-                maximum_speed,
-                initial_velocity + positive_acceleration * time,
-                final_velocity
-                + negative_acceleration * (duration - time),
-            )
-        return max(
-            -maximum_speed,
-            initial_velocity - negative_acceleration * time,
-            final_velocity
-            - positive_acceleration * (duration - time),
+    def upper_integral(
+        start_velocity,
+        end_velocity,
+        acceleration,
+        braking_acceleration,
+    ):
+        lines = (
+            (float(start_velocity), float(acceleration)),
+            (
+                float(end_velocity) + braking_acceleration * duration,
+                -float(braking_acceleration),
+            ),
+            (float(maximum_speed), 0.0),
         )
+        breakpoints = {0.0, duration}
+        for left_index, left in enumerate(lines):
+            for right in lines[left_index + 1:]:
+                slope_difference = left[1] - right[1]
+                if abs(slope_difference) <= 1e-12:
+                    continue
+                intersection = (right[0] - left[0]) / slope_difference
+                if 0.0 < intersection < duration:
+                    breakpoints.add(intersection)
+        ordered = sorted(breakpoints)
+        integral = 0.0
+        for left_time, right_time in zip(ordered, ordered[1:]):
+            midpoint = 0.5 * (left_time + right_time)
+            intercept, slope = min(
+                lines,
+                key=lambda line: line[0] + line[1] * midpoint,
+            )
+            integral += (
+                intercept * (right_time - left_time)
+                + 0.5 * slope
+                * (right_time * right_time - left_time * left_time)
+            )
+        return integral
 
-    total = 0.5 * (envelope(0.0) + envelope(duration))
-    total += sum(envelope(index * step) for index in range(1, intervals))
-    return total * step
+    if maximize:
+        return upper_integral(
+            initial_velocity,
+            final_velocity,
+            positive_acceleration,
+            negative_acceleration,
+        )
+    return -upper_integral(
+        -initial_velocity,
+        -final_velocity,
+        negative_acceleration,
+        positive_acceleration,
+    )
 
 
 def minimum_time_1d(
