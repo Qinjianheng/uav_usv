@@ -1,6 +1,7 @@
 """Pure recoverable mission state machine for modular interception."""
 
 from enum import IntEnum
+import math
 
 
 class MissionPhase(IntEnum):
@@ -29,12 +30,16 @@ class MissionManagerCore:
         maximum_tracker_age=0.125,
         minimum_plan_remaining_time=0.20,
         plan_recovery_timeout=0.50,
+        terminal_time_threshold=1.0,
+        terminal_distance_threshold=2.0,
     ):
         self.maximum_tracker_age = float(maximum_tracker_age)
         self.minimum_plan_remaining_time = float(
             minimum_plan_remaining_time
         )
         self.plan_recovery_timeout = float(plan_recovery_timeout)
+        self.terminal_time_threshold = float(terminal_time_threshold)
+        self.terminal_distance_threshold = float(terminal_distance_threshold)
         self.mission_id = 0
         self.phase = MissionPhase.INIT
         self.flight_ready = False
@@ -120,6 +125,7 @@ class MissionManagerCore:
         source_age,
         remaining_time,
         now,
+        target_distance=math.inf,
     ):
         """Accept only a fresh, currently executable tracker decision."""
         now = float(now)
@@ -142,7 +148,13 @@ class MissionManagerCore:
             self.active_plan_id = int(plan_id)
             self.last_tracker_accept_time = now
             self.recovery_started_at = None
-            if new_plan or self.phase in (
+            terminal = (
+                float(remaining_time) <= self.terminal_time_threshold
+                or float(target_distance) <= self.terminal_distance_threshold
+            )
+            if terminal or self.phase == MissionPhase.TERMINAL_MINCO:
+                self._transition(MissionPhase.TERMINAL_MINCO, now)
+            elif new_plan or self.phase in (
                 MissionPhase.FAR_GUIDANCE,
                 MissionPhase.PLAN_RECOVERY,
                 MissionPhase.SAFE_WAIT,

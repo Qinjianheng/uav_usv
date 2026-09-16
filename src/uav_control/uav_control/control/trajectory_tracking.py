@@ -95,6 +95,11 @@ class PolynomialTrajectory:
     terminal_velocity: tuple
     target_state_source: str
     frame_id: str = 'local_ned'
+    contact_stamp: float = 0.0
+    selected_t_go: float = 0.0
+    remaining_t_go: float = 0.0
+    terminal_mode: bool = False
+    planned_capture_margin: float = 0.0
 
     @property
     def duration(self):
@@ -205,6 +210,7 @@ class TrajectoryTrackerCore:
         mission_id,
         prediction_sequence_id=None,
         target_endpoint=None,
+        maximum_position_error=None,
     ):
         """Validate then atomically replace the active trajectory."""
         if trajectory.mission_id != int(mission_id):
@@ -229,7 +235,12 @@ class TrajectoryTrackerCore:
             current - desired
             for current, desired in zip(state.position, expected.position)
         ))
-        if position_error > self.maximum_position_error:
+        position_limit = (
+            self.maximum_position_error
+            if maximum_position_error is None
+            else float(maximum_position_error)
+        )
+        if position_error > position_limit:
             return TrajectoryRejectReason.STATE_POSITION_MISMATCH
         velocity_error = self._norm(tuple(
             current - desired
@@ -329,6 +340,8 @@ class TrajectoryTrackerCore:
                 state.position,
             )
         )
+        previous_velocity = self.previous_command_velocity
+        previous_stamp = self.previous_command_stamp
         velocity = self._shape_velocity(feedback_velocity, state.stamp)
         safety = apply_sea_safety_guard(
             current_z=state.position[2],
@@ -344,13 +357,45 @@ class TrajectoryTrackerCore:
             maximum_vertical_speed=self.maximum_vertical_speed,
         )
         velocity = (velocity[0], velocity[1], safety.command_vz)
+        velocity_changed = self._norm(tuple(
+            commanded - planned
+            for commanded, planned in zip(velocity, desired.velocity)
+        )) > 1e-6
+        if velocity_changed and previous_velocity is not None:
+            dt = max(
+                float(state.stamp) - float(previous_stamp),
+                self.control_dt,
+            )
+            raw_acceleration = tuple(
+                (current - previous) / dt
+                for current, previous in zip(velocity, previous_velocity)
+            )
+            horizontal_acceleration = self._limit_horizontal(
+                raw_acceleration[:2],
+                self.maximum_horizontal_acceleration,
+            )
+            acceleration = (
+                horizontal_acceleration[0],
+                horizontal_acceleration[1],
+                max(
+                    min(
+                        raw_acceleration[2],
+                        self.maximum_vertical_acceleration,
+                    ),
+                    -self.maximum_vertical_acceleration,
+                ),
+            )
+        elif velocity_changed:
+            acceleration = (math.nan, math.nan, math.nan)
+        else:
+            acceleration = desired.acceleration
         self.previous_command_velocity = velocity
         self.previous_command_stamp = state.stamp
         self.status = 'TRACKING'
         return TrackingCommand(
             position=desired.position,
             velocity=velocity,
-            acceleration=desired.acceleration,
+            acceleration=acceleration,
             plan_id=trajectory.plan_id,
             safety_state=safety.state.value,
             safety_margin=safety.response_margin,

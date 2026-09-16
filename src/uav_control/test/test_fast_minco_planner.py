@@ -1,5 +1,7 @@
 """Behavior tests for the bounded realtime MINCO search."""
 
+import pytest
+
 from uav_control.guidance.fast_minco_planner import FastMincoPlanner
 from uav_control.guidance.fast_minco_planner import FastPlanningFailure
 
@@ -97,6 +99,22 @@ def test_contact_below_reachable_capture_sphere_is_capture_geometry_failure():
 
     assert outcome.plan is None
     assert outcome.failure == FastPlanningFailure.CAPTURE_GEOMETRY
+
+
+def test_preferred_contact_duration_is_tried_before_rolling_horizon_defaults():
+    """Catch a feasible locked contact time being replaced every planning tick."""
+    planner = make_planner(maximum_horizontal_acceleration=8.0)
+
+    outcome = planner.plan(
+        initial_position=(0.0, 0.0, -1.0),
+        initial_velocity=(4.0, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=moving_target,
+        preferred_duration=2.2,
+    )
+
+    assert outcome.plan is not None
+    assert outcome.plan.duration == pytest.approx(2.2)
 
 
 def test_horizontal_and_vertical_dynamic_failures_are_distinct():

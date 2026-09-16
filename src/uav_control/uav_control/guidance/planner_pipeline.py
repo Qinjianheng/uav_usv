@@ -94,6 +94,7 @@ class PlannerRequest:
     mission_id: int
     prediction: PredictionSeries
     uav: UavKinematicState
+    contact_stamp: float = None
 
     @property
     def source_stamp(self):
@@ -122,6 +123,41 @@ class LatestRequestSlot:
             request = self._pending
             self._pending = None
             return request
+
+
+class ContactTimeSchedule:
+    """Keep one absolute contact time across rolling prediction snapshots."""
+
+    def __init__(self, terminal_threshold=1.0):
+        self.terminal_threshold = max(float(terminal_threshold), 0.0)
+        self.contact_stamp = None
+
+    def reset(self):
+        self.contact_stamp = None
+
+    def accept_plan(self, source_stamp, selected_t_go, rescheduled=False):
+        candidate = float(source_stamp) + float(selected_t_go)
+        if self.contact_stamp is None or bool(rescheduled):
+            self.contact_stamp = candidate
+        return self.contact_stamp
+
+    def remaining_t_go(self, source_stamp):
+        if self.contact_stamp is None:
+            return None
+        return self.contact_stamp - float(source_stamp)
+
+    def preferred_t_go(self, source_stamp):
+        remaining = self.remaining_t_go(source_stamp)
+        if remaining is None or remaining <= 0.0:
+            return None
+        return remaining
+
+    def is_terminal(self, stamp):
+        remaining = self.remaining_t_go(stamp)
+        return (
+            remaining is not None
+            and remaining <= self.terminal_threshold + 1e-9
+        )
 
 
 def validate_input(request, now, maximum_age):

@@ -32,6 +32,11 @@ float64 input_age_at_start
 float64 input_age_at_finish
 float64 input_age_at_publish
 float64 completion_to_publish_delay
+float64 selected_t_go
+builtin_interfaces/Time contact_stamp
+float64 remaining_t_go
+bool terminal_mode
+float64 planned_capture_margin
 uint32 candidate_count
 uint64 replaced_request_count
 uint64 completed_plan_count

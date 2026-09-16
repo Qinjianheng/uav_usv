@@ -76,6 +76,27 @@ def test_old_trajectory_continues_when_new_plan_is_stale():
     assert tracker.command(state(10.10), mission_id=4) is not None
 
 
+def test_terminal_replacement_uses_stricter_position_error():
+    tracker = TrajectoryTrackerCore(maximum_position_error=0.30)
+    displaced = state(position=(0.25, 0.0, -0.99))
+
+    normal = tracker.accept(
+        linear_trajectory(),
+        displaced,
+        mission_id=4,
+    )
+    tracker.reset()
+    terminal = tracker.accept(
+        linear_trajectory(),
+        displaced,
+        mission_id=4,
+        maximum_position_error=0.15,
+    )
+
+    assert normal == TrajectoryRejectReason.NONE
+    assert terminal == TrajectoryRejectReason.STATE_POSITION_MISMATCH
+
+
 def test_final_sea_guard_overrides_unsafe_descent_command():
     tracker = TrajectoryTrackerCore(
         maximum_plan_age=0.125,
@@ -121,6 +142,29 @@ def test_final_sea_guard_overrides_unsafe_descent_command():
 
     assert command.safety_state in ('BRAKE', 'UNRECOVERABLE')
     assert command.velocity[2] < 1.0
+
+
+def test_acceleration_matches_velocity_after_command_shaping():
+    """Catch contradictory velocity and untouched MINCO acceleration outputs."""
+    tracker = TrajectoryTrackerCore(
+        maximum_horizontal_acceleration=1.0,
+        maximum_vertical_acceleration=1.0,
+        position_gain=3.0,
+        control_dt=0.05,
+    )
+    trajectory = linear_trajectory()
+    assert tracker.accept(trajectory, state(), mission_id=4) == (
+        TrajectoryRejectReason.NONE
+    )
+    first = tracker.command(state(10.05), mission_id=4)
+    second = tracker.command(
+        state(10.10, position=(-0.5, 0.0, -0.98)),
+        mission_id=4,
+    )
+
+    expected_ax = (second.velocity[0] - first.velocity[0]) / 0.05
+    assert second.acceleration[0] == pytest.approx(expected_ax)
+    assert abs(second.acceleration[0]) <= 1.0 + 1e-9
 
 
 def test_expired_active_trajectory_enters_recoverable_no_plan_state():

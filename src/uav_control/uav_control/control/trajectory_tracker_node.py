@@ -72,6 +72,11 @@ def trajectory_from_message(message):
         ),
         target_state_source=str(message.target_state_source),
         frame_id=str(message.frame_id),
+        contact_stamp=_stamp_seconds(message.contact_stamp),
+        selected_t_go=float(message.selected_t_go),
+        remaining_t_go=float(message.remaining_t_go),
+        terminal_mode=bool(message.terminal_mode),
+        planned_capture_margin=float(message.planned_capture_margin),
     )
 
 
@@ -103,7 +108,30 @@ def flight_target_from_message(message):
     return FlightKinematicState(values[:3], values[3:])
 
 
-def command_to_setpoint(command, timestamp_us):
+def _wrap_angle(angle):
+    return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def target_facing_yaw(uav_position, target_position):
+    """Return the local-NED heading that points from UAV to target."""
+    return math.atan2(
+        float(target_position[1]) - float(uav_position[1]),
+        float(target_position[0]) - float(uav_position[0]),
+    )
+
+
+def rate_limited_target_yaw(previous_yaw, desired_yaw, maximum_rate, dt):
+    """Move toward target yaw through the shortest wrapped angular delta."""
+    desired_yaw = _wrap_angle(desired_yaw)
+    if previous_yaw is None or not math.isfinite(float(previous_yaw)):
+        return desired_yaw
+    maximum_step = max(float(maximum_rate), 0.0) * max(float(dt), 0.0)
+    delta = _wrap_angle(desired_yaw - float(previous_yaw))
+    delta = max(min(delta, maximum_step), -maximum_step)
+    return _wrap_angle(float(previous_yaw) + delta)
+
+
+def command_to_setpoint(command, timestamp_us, yaw=math.nan):
     """Map the post-guard command to a PX4 position-feedforward setpoint."""
     message = TrajectorySetpoint()
     message.timestamp = int(timestamp_us)
@@ -111,12 +139,12 @@ def command_to_setpoint(command, timestamp_us):
     message.velocity = [float(value) for value in command.velocity]
     message.acceleration = [float(value) for value in command.acceleration]
     message.jerk = [math.nan, math.nan, math.nan]
-    message.yaw = math.nan
+    message.yaw = math.nan if yaw is None else float(yaw)
     message.yawspeed = math.nan
     return message
 
 
-def hold_setpoint(state, timestamp_us):
+def hold_setpoint(state, timestamp_us, yaw=math.nan):
     """Hold the last valid position without a high-speed fallback."""
     message = TrajectorySetpoint()
     message.timestamp = int(timestamp_us)
@@ -124,12 +152,12 @@ def hold_setpoint(state, timestamp_us):
     message.velocity = [0.0, 0.0, 0.0]
     message.acceleration = [math.nan, math.nan, math.nan]
     message.jerk = [math.nan, math.nan, math.nan]
-    message.yaw = math.nan
+    message.yaw = math.nan if yaw is None else float(yaw)
     message.yawspeed = math.nan
     return message
 
 
-def flight_command_to_setpoint(command, timestamp_us):
+def flight_command_to_setpoint(command, timestamp_us, yaw=math.nan):
     """Map non-MINCO flight guidance without mixing PX4 control modes."""
     message = TrajectorySetpoint()
     message.timestamp = int(timestamp_us)
@@ -143,7 +171,7 @@ def flight_command_to_setpoint(command, timestamp_us):
         raise ValueError(f'unsupported flight command mode: {command.mode}')
     message.acceleration = [math.nan, math.nan, math.nan]
     message.jerk = [math.nan, math.nan, math.nan]
-    message.yaw = math.nan
+    message.yaw = math.nan if yaw is None else float(yaw)
     message.yawspeed = math.nan
     return message
 
@@ -190,6 +218,11 @@ class TrajectoryTrackerNode(Node):
         MissionState.PLAN_RECOVERY,
         MissionState.SAFE_WAIT,
     }
+    TERMINAL_STATES = {
+        MissionState.CAPTURE,
+        MissionState.FAILURE,
+        MissionState.ABORTED,
+    }
 
     def __init__(self):
         super().__init__('trajectory_tracker_node')
@@ -219,9 +252,14 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('takeoff_settle_time', 1.0)
         self.declare_parameter('takeoff_maximum_vertical_speed', 1.5)
         self.declare_parameter('takeoff_maximum_vertical_acceleration', 1.0)
+        self.declare_parameter('takeoff_maximum_horizontal_acceleration', 1.5)
+        self.declare_parameter('takeoff_horizontal_start_height', 0.5)
+        self.declare_parameter('takeoff_horizontal_full_height', 1.5)
         self.declare_parameter('follow_distance', 5.0)
         self.declare_parameter('follow_position_gain', 0.8)
         self.declare_parameter('altitude_velocity_gain', 1.0)
+        self.declare_parameter('terminal_replacement_position_error', 0.15)
+        self.declare_parameter('max_observation_yaw_rate', 1.0)
 
         control_rate = float(self.get_parameter('control_rate_hz').value)
         if not math.isfinite(control_rate) or control_rate <= 0.0:
@@ -249,6 +287,12 @@ class TrajectoryTrackerNode(Node):
         )
         self.vehicle_status_timeout = float(
             self.get_parameter('vehicle_status_timeout').value
+        )
+        self.terminal_replacement_position_error = float(
+            self.get_parameter('terminal_replacement_position_error').value
+        )
+        self.max_observation_yaw_rate = float(
+            self.get_parameter('max_observation_yaw_rate').value
         )
         self.tracker = TrajectoryTrackerCore(
             maximum_plan_age=self.get_parameter('maximum_plan_age').value,
@@ -299,6 +343,15 @@ class TrajectoryTrackerNode(Node):
             ).value,
             takeoff_maximum_vertical_acceleration=self.get_parameter(
                 'takeoff_maximum_vertical_acceleration'
+            ).value,
+            takeoff_maximum_horizontal_acceleration=self.get_parameter(
+                'takeoff_maximum_horizontal_acceleration'
+            ).value,
+            takeoff_horizontal_start_height=self.get_parameter(
+                'takeoff_horizontal_start_height'
+            ).value,
+            takeoff_horizontal_full_height=self.get_parameter(
+                'takeoff_horizontal_full_height'
             ).value,
             follow_distance=self.get_parameter('follow_distance').value,
             follow_position_gain=self.get_parameter(
@@ -449,6 +502,8 @@ class TrajectoryTrackerNode(Node):
         self.last_timer_stamp = None
         self.flight_ready = False
         self.takeoff_complete_sent = False
+        self.last_target_yaw = None
+        self.terminal_hold_position = None
         self.get_logger().info(
             'Trajectory tracker ready | rate='
             f'{control_rate:.1f} Hz | plan age<='
@@ -500,9 +555,23 @@ class TrajectoryTrackerNode(Node):
             self.flight_guidance.reset()
             self.last_rejection = TrajectoryRejectReason.NONE
             self.takeoff_complete_sent = False
+            self.last_target_yaw = None
+            self.terminal_hold_position = None
         self.mission_id = new_mission_id
         self.mission_state = int(message.state)
         self.mission_state_name = str(message.state_name) or 'INIT'
+        if self.mission_state in self.TERMINAL_STATES:
+            self.tracker.reset()
+            if self.latest_state is not None:
+                safe_z = min(
+                    self.latest_state.position[2],
+                    self.tracker.sea_surface_z - self.tracker.reserve_clearance,
+                )
+                self.terminal_hold_position = (
+                    self.latest_state.position[0],
+                    self.latest_state.position[1],
+                    safe_z,
+                )
 
     def trajectory_callback(self, message):
         started = time.perf_counter()
@@ -520,7 +589,11 @@ class TrajectoryTrackerNode(Node):
                 try:
                     endpoint = prediction_endpoint_from_message(
                         self.latest_prediction,
-                        trajectory.source_stamp + trajectory.duration,
+                        (
+                            trajectory.contact_stamp
+                            if trajectory.contact_stamp > 0.0
+                            else trajectory.source_stamp + trajectory.duration
+                        ),
                     )
                 except (TypeError, ValueError):
                     rejection = TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
@@ -531,6 +604,11 @@ class TrajectoryTrackerNode(Node):
                         self.mission_id,
                         prediction_sequence_id=None,
                         target_endpoint=endpoint,
+                        maximum_position_error=(
+                            self.terminal_replacement_position_error
+                            if self.mission_state == MissionState.TERMINAL_MINCO
+                            else None
+                        ),
                     )
         self.last_rejection = rejection
         self.last_callback_time = time.perf_counter() - started
@@ -602,6 +680,27 @@ class TrajectoryTrackerNode(Node):
             message.prediction_sequence_id = active.prediction_sequence_id
             message.source_age = max(now - active.source_stamp, 0.0)
             message.remaining_time = max(active.valid_until - now, 0.0)
+            message.selected_t_go = active.selected_t_go
+            message.contact_stamp = _seconds_to_time(active.contact_stamp)
+            message.remaining_t_go = max(active.contact_stamp - now, 0.0)
+            message.terminal_mode = active.terminal_mode
+            message.planned_capture_margin = active.planned_capture_margin
+        if self.latest_target_state is not None and self.latest_state is not None:
+            relative = tuple(
+                target - current
+                for target, current in zip(
+                    self.latest_target_state.position,
+                    self.latest_state.position,
+                )
+            )
+            message.target_distance = math.sqrt(
+                sum(value * value for value in relative)
+            )
+        message.target_yaw = (
+            float(self.last_target_yaw)
+            if self.last_target_yaw is not None
+            else math.nan
+        )
         message.status = str(status)
         message.rejection_reason = self.last_rejection.value
         message.callback_compute_time = float(callback_time)
@@ -656,6 +755,20 @@ class TrajectoryTrackerNode(Node):
         self.last_timer_stamp = now
         self.control_counter += 1
 
+        target_yaw = self.last_target_yaw
+        if self.latest_target_state is not None:
+            desired_yaw = target_facing_yaw(
+                current.position,
+                self.latest_target_state.position,
+            )
+            target_yaw = rate_limited_target_yaw(
+                self.last_target_yaw,
+                desired_yaw,
+                self.max_observation_yaw_rate,
+                dt,
+            )
+            self.last_target_yaw = target_yaw
+
         if self.mission_state in (MissionState.INIT, MissionState.GROUND_HOLD):
             flight_command = self.flight_guidance.command(
                 self.mission_state_name,
@@ -667,6 +780,7 @@ class TrajectoryTrackerNode(Node):
             setpoint = flight_command_to_setpoint(
                 flight_command,
                 timestamp_us,
+                yaw=target_yaw,
             )
             self.preflight_counter += 1
             mode_retry_due = (
@@ -724,6 +838,7 @@ class TrajectoryTrackerNode(Node):
             setpoint = flight_command_to_setpoint(
                 flight_command,
                 timestamp_us,
+                yaw=target_yaw,
             )
             self._publish_bool(
                 self.takeoff_complete_pub,
@@ -746,14 +861,22 @@ class TrajectoryTrackerNode(Node):
             self._request_flight_mode()
             command = self.tracker.command(current, self.mission_id)
             if command is None:
-                setpoint = hold_setpoint(current, timestamp_us)
+                setpoint = hold_setpoint(
+                    current,
+                    timestamp_us,
+                    yaw=target_yaw,
+                )
                 self._publish_offboard_mode(
                     timestamp_us,
                     velocity_control=False,
                 )
                 status = 'NO_VALID_PLAN'
             else:
-                setpoint = command_to_setpoint(command, timestamp_us)
+                setpoint = command_to_setpoint(
+                    command,
+                    timestamp_us,
+                    yaw=target_yaw,
+                )
                 self._publish_offboard_mode(
                     timestamp_us,
                     velocity_control=False,
@@ -761,19 +884,21 @@ class TrajectoryTrackerNode(Node):
                 status = 'TRACKING'
         else:
             self._publish_bool(self.flight_ready_pub, False)
-            flight_command = self.flight_guidance.command(
-                'HOLD',
-                flight_state,
-                None,
-                dt,
-            )
             self._publish_offboard_mode(timestamp_us, velocity_control=False)
-            setpoint = flight_command_to_setpoint(
-                flight_command,
+            hold_state = current
+            if self.terminal_hold_position is not None:
+                hold_state = replace(
+                    current,
+                    position=self.terminal_hold_position,
+                    velocity=(0.0, 0.0, 0.0),
+                )
+            setpoint = hold_setpoint(
+                hold_state,
                 timestamp_us,
+                yaw=target_yaw,
             )
             status = self.mission_state_name
-            command = flight_command
+            command = None
         self.setpoint_pub.publish(setpoint)
         self.reference_pub.publish(setpoint)
         self._publish_diagnostic(

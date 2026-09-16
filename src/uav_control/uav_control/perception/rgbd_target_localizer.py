@@ -21,6 +21,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32
 from uav_usv_interfaces.msg import TargetObservation
 
 from .front_tof_monitor import (
@@ -234,7 +235,7 @@ class RgbdTargetLocalizer(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=2,
+            depth=1,
         )
         color_topic = str(self.get_parameter('color_topic').value)
         depth_topic = str(self.get_parameter('depth_topic').value)
@@ -272,7 +273,14 @@ class RgbdTargetLocalizer(Node):
             str(self.get_parameter('position_topic').value),
             10,
         )
+        self.compute_time_pub = self.create_publisher(
+            Float32,
+            '/diagnostics/rgbd_localizer/compute_time',
+            10,
+        )
 
+        self.latest_color_message = None
+        self.latest_depth_message = None
         self.color_mask = None
         self.color_time = -math.inf
         self.depth = None
@@ -288,7 +296,7 @@ class RgbdTargetLocalizer(Node):
         )
         self.timer = self.create_timer(
             1.0 / localization_rate_hz,
-            self.localize,
+            self.timed_localize,
         )
         self.get_logger().info(
             'RGB-D TARGET LOCALIZER READY | '
@@ -297,26 +305,13 @@ class RgbdTargetLocalizer(Node):
         )
 
     def color_callback(self, message):
-        """Extract the red-target mask from the newest RGB frame."""
-        self.color_mask = red_pixel_mask(
-            message.data,
-            message.width,
-            message.height,
-            message.step,
-            message.encoding.lower(),
-        )
+        """Replace the pending RGB frame without doing image work in DDS."""
+        self.latest_color_message = message
         self.color_time = time.monotonic()
 
     def depth_callback(self, message):
-        """Decode the aligned float depth image."""
-        if message.encoding.lower() not in ('32fc1', '32fc'):
-            return
-        self.depth = decode_float32_depth(
-            message.data,
-            message.width,
-            message.height,
-            message.step,
-        )
+        """Replace the pending depth frame without decoding it in DDS."""
+        self.latest_depth_message = message
         self.depth_time = time.monotonic()
 
     def position_callback(self, message):
@@ -347,12 +342,43 @@ class RgbdTargetLocalizer(Node):
         message.valid = False
         self.observation_pub.publish(message)
 
+    def timed_localize(self):
+        """Measure one rate-limited localization pass, including failures."""
+        started = time.perf_counter()
+        try:
+            self.localize()
+        finally:
+            message = Float32()
+            message.data = float(time.perf_counter() - started)
+            self.compute_time_pub.publish(message)
+
     def localize(self):
         """Publish one synchronized RGB-D target observation when valid."""
         now = time.monotonic()
         if self.color_time <= self.processed_color_time:
             return
         self.processed_color_time = self.color_time
+        color_message = self.latest_color_message
+        depth_message = self.latest_depth_message
+        if color_message is None or depth_message is None:
+            self.publish_invalid_observation()
+            return
+        self.color_mask = red_pixel_mask(
+            color_message.data,
+            color_message.width,
+            color_message.height,
+            color_message.step,
+            color_message.encoding.lower(),
+        )
+        if depth_message.encoding.lower() not in ('32fc1', '32fc'):
+            self.depth = None
+        else:
+            self.depth = decode_float32_depth(
+                depth_message.data,
+                depth_message.width,
+                depth_message.height,
+                depth_message.step,
+            )
         state_fresh = (
             self.uav_position is not None
             and self.uav_attitude is not None

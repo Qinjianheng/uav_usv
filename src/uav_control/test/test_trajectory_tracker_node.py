@@ -4,6 +4,7 @@ import pytest
 from px4_msgs.msg import VehicleLocalPosition
 from uav_usv_interfaces.msg import (
     InterceptTrajectory,
+    MissionState,
     PolynomialSegment,
     PredictedTargetPoint,
     TargetPrediction,
@@ -16,8 +17,13 @@ from uav_control.control.trajectory_tracker_node import tracker_state_from_messa
 from uav_control.control.trajectory_tracker_node import (
     prediction_endpoint_from_message,
 )
+from uav_control.control import trajectory_tracker_node
 from uav_control.control.flight_guidance import FlightGuidanceCommand
+from uav_control.control.flight_guidance import FlightGuidanceCore
 from uav_control.control.trajectory_tracking import TrackingCommand
+from uav_control.control.trajectory_tracking import PolynomialTrajectory
+from uav_control.control.trajectory_tracking import TrackerKinematicState
+from uav_control.control.trajectory_tracking import TrajectoryTrackerCore
 
 
 def make_trajectory_message():
@@ -92,6 +98,99 @@ def test_tracking_command_maps_to_px4_feedforward_setpoint():
     assert list(message.velocity) == pytest.approx([4.0, 5.0, 1.5])
     assert list(message.acceleration) == pytest.approx([0.1, 0.2, 0.3])
     assert math.isnan(message.yaw)
+
+
+def test_target_yaw_wraps_short_way_and_respects_rate_limit():
+    """Catch yaw jumps through 358 degrees at the pi boundary."""
+    previous = math.radians(179.0)
+    desired = math.radians(-179.0)
+
+    command = trajectory_tracker_node.rate_limited_target_yaw(
+        previous_yaw=previous,
+        desired_yaw=desired,
+        maximum_rate=1.0,
+        dt=0.05,
+    )
+    limited = trajectory_tracker_node.rate_limited_target_yaw(
+        previous_yaw=0.0,
+        desired_yaw=math.pi / 2.0,
+        maximum_rate=1.0,
+        dt=0.05,
+    )
+
+    assert command == pytest.approx(desired)
+    assert limited == pytest.approx(0.05)
+
+
+def test_px4_setpoint_uses_explicit_target_facing_yaw():
+    command = TrackingCommand(
+        position=(1.0, 2.0, -3.0),
+        velocity=(4.0, 5.0, 1.5),
+        acceleration=(0.1, 0.2, 0.3),
+        plan_id=8,
+        safety_state='SAFE',
+        safety_margin=0.4,
+    )
+
+    message = command_to_setpoint(command, timestamp_us=55, yaw=1.25)
+
+    assert message.yaw == pytest.approx(1.25)
+
+
+def test_px4_setpoint_tolerates_missing_target_yaw_during_ground_hold():
+    """GROUND_HOLD starts before a target sample can provide a heading."""
+    command = FlightGuidanceCommand(
+        mode='POSITION',
+        position=(0.0, 0.0, 0.0),
+        velocity=(0.0, 0.0, 0.0),
+        acceleration=(0.0, 0.0, 0.0),
+        takeoff_complete=False,
+        far_guidance_available=False,
+        safety_state='SAFE',
+        safety_margin=1.0,
+    )
+
+    message = flight_command_to_setpoint(command, 1, yaw=None)
+
+    assert math.isnan(message.yaw)
+
+
+def test_terminal_mission_clears_plan_and_raises_underwater_hold():
+    """Catch terminal missions continuing an old MINCO or holding below sea."""
+    node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
+    node.mission_id = 3
+    node.tracker = TrajectoryTrackerCore(reserve_clearance=0.07)
+    node.tracker.active_trajectory = PolynomialTrajectory(
+        mission_id=3,
+        plan_id=8,
+        prediction_sequence_id=1,
+        source_stamp=10.0,
+        generated_stamp=10.01,
+        valid_until=12.0,
+        segments=(),
+        terminal_position=(0.0, 0.0, -0.1),
+        terminal_velocity=(0.0, 0.0, 0.0),
+        target_state_source='simulation_truth',
+    )
+    node.latest_state = TrackerKinematicState(
+        stamp=10.5,
+        position=(1.0, 2.0, 0.1),
+        velocity=(0.0, 0.0, 0.0),
+    )
+    node.flight_guidance = FlightGuidanceCore()
+    node.last_rejection = None
+    node.takeoff_complete_sent = False
+    node.terminal_hold_position = None
+    node.last_target_yaw = None
+    message = MissionState()
+    message.mission_id = 3
+    message.state = MissionState.FAILURE
+    message.state_name = 'FAILURE'
+
+    node.mission_callback(message)
+
+    assert node.tracker.active_trajectory is None
+    assert node.terminal_hold_position == pytest.approx((1.0, 2.0, -0.07))
 
 
 def test_invalid_message_is_rejected_before_reaching_tracker_core():

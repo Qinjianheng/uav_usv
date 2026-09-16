@@ -45,6 +45,30 @@ def test_takeoff_uses_bounded_vertical_velocity_and_settle_gate():
     assert settled.takeoff_complete
 
 
+def test_takeoff_blends_horizontal_follow_by_height_without_changing_climb():
+    """Catch modular TAKEOFF regressing to zero horizontal velocity."""
+    guidance = FlightGuidanceCore(
+        flight_altitude=-5.0,
+        takeoff_horizontal_start_height=0.5,
+        takeoff_horizontal_full_height=1.5,
+        takeoff_maximum_horizontal_acceleration=10.0,
+        control_dt=0.05,
+    )
+    target = state((0.0, 5.0, 0.0), (0.0, 4.0, 0.0))
+    guidance.command('GROUND_HOLD', state(), target, 0.05)
+
+    command = guidance.command(
+        'TAKEOFF',
+        state((0.0, 0.0, -1.0)),
+        target,
+        0.05,
+    )
+
+    assert command.velocity[0] == pytest.approx(0.0)
+    assert command.velocity[1] == pytest.approx(2.0)
+    assert command.velocity[2] < 0.0
+
+
 def test_follow_tracks_behind_four_mps_target_within_limits():
     guidance = FlightGuidanceCore(
         flight_altitude=-5.0,

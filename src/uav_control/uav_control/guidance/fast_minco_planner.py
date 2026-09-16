@@ -83,6 +83,7 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         self.realtime_curve_weight = float(target_curve_weight)
         self.clock = clock
         self.last_success_duration = None
+        self._preferred_duration = None
         self._active_deadline = None
         self._deadline_exceeded = False
         self._candidate_failures = []
@@ -140,7 +141,10 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         maximum = self.maximum_duration if maximum is None else float(maximum)
         middle = min(minimum + self.duration_margin, maximum)
         candidates = [minimum, middle, maximum]
-        if (
+        preferred = self._preferred_duration
+        if preferred is not None and minimum <= preferred <= maximum:
+            candidates = [preferred, minimum, maximum]
+        elif (
             self.last_success_duration is not None
             and minimum <= self.last_success_duration <= maximum
         ):
@@ -247,6 +251,10 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
 
     def plan(self, *args, **kwargs):
         """Return the first feasible candidate within the hard deadline."""
+        preferred_duration = kwargs.pop('preferred_duration', None)
+        self._preferred_duration = (
+            None if preferred_duration is None else float(preferred_duration)
+        )
         start = self.clock()
         self._active_deadline = start + self.deadline_seconds
         self._deadline_exceeded = False
@@ -258,6 +266,7 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
                 plan = None
         finally:
             self._active_deadline = None
+            self._preferred_duration = None
 
         if plan is None:
             return FastPlanningOutcome(

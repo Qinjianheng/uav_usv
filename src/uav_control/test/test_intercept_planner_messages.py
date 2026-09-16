@@ -127,6 +127,10 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
         planning_started_stamp=10.02,
         generated_stamp=10.04,
         target_state_source='simulation_truth',
+        contact_stamp=12.0,
+        remaining_t_go=1.96,
+        terminal_mode=False,
+        planned_capture_margin=0.20,
     )
 
     assert message.mission_id == 2
@@ -139,3 +143,8 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
         for segment in message.segments
     ) == pytest.approx(message.trajectory_duration)
     assert all(len(segment.coefficients) == 18 for segment in message.segments)
+    assert message.contact_stamp.sec == 12
+    assert message.selected_t_go == pytest.approx(outcome.plan.duration)
+    assert message.remaining_t_go == pytest.approx(1.96)
+    assert not message.terminal_mode
+    assert message.planned_capture_margin == pytest.approx(0.20)

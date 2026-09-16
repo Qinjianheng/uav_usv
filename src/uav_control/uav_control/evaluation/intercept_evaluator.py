@@ -1,6 +1,7 @@
 """Pure truth-only interception evaluation and event-based statistics."""
 
 import csv
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -14,6 +15,87 @@ class KinematicState:
 
     position: tuple
     velocity: tuple
+
+
+class TimestampedStateHistory:
+    """Bounded kinematic history with linear interpolation in ROS time."""
+
+    def __init__(self, maximum_age=0.25):
+        self.maximum_age = max(float(maximum_age), 1e-3)
+        self._samples = deque()
+
+    @property
+    def latest_stamp(self):
+        return self._samples[-1][0] if self._samples else None
+
+    def clear(self):
+        self._samples.clear()
+
+    def add(self, stamp, state):
+        stamp = float(stamp)
+        if not math.isfinite(stamp):
+            raise ValueError('state history stamp must be finite')
+        if self._samples and stamp < self._samples[-1][0] - 1e-9:
+            return False
+        if self._samples and abs(stamp - self._samples[-1][0]) <= 1e-9:
+            self._samples[-1] = stamp, state
+        else:
+            self._samples.append((stamp, state))
+        cutoff = stamp - self.maximum_age
+        while len(self._samples) > 2 and self._samples[1][0] < cutoff:
+            self._samples.popleft()
+        return True
+
+    @staticmethod
+    def _blend(first, second, fraction):
+        return tuple(
+            start + fraction * (finish - start)
+            for start, finish in zip(first, second)
+        )
+
+    def state_at(self, stamp):
+        stamp = float(stamp)
+        if not self._samples:
+            return None
+        if stamp < self._samples[0][0] - 1e-9:
+            return None
+        if stamp > self._samples[-1][0] + 1e-9:
+            return None
+        for index, (sample_stamp, state) in enumerate(self._samples):
+            if abs(stamp - sample_stamp) <= 1e-9:
+                return state
+            if sample_stamp > stamp and index > 0:
+                previous_stamp, previous = self._samples[index - 1]
+                span = max(sample_stamp - previous_stamp, 1e-9)
+                fraction = (stamp - previous_stamp) / span
+                return KinematicState(
+                    position=self._blend(
+                        previous.position,
+                        state.position,
+                        fraction,
+                    ),
+                    velocity=self._blend(
+                        previous.velocity,
+                        state.velocity,
+                        fraction,
+                    ),
+                )
+        return self._samples[-1][1]
+
+
+def synchronize_histories(uav_history, target_history):
+    """Return both histories interpolated at their newest common time."""
+    if (
+        uav_history.latest_stamp is None
+        or target_history.latest_stamp is None
+    ):
+        return None
+    stamp = min(uav_history.latest_stamp, target_history.latest_stamp)
+    uav = uav_history.state_at(stamp)
+    target = target_history.state_at(stamp)
+    if uav is None or target is None:
+        return None
+    return stamp, uav, target
 
 
 @dataclass(frozen=True)
@@ -212,6 +294,50 @@ class PlannerEventAccumulator:
                 default=0.0,
             ),
         }
+
+
+class RuntimePerformanceAccumulator:
+    """Aggregate runtime rates and callback costs by target-distance band."""
+
+    BUCKETS = (
+        ('less_than_2m', lambda distance: distance < 2.0),
+        ('between_2m_and_5m', lambda distance: distance <= 5.0),
+        ('between_5m_and_10m', lambda distance: distance <= 10.0),
+        ('greater_than_10m', lambda _distance: True),
+    )
+
+    def __init__(self):
+        self._values = {
+            name: {}
+            for name, _predicate in self.BUCKETS
+        }
+
+    def observe(self, distance, metrics):
+        distance = float(distance)
+        if not math.isfinite(distance):
+            return
+        bucket = next(
+            name
+            for name, predicate in self.BUCKETS
+            if predicate(distance)
+        )
+        for name, value in dict(metrics).items():
+            value = float(value)
+            if math.isfinite(value) and value >= 0.0:
+                self._values[bucket].setdefault(str(name), []).append(value)
+
+    def summary(self):
+        document = {}
+        for bucket, metrics in self._values.items():
+            document[bucket] = {}
+            for name, values in metrics.items():
+                document[bucket][name] = {
+                    'count': len(values),
+                    'p50': _percentile(values, 0.50),
+                    'p95': _percentile(values, 0.95),
+                    'max': max(values, default=0.0),
+                }
+        return document
 
 
 class InterceptEvaluatorCore:
@@ -474,7 +600,19 @@ class ExperimentArtifactWriter:
         'distance', 'horizontal_distance', 'vertical_error',
         'relative_speed', 'closing_speed',
         'controller_status', 'plan_id', 'plan_source_age',
+        'tracker_rejection_reason',
+        'plan_prediction_sequence_id', 'latest_prediction_sequence_id',
+        'planner_source_age_at_publish',
+        'planner_completion_to_publish_delay',
+        'selected_t_go', 'contact_stamp', 'remaining_t_go',
+        'terminal_mode', 'planned_capture_margin', 'target_yaw',
         'sea_safety_state', 'sea_safety_margin',
+        'gazebo_real_time_factor',
+        'front_rgb_hz', 'front_depth_hz',
+        'down_rgb_hz', 'down_depth_hz',
+        'rgbd_localizer_compute_time',
+        'front_monitor_compute_time', 'down_monitor_compute_time',
+        'tracker_hz', 'tracker_callback_time', 'planner_compute_time',
         'prediction_0p5_error', 'prediction_1p0_error',
         'prediction_2p0_error',
     )

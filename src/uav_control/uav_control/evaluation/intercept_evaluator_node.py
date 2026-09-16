@@ -9,7 +9,7 @@ from px4_msgs.msg import VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptResult
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
 from uav_usv_interfaces.msg import TargetPrediction, TargetState
@@ -19,6 +19,11 @@ from uav_control.tracking.prediction_error_tracker import PredictionErrorTracker
 from .intercept_evaluator import ExperimentArtifactWriter
 from .intercept_evaluator import InterceptEvaluatorCore, KinematicState
 from .intercept_evaluator import PlannerEventAccumulator
+from .intercept_evaluator import RuntimePerformanceAccumulator
+from .intercept_evaluator import TimestampedStateHistory
+from .intercept_evaluator import synchronize_histories
+from .gazebo_terminal import GazeboTerminalPauser, GazeboWorldPauseClient
+from uav_control.common.runtime_performance import RateMeter
 
 
 PREDICTION_HORIZONS = (0.5, 1.0, 2.0)
@@ -133,7 +138,8 @@ class InterceptEvaluatorNode(Node):
     def __init__(self):
         super().__init__('intercept_evaluator_node')
         self.declare_parameter('evaluation_rate_hz', 20.0)
-        self.declare_parameter('capture_radius', 0.25)
+        self.declare_parameter('evaluation_capture_radius', 0.50)
+        self.declare_parameter('planned_capture_radius', 0.35)
         self.declare_parameter('sea_surface_z', 0.0)
         self.declare_parameter('enable_sea_contact_failure', True)
         self.declare_parameter('maximum_duration', 30.0)
@@ -142,14 +148,21 @@ class InterceptEvaluatorNode(Node):
             'data/experiments/current',
         )
         self.declare_parameter('truth_topic', '/target/state')
+        self.declare_parameter('gazebo_world_name', 'default')
+        self.declare_parameter('gazebo_pause_timeout_ms', 250)
+        self.declare_parameter('gazebo_pause_maximum_attempts', 2)
+        self.declare_parameter('gazebo_pause_retry_delay', 0.05)
         rate = float(self.get_parameter('evaluation_rate_hz').value)
         if rate <= 0.0:
             raise ValueError('evaluation_rate_hz must be positive')
-        self.capture_radius = float(
-            self.get_parameter('capture_radius').value
+        self.evaluation_capture_radius = float(
+            self.get_parameter('evaluation_capture_radius').value
+        )
+        self.planned_capture_radius = float(
+            self.get_parameter('planned_capture_radius').value
         )
         self.evaluator = InterceptEvaluatorCore(
-            capture_radius=self.capture_radius,
+            capture_radius=self.evaluation_capture_radius,
             sea_surface_z=self.get_parameter('sea_surface_z').value,
             enable_sea_contact_failure=self.get_parameter(
                 'enable_sea_contact_failure'
@@ -160,6 +173,27 @@ class InterceptEvaluatorNode(Node):
             self.get_parameter('log_directory').value
         )
         self.truth_topic = str(self.get_parameter('truth_topic').value)
+        self.gazebo_pauser = None
+        try:
+            pause_client = GazeboWorldPauseClient(
+                world_name=self.get_parameter('gazebo_world_name').value,
+                request_timeout_ms=self.get_parameter(
+                    'gazebo_pause_timeout_ms'
+                ).value,
+            )
+            self.gazebo_pauser = GazeboTerminalPauser(
+                pause_client.pause_world,
+                maximum_attempts=self.get_parameter(
+                    'gazebo_pause_maximum_attempts'
+                ).value,
+                retry_delay=self.get_parameter(
+                    'gazebo_pause_retry_delay'
+                ).value,
+            )
+        except (ImportError, RuntimeError, TypeError, ValueError) as error:
+            self.get_logger().warn(
+                f'Independent Gazebo pause client unavailable: {error}'
+            )
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -221,6 +255,34 @@ class InterceptEvaluatorNode(Node):
             self.mission_callback,
             result_qos,
         )
+        self.performance_values = {}
+        performance_topics = {
+            'gazebo_real_time_factor': '/simulation/gazebo/real_time_factor',
+            'front_rgb_hz': '/diagnostics/front/rgb_frame_hz',
+            'front_depth_hz': '/diagnostics/front/depth_frame_hz',
+            'down_rgb_hz': '/diagnostics/down/rgb_frame_hz',
+            'down_depth_hz': '/diagnostics/down/depth_frame_hz',
+            'rgbd_localizer_compute_time': (
+                '/diagnostics/rgbd_localizer/compute_time'
+            ),
+            'front_monitor_compute_time': (
+                '/diagnostics/front/monitor_compute_time'
+            ),
+            'down_monitor_compute_time': (
+                '/diagnostics/down/monitor_compute_time'
+            ),
+        }
+        self.performance_subscriptions = [
+            self.create_subscription(
+                Float32,
+                topic,
+                lambda message, name=name: self._performance_callback(
+                    name, message
+                ),
+                sensor_qos,
+            )
+            for name, topic in performance_topics.items()
+        ]
         self.result_pub = self.create_publisher(
             InterceptResult,
             '/simulation/impact/result',
@@ -235,8 +297,13 @@ class InterceptEvaluatorNode(Node):
 
         self.latest_uav = None
         self.latest_truth = None
+        self.uav_history = TimestampedStateHistory(0.5)
+        self.truth_history = TimestampedStateHistory(0.5)
+        self.last_synchronized_stamp = None
         self.latest_mission = None
         self.latest_controller = None
+        self.latest_prediction = None
+        self.latest_planner_diagnostic = None
         self.latest_tracker_rejection_reason = ''
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker = PredictionErrorTracker(PREDICTION_HORIZONS)
@@ -248,11 +315,15 @@ class InterceptEvaluatorNode(Node):
         }
         self.latest_prediction_error = {}
         self.controller_compute_times = []
+        self.tracker_rate = RateMeter(window_seconds=1.0)
+        self.runtime_performance = RuntimePerformanceAccumulator()
+        self.terminal_pause_result = None
         self.writer = None
         self.result_published = False
         self.get_logger().info(
             'Truth-only evaluator ready | truth='
-            f'{self.truth_topic} | capture={self.capture_radius:.2f} m | '
+            f'{self.truth_topic} | capture='
+            f'{self.evaluation_capture_radius:.2f} m | '
             f'output={self.log_directory}'
         )
 
@@ -261,9 +332,12 @@ class InterceptEvaluatorNode(Node):
 
     def uav_callback(self, message):
         try:
-            self.latest_uav = uav_from_message(message)
+            state = uav_from_message(message)
         except ValueError:
             self.latest_uav = None
+            return
+        self.latest_uav = state
+        self.uav_history.add(self._now(), state)
 
     def truth_callback(self, message):
         try:
@@ -272,6 +346,7 @@ class InterceptEvaluatorNode(Node):
             self.latest_truth = None
             return
         truth_stamp = _stamp_seconds(message.stamp) or self._now()
+        self.truth_history.add(truth_stamp, self.latest_truth)
         for model in ('guidance', 'kf'):
             for horizon in PREDICTION_HORIZONS:
                 evaluation = self.prediction_tracker.evaluate(
@@ -315,6 +390,7 @@ class InterceptEvaluatorNode(Node):
         self.prediction_tracker.add('kf', stamp, predictions)
 
     def prediction_callback(self, message):
+        self.latest_prediction = message if message.valid else self.latest_prediction
         key = int(message.mission_id), int(message.sequence_id)
         if not message.valid or key in self.prediction_sequences:
             return
@@ -343,6 +419,7 @@ class InterceptEvaluatorNode(Node):
         return names.get(int(message.failure_reason), str(message.failure_reason))
 
     def planner_callback(self, message):
+        self.latest_planner_diagnostic = message
         self.event_metrics.observe_planner(
             mission_id=message.mission_id,
             plan_id=message.plan_id,
@@ -358,6 +435,7 @@ class InterceptEvaluatorNode(Node):
         )
 
     def controller_callback(self, message):
+        self.tracker_rate.observe(self._now())
         self.latest_controller = message
         self.event_metrics.observe_controller(
             message.mission_id,
@@ -373,9 +451,15 @@ class InterceptEvaluatorNode(Node):
             max(float(message.callback_compute_time), 0.0)
         )
 
+    def _performance_callback(self, name, message):
+        value = float(message.data)
+        if math.isfinite(value) and value >= 0.0:
+            self.performance_values[str(name)] = value
+
     def _config_snapshot(self):
         return {
-            'capture_radius': self.capture_radius,
+            'evaluation_capture_radius': self.evaluation_capture_radius,
+            'planned_capture_radius': self.planned_capture_radius,
             'sea_surface_z': self.evaluator.sea_surface_z,
             'enable_sea_contact_failure': (
                 self.evaluator.enable_sea_contact_failure
@@ -394,6 +478,12 @@ class InterceptEvaluatorNode(Node):
             values.clear()
         self.latest_prediction_error.clear()
         self.controller_compute_times.clear()
+        self.uav_history.clear()
+        self.truth_history.clear()
+        self.last_synchronized_stamp = None
+        self.tracker_rate = RateMeter(window_seconds=1.0)
+        self.runtime_performance = RuntimePerformanceAccumulator()
+        self.terminal_pause_result = None
         self.latest_tracker_rejection_reason = ''
         self.writer = ExperimentArtifactWriter(
             self.log_directory,
@@ -465,6 +555,16 @@ class InterceptEvaluatorNode(Node):
                 self.latest_planner_diagnostic.completion_to_publish_delay
                 if self.latest_planner_diagnostic else 0.0
             ),
+            'selected_t_go': controller.selected_t_go if controller else 0.0,
+            'contact_stamp': (
+                _stamp_seconds(controller.contact_stamp) if controller else 0.0
+            ),
+            'remaining_t_go': controller.remaining_t_go if controller else 0.0,
+            'terminal_mode': controller.terminal_mode if controller else False,
+            'planned_capture_margin': (
+                controller.planned_capture_margin if controller else 0.0
+            ),
+            'target_yaw': controller.target_yaw if controller else math.nan,
             'plan_source_age': controller.source_age if controller else 0.0,
             'sea_safety_state': (
                 controller.safety_state if controller else ''
@@ -483,6 +583,15 @@ class InterceptEvaluatorNode(Node):
             'prediction_2p0_error': self.latest_prediction_error.get(
                 ('guidance', 2.0),
                 '',
+            ),
+            **self.performance_values,
+            'tracker_hz': self.tracker_rate.rate(now),
+            'tracker_callback_time': (
+                controller.callback_compute_time if controller else 0.0
+            ),
+            'planner_compute_time': (
+                self.latest_planner_diagnostic.compute_time
+                if self.latest_planner_diagnostic else 0.0
             ),
         }
 
@@ -508,7 +617,8 @@ class InterceptEvaluatorNode(Node):
             'outcome': result.outcome,
             'failure_reason': '' if result.success else result.reason,
             'elapsed_time': result.elapsed_time,
-            'capture_radius': self.capture_radius,
+            'evaluation_capture_radius': self.evaluation_capture_radius,
+            'planned_capture_radius': self.planned_capture_radius,
             'minimum_distance': result.minimum_distance,
             'horizontal_distance': result.horizontal_distance,
             'vertical_error': result.vertical_error,
@@ -524,7 +634,21 @@ class InterceptEvaluatorNode(Node):
             'truth_role': 'evaluation_only',
             'prediction_errors': self._prediction_summary(),
             'controller_callback_p95': 0.0,
+            'runtime_performance_by_distance': (
+                self.runtime_performance.summary()
+            ),
         }
+        if self.terminal_pause_result is not None:
+            summary.update({
+                'terminal_event': self.terminal_pause_result.terminal_event,
+                'gazebo_pause_requested': (
+                    self.terminal_pause_result.gazebo_pause_requested
+                ),
+                'gazebo_pause_succeeded': (
+                    self.terminal_pause_result.gazebo_pause_succeeded
+                ),
+                'gazebo_pause_attempts': self.terminal_pause_result.attempts,
+            })
         if self.controller_compute_times:
             ordered = sorted(self.controller_compute_times)
             summary['controller_callback_p95'] = ordered[
@@ -546,22 +670,55 @@ class InterceptEvaluatorNode(Node):
             or self.latest_truth is None
         ):
             return
-        now = self._now()
+        synchronized = synchronize_histories(
+            self.uav_history,
+            self.truth_history,
+        )
+        if synchronized is None:
+            return
+        now, self.latest_uav, self.latest_truth = synchronized
+        if (
+            self.last_synchronized_stamp is not None
+            and now <= self.last_synchronized_stamp + 1e-9
+        ):
+            return
+        self.last_synchronized_stamp = now
         result = self.evaluator.update(
             now,
             self.latest_uav,
             self.latest_truth,
         )
         if self.writer is not None:
-            self.writer.append_sample(self._sample_row(now))
+            sample = self._sample_row(now)
+            self.writer.append_sample(sample)
+            runtime_metrics = dict(self.performance_values)
+            runtime_metrics.update({
+                'tracker_hz': sample['tracker_hz'],
+                'tracker_callback_time': sample['tracker_callback_time'],
+                'planner_compute_time': sample['planner_compute_time'],
+            })
+            self.runtime_performance.observe(
+                sample['distance'],
+                runtime_metrics,
+            )
         if result is None:
             return
         self.result_pub.publish(
-            result_to_message(result, now, self.capture_radius)
+            result_to_message(result, now, self.evaluation_capture_radius)
         )
         hit = Bool()
         hit.data = bool(result.success)
         self.hit_pub.publish(hit)
+        if self.gazebo_pauser is not None:
+            self.terminal_pause_result = self.gazebo_pauser.pause(result.reason)
+        else:
+            from .gazebo_terminal import GazeboPauseResult
+            self.terminal_pause_result = GazeboPauseResult(
+                terminal_event=result.reason,
+                gazebo_pause_requested=False,
+                gazebo_pause_succeeded=False,
+                attempts=0,
+            )
         if self.writer is not None:
             paths = self.writer.finalize(self._summary(result))
             self.get_logger().info(

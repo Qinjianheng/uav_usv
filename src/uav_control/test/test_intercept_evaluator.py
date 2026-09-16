@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from uav_control.evaluation import intercept_evaluator
 from uav_control.evaluation.intercept_evaluator import ExperimentArtifactWriter
 from uav_control.evaluation.intercept_evaluator import InterceptEvaluatorCore
 from uav_control.evaluation.intercept_evaluator import KinematicState
@@ -30,6 +31,44 @@ def test_capture_is_detected_between_truth_samples():
     assert result.success
     assert result.reason == 'CAPTURE_RADIUS_REACHED'
     assert result.minimum_distance == pytest.approx(0.0)
+
+
+def test_async_truth_histories_are_interpolated_before_capture_evaluation():
+    """Catch false misses caused by pairing latest samples from different times."""
+    uav_history = intercept_evaluator.TimestampedStateHistory(0.25)
+    target_history = intercept_evaluator.TimestampedStateHistory(0.25)
+    evaluator = InterceptEvaluatorCore(capture_radius=0.50)
+    evaluator.begin(mission_id=8, now=10.025)
+
+    uav_history.add(10.00, state((0.0, 0.0, -0.1)))
+    uav_history.add(10.05, state((0.0, 0.0, -0.1)))
+    target_history.add(
+        10.025,
+        state((-0.70, 0.0, -0.1), (4.0, 0.0, 0.0)),
+    )
+    synchronized = intercept_evaluator.synchronize_histories(
+        uav_history,
+        target_history,
+    )
+    assert synchronized is not None
+    stamp, uav, target = synchronized
+    assert stamp == pytest.approx(10.025)
+    assert evaluator.update(stamp, uav, target) is None
+
+    target_history.add(
+        10.075,
+        state((-0.50, 0.0, -0.1), (4.0, 0.0, 0.0)),
+    )
+    uav_history.add(10.10, state((0.0, 0.0, -0.1)))
+    stamp, uav, target = intercept_evaluator.synchronize_histories(
+        uav_history,
+        target_history,
+    )
+    result = evaluator.update(stamp, uav, target)
+
+    assert stamp == pytest.approx(10.075)
+    assert result.success
+    assert result.minimum_distance == pytest.approx(0.50)
 
 
 def test_sea_contact_before_capture_is_a_failure():
@@ -132,6 +171,20 @@ def test_empty_event_rates_are_numeric_not_null():
     assert summary['tracker_rejection_histogram'] == {}
     assert summary['planner_source_age_at_publish_p95'] == 0.0
     assert summary['planner_publish_delay_p95'] == 0.0
+
+
+def test_runtime_performance_is_grouped_by_target_distance():
+    """Catch near-target camera load being hidden by one whole-run average."""
+    metrics = intercept_evaluator.RuntimePerformanceAccumulator()
+    metrics.observe(12.0, {'tracker_hz': 20.0, 'front_rgb_hz': 19.0})
+    metrics.observe(3.0, {'tracker_hz': 19.5, 'front_rgb_hz': 10.0})
+    metrics.observe(1.5, {'tracker_hz': 19.0, 'front_rgb_hz': 7.0})
+
+    summary = metrics.summary()
+
+    assert summary['greater_than_10m']['front_rgb_hz']['p50'] == 19.0
+    assert summary['between_2m_and_5m']['front_rgb_hz']['p50'] == 10.0
+    assert summary['less_than_2m']['front_rgb_hz']['p50'] == 7.0
 
 
 def test_artifact_writer_creates_csv_summary_and_config(tmp_path):

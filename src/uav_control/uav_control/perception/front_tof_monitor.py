@@ -19,6 +19,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, Float32, String, UInt64
 
+from uav_control.common.runtime_performance import RateMeter
+
 
 COLOR_PIXEL_FORMATS = {
     3: ('rgb8', 3, 0, 1, 2),
@@ -254,6 +256,8 @@ class FrontTofMonitor(Node):
         self.declare_parameter('camera_pitch_down', 0.20944)
         self.declare_parameter('target_visual_height_offset', 0.42)
         self.declare_parameter('analysis_rate_hz', 10.0)
+        self.declare_parameter('gazebo_world_name', 'default')
+        self.declare_parameter('publish_gazebo_rtf', True)
 
         self.camera_name = str(
             self.get_parameter('camera_name').value
@@ -352,7 +356,7 @@ class FrontTofMonitor(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=2,
+            depth=1,
         )
         status_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -440,6 +444,19 @@ class FrontTofMonitor(Node):
             self.diagnostic_prefix + '/target_truth_renderable',
             status_qos,
         )
+        performance_prefix = f'/diagnostics/{self.camera_name}'
+        self.rgb_hz_pub = self.create_publisher(
+            Float32, performance_prefix + '/rgb_frame_hz', 10
+        )
+        self.depth_hz_pub = self.create_publisher(
+            Float32, performance_prefix + '/depth_frame_hz', 10
+        )
+        self.compute_time_pub = self.create_publisher(
+            Float32, performance_prefix + '/monitor_compute_time', 10
+        )
+        self.gazebo_rtf_pub = self.create_publisher(
+            Float32, '/simulation/gazebo/real_time_factor', 10
+        )
 
         self.target_sub = self.create_subscription(
             Point,
@@ -478,6 +495,10 @@ class FrontTofMonitor(Node):
         self.uav_attitude = None
         self.samples = deque()
         self.last_status = None
+        self.rgb_rate_meter = RateMeter(window_seconds=1.0)
+        self.depth_rate_meter = RateMeter(window_seconds=1.0)
+        self.last_monitor_compute_time = 0.0
+        self.gazebo_real_time_factor = 0.0
         self.shutting_down = False
 
         from gz.msgs10.image_pb2 import Image as GazeboImage
@@ -497,6 +518,18 @@ class FrontTofMonitor(Node):
         if not color_subscribed or not depth_subscribed:
             raise RuntimeError(
                 f'Could not subscribe to {self.camera_name} ToF streams.'
+            )
+        self.world_stats_topic = None
+        if bool(self.get_parameter('publish_gazebo_rtf').value):
+            from gz.msgs10.world_stats_pb2 import WorldStatistics
+            world_name = str(
+                self.get_parameter('gazebo_world_name').value
+            ).strip().strip('/')
+            self.world_stats_topic = f'/world/{world_name}/stats'
+            self.gazebo_node.subscribe(
+                WorldStatistics,
+                self.world_stats_topic,
+                self.world_stats_callback,
             )
 
         self.status_timer = self.create_timer(0.1, self.publish_status)
@@ -542,6 +575,7 @@ class FrontTofMonitor(Node):
         if self.shutting_down:
             return
         now = time.monotonic()
+        self.rgb_rate_meter.observe(now)
         with self.lock:
             if now - self.last_color_analysis_time < self.analysis_period:
                 return
@@ -604,11 +638,13 @@ class FrontTofMonitor(Node):
                 stamp,
             )
         )
+        self.last_monitor_compute_time = time.monotonic() - now
 
     def depth_callback(self, message):
         if self.shutting_down:
             return
         now = time.monotonic()
+        self.depth_rate_meter.observe(now)
         with self.lock:
             if now - self.last_depth_analysis_time < self.analysis_period:
                 return
@@ -626,6 +662,15 @@ class FrontTofMonitor(Node):
         with self.lock:
             self.last_depth_time = now
             self.depth = depth
+        self.last_monitor_compute_time = max(
+            self.last_monitor_compute_time,
+            time.monotonic() - now,
+        )
+
+    def world_stats_callback(self, message):
+        value = float(message.real_time_factor)
+        if math.isfinite(value) and value >= 0.0:
+            self.gazebo_real_time_factor = value
 
     def make_camera_info(self, width, height, stamp):
         fx, fy, cx, cy = camera_intrinsics(
@@ -790,6 +835,19 @@ class FrontTofMonitor(Node):
         truth_renderable_message = Bool()
         truth_renderable_message.data = truth_renderable
         self.truth_renderable_pub.publish(truth_renderable_message)
+        rgb_hz_message = Float32()
+        rgb_hz_message.data = float(self.rgb_rate_meter.rate(now))
+        self.rgb_hz_pub.publish(rgb_hz_message)
+        depth_hz_message = Float32()
+        depth_hz_message.data = float(self.depth_rate_meter.rate(now))
+        self.depth_hz_pub.publish(depth_hz_message)
+        compute_message = Float32()
+        compute_message.data = float(self.last_monitor_compute_time)
+        self.compute_time_pub.publish(compute_message)
+        if self.world_stats_topic is not None:
+            rtf_message = Float32()
+            rtf_message.data = float(self.gazebo_real_time_factor)
+            self.gazebo_rtf_pub.publish(rtf_message)
 
         status = (
             visible,
@@ -830,6 +888,8 @@ class FrontTofMonitor(Node):
         if hasattr(self, 'gazebo_node'):
             self.gazebo_node.unsubscribe(self.color_gazebo_topic)
             self.gazebo_node.unsubscribe(self.depth_gazebo_topic)
+            if self.world_stats_topic is not None:
+                self.gazebo_node.unsubscribe(self.world_stats_topic)
             time.sleep(0.1)
         return super().destroy_node()
 

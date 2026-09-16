@@ -31,7 +31,22 @@ def test_shared_dynamic_and_safety_limits_are_synchronized():
         assert tracker[name] == pytest.approx(planner[name])
     assert tracker['sea_surface_z'] == pytest.approx(planner['sea_surface_z'])
     assert evaluator['sea_surface_z'] == pytest.approx(planner['sea_surface_z'])
-    assert evaluator['capture_radius'] == pytest.approx(planner['capture_radius'])
+    assert evaluator['evaluation_capture_radius'] == pytest.approx(0.50)
+    assert planner['planned_capture_radius'] == pytest.approx(0.35)
+    assert evaluator['planned_capture_radius'] == pytest.approx(
+        planner['planned_capture_radius']
+    )
+
+
+def test_shadow_perception_rates_are_below_control_rate():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    tracker = parameters(config, 'trajectory_tracker_node')
+    localizer = parameters(config, 'rgbd_target_localizer')
+    front = parameters(config, 'front_tof_monitor')
+
+    assert tracker['control_rate_hz'] == pytest.approx(20.0)
+    assert localizer['localization_rate_hz'] == pytest.approx(10.0)
+    assert front['analysis_rate_hz'] == pytest.approx(5.0)
 
 
 def test_plan_age_bound_matches_four_mps_endpoint_tolerance():

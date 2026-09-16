@@ -22,6 +22,7 @@ from .fast_minco_planner import FastMincoPlanner, FastPlanningFailure
 from .fast_minco_planner import FastPlanningOutcome
 from .finite_horizon_intercept_planner import PlannerDiagnostics
 from .planner_pipeline import LatestRequestSlot, PlannerRequest
+from .planner_pipeline import ContactTimeSchedule
 from .planner_pipeline import PredictionSample, PredictionSeries
 from .planner_pipeline import UavKinematicState, validate_input
 from .planner_pipeline import validate_plan_arrival, validate_target_shift
@@ -97,6 +98,10 @@ def plan_to_message(
     generated_stamp,
     target_state_source,
     frame_id='local_ned',
+    contact_stamp=None,
+    remaining_t_go=None,
+    terminal_mode=False,
+    planned_capture_margin=0.0,
 ):
     """Serialize a complete MINCO polynomial without resetting plan age."""
     message = InterceptTrajectory()
@@ -109,11 +114,20 @@ def plan_to_message(
     )
     message.generated_stamp = seconds_to_time(generated_stamp)
     message.valid_until = seconds_to_time(source_stamp + plan.duration)
+    if contact_stamp is None:
+        contact_stamp = source_stamp + plan.duration
+    if remaining_t_go is None:
+        remaining_t_go = plan.duration
+    message.contact_stamp = seconds_to_time(contact_stamp)
     message.target_state_source = str(target_state_source)
     message.frame_id = str(frame_id)
     message.planner_type = str(plan.planner_type)
     message.t_go = float(plan.duration)
     message.trajectory_duration = float(plan.duration)
+    message.selected_t_go = float(plan.duration)
+    message.remaining_t_go = max(float(remaining_t_go), 0.0)
+    message.terminal_mode = bool(terminal_mode)
+    message.planned_capture_margin = float(planned_capture_margin)
 
     segments = []
     coefficients = plan.minco_trajectory.coefficients
@@ -205,7 +219,8 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('maximum_vertical_acceleration', 3.0)
         self.declare_parameter('preferred_closing_speed', 1.5)
         self.declare_parameter('conservative_closing_speed', 0.3)
-        self.declare_parameter('capture_radius', 0.25)
+        self.declare_parameter('planned_capture_radius', 0.35)
+        self.declare_parameter('terminal_time_threshold', 1.0)
         self.declare_parameter('sea_surface_z', 0.0)
         self.declare_parameter('contact_clearance', 0.05)
         self.declare_parameter('preferred_clearance', 0.1)
@@ -233,6 +248,12 @@ class InterceptPlannerNode(Node):
             self.get_parameter('deadline_seconds').value
         )
         self.frame_id = str(self.get_parameter('frame_id').value)
+        self.planned_capture_radius = float(
+            self.get_parameter('planned_capture_radius').value
+        )
+        self.terminal_time_threshold = float(
+            self.get_parameter('terminal_time_threshold').value
+        )
         self.planner = FastMincoPlanner(
             minimum_duration=self.get_parameter('minimum_duration').value,
             maximum_duration=self.get_parameter('maximum_duration').value,
@@ -256,7 +277,7 @@ class InterceptPlannerNode(Node):
             conservative_closing_speed=self.get_parameter(
                 'conservative_closing_speed'
             ).value,
-            capture_radius=self.get_parameter('capture_radius').value,
+            capture_radius=self.planned_capture_radius,
             sea_surface_z=self.get_parameter('sea_surface_z').value,
             contact_clearance=self.get_parameter(
                 'contact_clearance'
@@ -348,6 +369,7 @@ class InterceptPlannerNode(Node):
         self.latest_uav = None
         self.mission_id = 0
         self.intercept_requested = False
+        self.mission_state = MissionState.INIT
         self.plan_id = 0
         self.completed_plan_count = 0
         self.completion_times = deque(maxlen=100)
@@ -358,6 +380,9 @@ class InterceptPlannerNode(Node):
         )
         self.future = None
         self.last_submitted_key = None
+        self.contact_schedule = ContactTimeSchedule(
+            terminal_threshold=self.terminal_time_threshold,
+        )
         self.get_logger().info(
             'Fast MINCO planner ready | rate='
             f'{planning_rate_hz:.1f} Hz | candidates<=6 | '
@@ -382,8 +407,12 @@ class InterceptPlannerNode(Node):
         if int(message.mission_id) != self.mission_id:
             self.request_slot.take()
             self.last_submitted_key = None
+            self.contact_schedule.reset()
         self.mission_id = int(message.mission_id)
-        self.intercept_requested = bool(message.intercept_requested)
+        self.mission_state = int(message.state)
+        self.intercept_requested = bool(
+            message.intercept_requested and not message.completed
+        )
 
     def _current_request(self):
         if self.latest_prediction is None or self.latest_uav is None:
@@ -392,6 +421,7 @@ class InterceptPlannerNode(Node):
             mission_id=self.mission_id,
             prediction=self.latest_prediction,
             uav=self.latest_uav,
+            contact_stamp=self.contact_schedule.contact_stamp,
         )
 
     def _run_request(self, request):
@@ -403,11 +433,20 @@ class InterceptPlannerNode(Node):
             self.maximum_input_age,
         )
         if failure == FastPlanningFailure.NONE:
+            preferred_duration = None
+            if request.contact_stamp is not None:
+                remaining = (
+                    request.contact_stamp
+                    - request.prediction.source_stamp
+                )
+                if remaining >= self.planner.minimum_duration:
+                    preferred_duration = remaining
             outcome = self.planner.plan(
                 initial_position=request.uav.position,
                 initial_velocity=request.uav.velocity,
                 initial_acceleration=request.uav.acceleration,
                 target_state_at_time=request.prediction.state_at,
+                preferred_duration=preferred_duration,
             )
         else:
             outcome = FastPlanningOutcome(
@@ -488,6 +527,52 @@ class InterceptPlannerNode(Node):
                     diagnostics=outcome.diagnostics,
                 )
 
+        contact_stamp = self.contact_schedule.contact_stamp
+        remaining_t_go = 0.0
+        terminal_mode = False
+        planned_capture_margin = 0.0
+        if outcome.plan is not None:
+            preferred_duration = (
+                None
+                if job.request.contact_stamp is None
+                else (
+                    job.request.contact_stamp
+                    - job.request.prediction.source_stamp
+                )
+            )
+            rescheduled = (
+                preferred_duration is not None
+                and abs(outcome.plan.duration - preferred_duration) > 0.05
+            )
+            contact_stamp = self.contact_schedule.accept_plan(
+                job.request.prediction.source_stamp,
+                outcome.plan.duration,
+                rescheduled=rescheduled,
+            )
+            remaining_t_go = max(contact_stamp - publish_stamp, 0.0)
+            terminal_mode = (
+                remaining_t_go <= self.terminal_time_threshold + 1e-9
+            )
+            try:
+                target_position = job.request.prediction.state_at_absolute_time(
+                    contact_stamp
+                )[0]
+                terminal_position = outcome.plan.sample(
+                    outcome.plan.duration
+                ).position
+                terminal_error = math.sqrt(sum(
+                    (planned - target) ** 2
+                    for planned, target in zip(
+                        terminal_position,
+                        target_position,
+                    )
+                ))
+                planned_capture_margin = (
+                    self.planned_capture_radius - terminal_error
+                )
+            except (TypeError, ValueError):
+                planned_capture_margin = -math.inf
+
         self.completed_plan_count += 1
         self.completion_times.append(time.monotonic())
         self.plan_id += 1
@@ -527,6 +612,14 @@ class InterceptPlannerNode(Node):
             publish_stamp - job.generated_stamp,
             0.0,
         )
+        if outcome.plan is not None:
+            message.selected_t_go = float(outcome.plan.duration)
+            message.contact_stamp = seconds_to_time(contact_stamp)
+            message.remaining_t_go = float(remaining_t_go)
+            message.terminal_mode = bool(terminal_mode)
+            message.planned_capture_margin = float(
+                planned_capture_margin
+            )
         message.candidate_count = diagnostics.candidates_checked
         message.replaced_request_count = (
             self.request_slot.replaced_request_count
@@ -548,6 +641,10 @@ class InterceptPlannerNode(Node):
                 generated_stamp=job.generated_stamp,
                 target_state_source=job.request.prediction.source,
                 frame_id=self.frame_id,
+                contact_stamp=contact_stamp,
+                remaining_t_go=remaining_t_go,
+                terminal_mode=terminal_mode,
+                planned_capture_margin=planned_capture_margin,
             )
             trajectory.published_stamp = seconds_to_time(publish_stamp)
             self.trajectory_pub.publish(trajectory)
@@ -560,6 +657,15 @@ class InterceptPlannerNode(Node):
     def planning_timer_callback(self):
 
         if not self.intercept_requested:
+            return
+        if self.mission_state == MissionState.TERMINAL_MINCO:
+            return
+        if (
+            self.latest_prediction is not None
+            and self.contact_schedule.is_terminal(
+                self.latest_prediction.source_stamp
+            )
+        ):
             return
         current = self._current_request()
         if current is not None:

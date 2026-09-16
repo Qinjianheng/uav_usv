@@ -63,6 +63,11 @@ def test_intercept_trajectory_carries_complete_piecewise_polynomial():
     message.valid_until.sec = 54
     message.piece_count = 1
     message.trajectory_duration = 2.0
+    message.contact_stamp.sec = 54
+    message.selected_t_go = 2.0
+    message.remaining_t_go = 1.9
+    message.terminal_mode = False
+    message.planned_capture_margin = 0.2
     message.valid = True
     segment = polynomial_segment()
     segment.duration.sec = 2
@@ -79,6 +84,11 @@ def test_intercept_trajectory_carries_complete_piecewise_polynomial():
     assert restored.generated_stamp.sec == 52
     assert restored.published_stamp.sec == 53
     assert restored.valid_until.sec == 54
+    assert restored.contact_stamp.sec == 54
+    assert restored.selected_t_go == pytest.approx(2.0)
+    assert restored.remaining_t_go == pytest.approx(1.9)
+    assert not restored.terminal_mode
+    assert restored.planned_capture_margin == pytest.approx(0.2)
     assert restored.piece_count == len(restored.segments) == 1
     assert restored.segments[0].duration.sec == 2
     assert list(restored.segments[0].coefficients) == [
@@ -112,12 +122,21 @@ def test_planner_diagnostic_carries_publish_age_and_completion_delay():
     message.input_age_at_finish = 0.058
     message.input_age_at_publish = 0.064
     message.completion_to_publish_delay = 0.006
+    message.selected_t_go = 2.8
+    message.contact_stamp.sec = 103
+    message.remaining_t_go = 2.7
+    message.terminal_mode = False
+    message.planned_capture_margin = 0.18
 
     restored = round_trip(message, diagnostic)
 
     assert restored.input_age_at_finish == pytest.approx(0.058)
     assert restored.input_age_at_publish == pytest.approx(0.064)
     assert restored.completion_to_publish_delay == pytest.approx(0.006)
+    assert restored.selected_t_go == pytest.approx(2.8)
+    assert restored.contact_stamp.sec == 103
+    assert restored.remaining_t_go == pytest.approx(2.7)
+    assert restored.planned_capture_margin == pytest.approx(0.18)
 
 
 def test_mission_state_constants_are_machine_parseable():
@@ -136,6 +155,9 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     message.source_age = 0.08
     message.callback_compute_time = 0.002
     message.status = 'TRACKING'
+    message.target_distance = 1.8
+    message.remaining_t_go = 0.8
+    message.terminal_mode = True
 
     restored = round_trip(message, controller_diagnostic)
 
@@ -143,6 +165,9 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     assert restored.plan_id == 9
     assert restored.source_age == pytest.approx(0.08)
     assert restored.callback_compute_time == pytest.approx(0.002)
+    assert restored.target_distance == pytest.approx(1.8)
+    assert restored.remaining_t_go == pytest.approx(0.8)
+    assert restored.terminal_mode
 
 
 def test_intercept_result_is_scoped_to_one_mission():

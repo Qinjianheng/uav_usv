@@ -12,6 +12,7 @@ from uav_control.guidance.planner_pipeline import validate_input
 from uav_control.guidance.planner_pipeline import validate_plan_arrival
 from uav_control.guidance.planner_pipeline import validate_target_shift
 from uav_control.guidance.planner_pipeline import validate_total_deadline
+from uav_control.guidance import planner_pipeline
 
 
 def make_request(sequence_id=1, prediction_stamp=10.0, uav_stamp=10.02):
@@ -183,3 +184,28 @@ def test_total_planner_deadline_includes_diagnostics_overhead():
     assert validate_total_deadline(0.080, 0.08) == (
         FastPlanningFailure.DEADLINE_EXCEEDED
     )
+
+
+def test_contact_schedule_counts_down_absolute_contact_time():
+    """Catch replanning that silently moves contact three seconds ahead."""
+    schedule = planner_pipeline.ContactTimeSchedule(
+        terminal_threshold=1.0,
+    )
+
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=3.2)
+
+    assert schedule.contact_stamp == pytest.approx(13.2)
+    assert schedule.remaining_t_go(10.2) == pytest.approx(3.0)
+    assert schedule.remaining_t_go(10.4) == pytest.approx(2.8)
+    assert not schedule.is_terminal(12.1)
+    assert schedule.is_terminal(12.3)
+
+
+def test_contact_schedule_resets_between_missions():
+    schedule = planner_pipeline.ContactTimeSchedule(terminal_threshold=1.0)
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=3.0)
+
+    schedule.reset()
+
+    assert schedule.contact_stamp is None
+    assert schedule.preferred_t_go(10.2) is None

@@ -56,7 +56,7 @@ def test_only_fresh_current_tracker_acceptance_enters_minco_ready():
         plan_id=13,
         status='PLAN_ACCEPTED',
         source_age=0.02,
-        remaining_time=1.0,
+        remaining_time=1.5,
         now=4.3,
     )
 
@@ -66,6 +66,40 @@ def test_only_fresh_current_tracker_acceptance_enters_minco_ready():
     assert core.phase == MissionPhase.MINCO_READY
     core.tick(now=4.35)
     assert core.phase == MissionPhase.MINCO_TRACKING
+
+
+def test_terminal_minco_latches_when_contact_is_near():
+    """Catch new 5 Hz plans pushing a terminal mission back to MINCO_READY."""
+    core = MissionManagerCore(
+        terminal_time_threshold=1.0,
+        terminal_distance_threshold=2.0,
+    )
+    start_intercept(core)
+    core.observe_tracker(
+        mission_id=core.mission_id,
+        plan_id=1,
+        status='TRACKING',
+        source_age=0.02,
+        remaining_time=2.0,
+        target_distance=3.0,
+        now=4.1,
+    )
+    core.tick(4.15)
+    assert core.phase == MissionPhase.MINCO_TRACKING
+
+    accepted = core.observe_tracker(
+        mission_id=core.mission_id,
+        plan_id=2,
+        status='PLAN_ACCEPTED',
+        source_age=0.02,
+        remaining_time=0.8,
+        target_distance=1.8,
+        now=5.0,
+    )
+    core.tick(5.05)
+
+    assert accepted
+    assert core.phase == MissionPhase.TERMINAL_MINCO
 
 
 def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
@@ -105,9 +139,7 @@ def test_safe_wait_recovers_when_a_new_plan_is_tracker_accepted():
         now=4.8,
     )
     assert recovered
-    assert core.phase == MissionPhase.MINCO_READY
-    core.tick(now=4.85)
-    assert core.phase == MissionPhase.MINCO_TRACKING
+    assert core.phase == MissionPhase.TERMINAL_MINCO
 
 
 def test_safe_wait_can_reestablish_far_guidance_when_geometry_allows():

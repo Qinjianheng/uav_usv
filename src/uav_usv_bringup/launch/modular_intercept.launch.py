@@ -5,6 +5,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -22,6 +23,9 @@ def generate_launch_description():
     )
     config_file = LaunchConfiguration('config_file')
     log_directory = LaunchConfiguration('log_directory')
+    enable_shadow_perception = LaunchConfiguration(
+        'enable_shadow_perception'
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -33,6 +37,11 @@ def generate_launch_description():
             'log_directory',
             default_value=default_log_directory,
             description='Directory for evaluator run artifacts.',
+        ),
+        DeclareLaunchArgument(
+            'enable_shadow_perception',
+            default_value='true',
+            description='Run camera/KF shadow diagnostics (never control).',
         ),
         Node(
             package='uav_control',
@@ -85,6 +94,7 @@ def generate_launch_description():
             name='target_kalman_filter',
             output='screen',
             parameters=[config_file],
+            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='ros_gz_image',
@@ -109,6 +119,7 @@ def generate_launch_description():
                     '/camera/down/depth/image_raw',
                 ),
             ],
+            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='uav_control',
@@ -116,6 +127,7 @@ def generate_launch_description():
             name='front_tof_monitor',
             output='screen',
             parameters=[config_file],
+            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='uav_control',
@@ -123,6 +135,7 @@ def generate_launch_description():
             name='rgbd_target_localizer',
             output='screen',
             parameters=[config_file],
+            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='uav_control',
@@ -141,8 +154,10 @@ def generate_launch_description():
                     'depth_ros_topic': '/camera/down/depth/image_raw',
                     'camera_pitch_down': 1.57079632679,
                     'target_visual_height_offset': 0.42,
+                    'publish_gazebo_rtf': False,
                 },
             ],
+            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='uav_control',
@@ -150,5 +165,6 @@ def generate_launch_description():
             name='dual_tof_selector',
             output='screen',
             parameters=[config_file],
+            condition=IfCondition(enable_shadow_perception),
         ),
     ])

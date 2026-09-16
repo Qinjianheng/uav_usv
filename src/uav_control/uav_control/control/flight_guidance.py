@@ -38,6 +38,9 @@ class FlightGuidanceCore:
         takeoff_settle_time=1.0,
         takeoff_maximum_vertical_speed=1.5,
         takeoff_maximum_vertical_acceleration=1.0,
+        takeoff_maximum_horizontal_acceleration=1.5,
+        takeoff_horizontal_start_height=0.5,
+        takeoff_horizontal_full_height=1.5,
         follow_distance=5.0,
         follow_position_gain=0.8,
         altitude_velocity_gain=1.0,
@@ -59,6 +62,16 @@ class FlightGuidanceCore:
         )
         self.takeoff_maximum_vertical_acceleration = float(
             takeoff_maximum_vertical_acceleration
+        )
+        self.takeoff_maximum_horizontal_acceleration = float(
+            takeoff_maximum_horizontal_acceleration
+        )
+        self.takeoff_horizontal_start_height = float(
+            takeoff_horizontal_start_height
+        )
+        self.takeoff_horizontal_full_height = max(
+            float(takeoff_horizontal_full_height),
+            self.takeoff_horizontal_start_height + 1e-3,
         )
         self.follow_distance = float(follow_distance)
         self.follow_position_gain = float(follow_position_gain)
@@ -205,6 +218,42 @@ class FlightGuidanceCore:
             safety_margin=safety.response_margin,
         )
 
+    def _follow_velocity(self, state, target):
+        target_speed = math.hypot(target.velocity[0], target.velocity[1])
+        if target_speed > 1e-6:
+            direction = (
+                target.velocity[0] / target_speed,
+                target.velocity[1] / target_speed,
+            )
+        else:
+            direction = (1.0, 0.0)
+        desired_position = (
+            target.position[0] - self.follow_distance * direction[0],
+            target.position[1] - self.follow_distance * direction[1],
+        )
+        return (
+            target.velocity[0]
+            + self.follow_position_gain
+            * (desired_position[0] - state.position[0]),
+            target.velocity[1]
+            + self.follow_position_gain
+            * (desired_position[1] - state.position[1]),
+        )
+
+    def _takeoff_horizontal_weight(self, state):
+        clearance = max(self.ground_position[2] - state.position[2], 0.0)
+        if clearance <= self.takeoff_horizontal_start_height:
+            return 0.0
+        if clearance >= self.takeoff_horizontal_full_height:
+            return 1.0
+        return (
+            (clearance - self.takeoff_horizontal_start_height)
+            / (
+                self.takeoff_horizontal_full_height
+                - self.takeoff_horizontal_start_height
+            )
+        )
+
     def command(self, phase, state, target, dt=None):
         """Generate one bounded command for the named mission phase."""
         phase = str(phase)
@@ -234,13 +283,20 @@ class FlightGuidanceCore:
             self.settled_duration = (
                 self.settled_duration + dt if settled else 0.0
             )
+            horizontal = (0.0, 0.0)
+            if target is not None:
+                follow = self._follow_velocity(state, target)
+                weight = self._takeoff_horizontal_weight(state)
+                horizontal = follow[0] * weight, follow[1] * weight
             return self._velocity_command(
                 state,
-                (0.0, 0.0, desired_vz),
+                (horizontal[0], horizontal[1], desired_vz),
                 dt,
                 self.settled_duration + 1e-9 >= self.takeoff_settle_time,
                 target is not None,
-                horizontal_acceleration=self.maximum_horizontal_acceleration,
+                horizontal_acceleration=(
+                    self.takeoff_maximum_horizontal_acceleration
+                ),
                 vertical_acceleration=(
                     self.takeoff_maximum_vertical_acceleration
                 ),
@@ -249,28 +305,10 @@ class FlightGuidanceCore:
             self.settled_duration = 0.0
             if target is None:
                 return self._hold(state)
-            target_speed = math.hypot(
-                target.velocity[0],
-                target.velocity[1],
-            )
-            if target_speed > 1e-6:
-                direction = (
-                    target.velocity[0] / target_speed,
-                    target.velocity[1] / target_speed,
-                )
-            else:
-                direction = (1.0, 0.0)
-            desired_position = (
-                target.position[0] - self.follow_distance * direction[0],
-                target.position[1] - self.follow_distance * direction[1],
-            )
+            horizontal = self._follow_velocity(state, target)
             desired = (
-                target.velocity[0]
-                + self.follow_position_gain
-                * (desired_position[0] - state.position[0]),
-                target.velocity[1]
-                + self.follow_position_gain
-                * (desired_position[1] - state.position[1]),
+                horizontal[0],
+                horizontal[1],
                 self.altitude_velocity_gain
                 * (self.flight_altitude - state.position[2]),
             )

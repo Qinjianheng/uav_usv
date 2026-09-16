@@ -24,7 +24,7 @@ cd /home/qin/data/uav_usv
 
 跟随模式保存USV已经走过的轨迹，并跟踪航迹弧长后方5米的历史位置，而不是当前航向切线后方的位置。5米水平间距在5米高度时的斜距约7.1米，为25米ToF上限保留足够余量；单纯提高高度会增加斜距，不能解决远距离丢失。这样8字转弯时跟随参考点仍以接近USV的速度沿原轨迹运动，不会横向快速甩动。
 
-截击控制保持20 Hz，MINCO搜索约10 Hz并在单工作线程中运行，控制回调只读取最新结果和跟踪有效轨迹。目标预测采用有界自适应CTRA：由连续速度观测在线估计转率、转率加速度和纵向加速度，并让加速度随预测时域衰减；它不读取目标预设航线，数据不足时自动退回恒速度模型。远距离 `FAR_GUIDANCE` 只负责进入三维可达域，45度下滑角仅作为初始几何偏好。规划器显式计算水平、垂向和海面制动最短时间，以其中最大值构造动态搜索区间；2秒是名义上限，3秒是当前绝对上限。进入MINCO阶段后，正常截击始终由三段MINCO-T3轨迹及位置反馈完成：单次重规划失败短时执行仍有效的旧轨迹，旧轨迹超龄、目标三维偏移过大、剩余时间不足或海面余量不足时立即废弃并进入安全等待，不再切换到高速终端追逐。最终垂向指令在全部限幅之后还要经过独立海面Safety Guard。
+截击控制保持20 Hz，目标预测保持20 Hz，MINCO以5 Hz触发并在单工作线程中运行；100 Hz完成轮询会在求解结束后及时发布最新结果。目标预测采用有界自适应CTRA：由连续速度观测在线估计转率、转率加速度和纵向加速度，并让加速度随预测时域衰减；它不读取目标预设航线，数据不足时自动退回恒速度模型。远距离 `FAR_GUIDANCE` 只负责进入三维可达域，45度下滑角仅作为初始几何偏好。规划器显式计算水平、垂向和海面制动最短时间，以其中最大值构造动态搜索区间，当前最大规划时域为4秒。首次获得稳定可行轨迹后锁定绝对 `contact_stamp`，后续重规划优先按 `remaining_t_go` 倒计时；剩余时间不超过1秒或三维距离不超过2米时进入 `TERMINAL_MINCO`，让tracker执行最后接触段。单次重规划失败时只短时执行仍有效的旧轨迹，旧轨迹超龄、目标三维偏移过大、剩余时间不足或海面余量不足时立即废弃并进入安全等待，不再切换到高速终端追逐。最终垂向指令在全部限幅之后还要经过独立海面Safety Guard。
 
 UAV在起飞、跟随、截击和结果悬停阶段都按 `atan2(target_y-uav_y, target_x-uav_x)` 计算期望偏航，并以默认1.0 rad/s的最大偏航速率连续转向USV。该观测偏航将作为后续相机和激光雷达共同视场约束的基础。
 
@@ -79,7 +79,7 @@ ros2 topic echo /perception/front/target_observation
 ros2 topic echo /tracking/target_state
 ```
 
-查看实时画面时应运行 `ros2 run rqt_image_view rqt_image_view`，跟随/接近阶段选择 `/camera/front/image_raw`，末端阶段同时观察 `/camera/down/image_raw`。图像由独立的 `ros_gz_image` 桥接器直接以传感器频率发布；红球和深度分析以10 Hz限频运行，不再阻塞RQt刷新。海面和天空纹理近似均匀，若目标在视场外，飞机只做平移时画面可能肉眼近似不变；此时应结合每台相机的帧变化量和真值视场话题判断。
+查看实时画面时应运行 `ros2 run rqt_image_view rqt_image_view`，跟随/接近阶段选择 `/camera/front/image_raw`，末端阶段同时观察 `/camera/down/image_raw`。图像由独立的 `ros_gz_image` 桥接器直接以传感器频率发布；RGB-D定位以10 Hz运行，前/下视诊断分析以5 Hz运行，图像QoS为BEST_EFFORT、KEEP_LAST、depth=1。可用 `enable_shadow_perception:=false` 关闭图像桥、定位、KF和相机诊断，进行同场景A/B测试；这一参数不会关闭20 Hz真值预测、控制或评价。海面和天空纹理近似均匀，若目标在视场外，飞机只做平移时画面可能肉眼近似不变；此时应结合每台相机的帧变化量、Gazebo real-time factor和真值视场话题判断。
 
 先用完整起飞、跟随和截击实验比较前视、下视最近5秒可见率、ToF有效率和切换时刻。后续取消全局信息时，红球颜色检测必须替换为非合作目标检测/分割；真值只保留在评价链路中，不能继续作为跟踪或规划输入。
 
@@ -127,7 +127,7 @@ uav_usv/
 
 ## 截击结果
 
-截击成功或失败后，节点在 `/simulation/impact/result` 发布 `uav_usv_interfaces/InterceptResult`。默认成功条件是在Y指令后的30秒内进入0.25米三维捕获半径；若无人机未先进入捕获半径就接触海面（NED `z >= 0`），结果为 `FAILURE / SEA_CONTACT`。两种结果都会冻结目标并暂停Gazebo。结果同时记录真实最小距离、水平距离、垂直误差、相对速度、闭合速度和运动约束峰值。CSV最终行的 `outcome` 与 `failure_reason` 给出本次实验结论。
+截击成功或失败后，节点在 `/simulation/impact/result` 发布 `uav_usv_interfaces/InterceptResult`。Evaluator以0.50米三维球作为实验成功判据，planner则瞄准0.35米内部区域；两个半径分别记录在config和summary中。若无人机未先进入捕获球就接触海面（NED `z >= 0`），结果为 `FAILURE / SEA_CONTACT`。SUCCESS、SEA_CONTACT和TIMEOUT都会触发独立Gazebo暂停请求（失败时短时重试），MissionManager同时进入终态并让tracker清除旧MINCO，只保留海面上方的安全保持点。`/simulation/impact/hit` 只表示SUCCESS，不表示是否已经发生终止事件。结果还记录真实最小距离、相对速度、规划/跟踪拒绝原因、接触时间倒计时及按目标距离分桶的运行性能。
 
 终端轨迹使用与PX4指令一致的有效运动上限进行可行性检查；末端闭合速度、动态时域、有效垂向制动能力以及其他实验参数均以 [`baseline.yaml`](src/uav_usv_bringup/config/baseline.yaml) 和每次运行生成的 `*_config.yaml` 为准，不在本文重复维护数值。实际飞行硬限制仍由 `max_actual_horizontal_acceleration` 和 `max_actual_vertical_acceleration` 独立设置，持续超过实际硬限制才返回 `CONSTRAINT_VIOLATION`。
 

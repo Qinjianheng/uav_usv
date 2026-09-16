@@ -6,11 +6,16 @@ builtin_interfaces/Time planning_started_stamp
 builtin_interfaces/Time generated_stamp
 builtin_interfaces/Time published_stamp
 builtin_interfaces/Time valid_until
+builtin_interfaces/Time contact_stamp
 string target_state_source
 string frame_id
 string planner_type
 float64 t_go
 float64 trajectory_duration
+float64 selected_t_go
+float64 remaining_t_go
+bool terminal_mode
+float64 planned_capture_margin
 uint32 piece_count
 uav_usv_interfaces/PolynomialSegment[] segments
 geometry_msgs/Point terminal_position

@@ -43,6 +43,8 @@ class MissionManagerNode(Node):
         self.declare_parameter('maximum_tracker_age', 0.125)
         self.declare_parameter('minimum_plan_remaining_time', 0.20)
         self.declare_parameter('plan_recovery_timeout', 0.50)
+        self.declare_parameter('terminal_time_threshold', 1.0)
+        self.declare_parameter('terminal_distance_threshold', 2.0)
         publication_rate = float(
             self.get_parameter('publication_rate_hz').value
         )
@@ -57,6 +59,12 @@ class MissionManagerNode(Node):
             ).value,
             plan_recovery_timeout=self.get_parameter(
                 'plan_recovery_timeout'
+            ).value,
+            terminal_time_threshold=self.get_parameter(
+                'terminal_time_threshold'
+            ).value,
+            terminal_distance_threshold=self.get_parameter(
+                'terminal_distance_threshold'
             ).value,
         )
         state_qos = QoSProfile(
@@ -168,6 +176,7 @@ class MissionManagerNode(Node):
             source_age=message.source_age,
             remaining_time=message.remaining_time,
             now=self._now(),
+            target_distance=message.target_distance,
         )
         if accepted:
             self._publish()
@@ -194,11 +203,11 @@ class MissionManagerNode(Node):
         self._publish()
 
     def timer_callback(self):
-        self._publish()
         self.core.tick(
             self._now(),
             far_guidance_available=self.far_guidance_available,
         )
+        self._publish()
 
 
 def main(args=None):

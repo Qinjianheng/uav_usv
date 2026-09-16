@@ -3,6 +3,8 @@ import math
 import numpy as np
 import pytest
 
+from uav_control.perception import rgbd_target_localizer
+
 from uav_control.perception.rgbd_target_localizer import (
     body_frd_to_ned_rotation,
     camera_target_to_local_ned,
@@ -98,3 +100,34 @@ def test_rgbd_localizer_rejects_missing_valid_depth():
         minimum_depth=0.2,
         maximum_depth=25.0,
     ) is None
+
+
+def test_image_callbacks_only_replace_latest_frames(monkeypatch):
+    """Catch image decoding and red segmentation returning to DDS callbacks."""
+    node = object.__new__(rgbd_target_localizer.RgbdTargetLocalizer)
+    node.latest_color_message = None
+    node.latest_depth_message = None
+    node.color_time = -1.0
+    node.depth_time = -1.0
+    monkeypatch.setattr(
+        rgbd_target_localizer,
+        'red_pixel_mask',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('heavy color work ran in callback')
+        ),
+    )
+    monkeypatch.setattr(
+        rgbd_target_localizer,
+        'decode_float32_depth',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('heavy depth work ran in callback')
+        ),
+    )
+    color = object()
+    depth = object()
+
+    node.color_callback(color)
+    node.depth_callback(depth)
+
+    assert node.latest_color_message is color
+    assert node.latest_depth_message is depth
