@@ -215,13 +215,9 @@ class ContactTimeSchedule:
         self,
         terminal_threshold=1.0,
         freeze_time=0.30,
-        terminal_max_reschedule_delay=0.30,
     ):
         self.terminal_threshold = max(float(terminal_threshold), 0.0)
         self.freeze_time = max(float(freeze_time), 0.0)
-        self.terminal_max_reschedule_delay = float(
-            terminal_max_reschedule_delay
-        )
         self.contact_stamp = None
 
     def reset(self):
@@ -231,9 +227,9 @@ class ContactTimeSchedule:
         candidate = float(source_stamp) + float(selected_t_go)
         if self.contact_stamp is None:
             self.contact_stamp = candidate
-        elif bool(rescheduled) and (
-            0.0 < candidate - self.contact_stamp
-            <= self.terminal_max_reschedule_delay
+        elif (
+            bool(rescheduled)
+            and candidate > self.contact_stamp + 1e-9
         ):
             self.contact_stamp = candidate
         return self.contact_stamp

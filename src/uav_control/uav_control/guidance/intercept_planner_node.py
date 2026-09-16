@@ -217,7 +217,6 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('minimum_duration', 1.0)
         self.declare_parameter('terminal_minimum_duration', 0.30)
         self.declare_parameter('terminal_freeze_time', 0.30)
-        self.declare_parameter('terminal_max_reschedule_delay', 0.30)
         self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
@@ -267,9 +266,6 @@ class InterceptPlannerNode(Node):
         )
         self.terminal_freeze_time = float(
             self.get_parameter('terminal_freeze_time').value
-        )
-        self.terminal_max_reschedule_delay = float(
-            self.get_parameter('terminal_max_reschedule_delay').value
         )
         self.planner = FastMincoPlanner(
             minimum_duration=self.get_parameter('minimum_duration').value,
@@ -414,9 +410,6 @@ class InterceptPlannerNode(Node):
         self.contact_schedule = ContactTimeSchedule(
             terminal_threshold=self.terminal_time_threshold,
             freeze_time=self.terminal_freeze_time,
-            terminal_max_reschedule_delay=(
-                self.terminal_max_reschedule_delay
-            ),
         )
         self.request_policy = PlanningRequestPolicy(
             normal_minimum_duration=self.planner.minimum_duration,
@@ -519,13 +512,10 @@ class InterceptPlannerNode(Node):
                         < remaining - 1e-9
                     ):
                         horizon_insufficient = True
-                    else:
-                        maximum_duration_override = min(
-                            remaining
-                            + self.terminal_max_reschedule_delay,
-                            self.planner.maximum_duration,
-                            available_prediction_duration,
-                        )
+                    # Keep the committed contact as the preferred and
+                    # earliest candidate, but retain the full feasible
+                    # planning horizon for recovery if that contact is no
+                    # longer dynamically reachable.
 
                 elif remaining >= minimum_duration:
                     preferred_duration = remaining
@@ -644,8 +634,7 @@ class InterceptPlannerNode(Node):
                     abs(contact_delay) <= 1e-9
                     or (
                         job.request.terminal_mode
-                        and 0.0 < contact_delay
-                        <= self.contact_schedule.terminal_max_reschedule_delay
+                        and contact_delay > 0.0
                     )
                 )
                 if not contact_allowed:

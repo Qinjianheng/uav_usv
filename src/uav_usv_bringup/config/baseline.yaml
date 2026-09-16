@@ -181,7 +181,6 @@ intercept_planner_node:
     minimum_duration: 1.0
     terminal_minimum_duration: 0.30
     terminal_freeze_time: 0.30
-    terminal_max_reschedule_delay: 0.30
     # The previous 3.0 s cap rejected five-metre terminal descents whose
     # minimum-time bound was feasible but whose jerk-continuous MINCO profile
     # needed roughly 3.2 s to respect the 3 m/s^2 vertical acceleration limit.

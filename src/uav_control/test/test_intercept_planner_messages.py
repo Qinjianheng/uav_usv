@@ -98,10 +98,14 @@ def make_publish_test_prediction(sequence_id, shifted_at_candidate=False):
     )
 
 
-def run_publish_test(terminal_mode, latest_prediction):
+def run_publish_test(
+    terminal_mode,
+    latest_prediction,
+    plan_duration=1.2,
+):
     """Run one completed planner job through the real publication gate."""
     prediction = make_publish_test_prediction(sequence_id=4)
-    schedule = ContactTimeSchedule(terminal_max_reschedule_delay=0.30)
+    schedule = ContactTimeSchedule()
     schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
     request = PlannerRequest(
         mission_id=2,
@@ -140,7 +144,7 @@ def run_publish_test(terminal_mode, latest_prediction):
     job = PlannerJobResult(
         request=request,
         outcome=FastPlanningOutcome(
-            plan=make_publish_test_plan(),
+            plan=make_publish_test_plan(duration=plan_duration),
             failure=FastPlanningFailure.NONE,
             diagnostics=PlannerDiagnostics(),
         ),
@@ -368,7 +372,6 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
         planner=planner,
         maximum_input_age=0.20,
         hard_deadline_seconds=1.0,
-        terminal_max_reschedule_delay=0.30,
         _ros_seconds=lambda: 10.15,
     )
 
@@ -379,6 +382,95 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
     )
     # Prediction ends at 11.0, so only 0.9 s remains from trajectory start 10.1.
     assert planner.maximum_duration_override == pytest.approx(0.9)
+
+
+def test_terminal_locked_contact_does_not_cap_available_search_horizon():
+    """Keep old contact preferred while permitting a later feasible contact."""
+    class CapturingPlanner:
+        minimum_duration = 0.10
+        maximum_duration = 4.0
+
+        def plan(self, **kwargs):
+            self.preferred_duration = kwargs['preferred_duration']
+            self.minimum_duration_override = kwargs[
+                'minimum_duration_override'
+            ]
+            self.maximum_duration_override = kwargs[
+                'maximum_duration_override'
+            ]
+            return FastPlanningOutcome(
+                plan=None,
+                failure=FastPlanningFailure.CAPTURE_GEOMETRY,
+                diagnostics=PlannerDiagnostics(),
+            )
+
+    prediction = PredictionSeries(
+        mission_id=2,
+        sequence_id=4,
+        source_stamp=10.0,
+        valid_until=10.125,
+        samples=(
+            PredictionSample(
+                0.0,
+                (0.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                4.0,
+                (4.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        ),
+        source='simulation_truth',
+    )
+    request = PlannerRequest(
+        mission_id=2,
+        prediction=prediction,
+        uav=UavKinematicState(
+            stamp=10.10,
+            position=(0.0, 0.0, -1.0),
+            velocity=(0.0, 0.0, 0.0),
+            acceleration=(0.0, 0.0, 0.0),
+        ),
+        trajectory_start_stamp=10.10,
+        contact_stamp=10.90,
+        terminal_mode=True,
+        minimum_duration=0.30,
+    )
+    planner = CapturingPlanner()
+    node = SimpleNamespace(
+        planner=planner,
+        maximum_input_age=0.20,
+        hard_deadline_seconds=1.0,
+        _ros_seconds=lambda: 10.15,
+    )
+
+    planner_node_module.InterceptPlannerNode._run_request(node, request)
+
+    assert planner.preferred_duration == pytest.approx(0.80)
+    assert planner.minimum_duration_override == pytest.approx(0.80)
+
+    # Prediction extends to 14.0; MINCO starts at 10.1.
+    # Full usable horizon is therefore 3.9 s, not 0.8 + 0.3.
+    assert planner.maximum_duration_override == pytest.approx(3.90)
+
+
+def test_terminal_reschedule_beyond_old_point_three_limit_can_publish():
+    """Permit a later feasible terminal contact validated at its new time."""
+    node, schedule, trajectory_pub, diagnostic_pub = run_publish_test(
+        terminal_mode=True,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+        plan_duration=1.8,
+    )
+
+    assert len(trajectory_pub.messages) == 1
+    assert schedule.contact_stamp == pytest.approx(11.8)
+    assert diagnostic_pub.messages[-1].result == (
+        PlannerDiagnostic.RESULT_SUCCESS
+    )
+    assert node.plan_id == 1
 
 
 def test_terminal_reschedule_validates_shift_at_candidate_contact():

@@ -65,7 +65,6 @@ def test_terminal_planning_uses_fast_rate_and_short_freeze_window():
     assert planner['minimum_duration'] == pytest.approx(1.0)
     assert planner['terminal_minimum_duration'] == pytest.approx(0.30)
     assert planner['terminal_freeze_time'] == pytest.approx(0.30)
-    assert planner['terminal_max_reschedule_delay'] == pytest.approx(0.30)
 
 
 def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
