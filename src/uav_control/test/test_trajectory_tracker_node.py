@@ -76,6 +76,7 @@ def test_terminal_mission_forces_trajectory_and_diagnostic_terminal_mode():
     node.mission_state = MissionState.TERMINAL_MINCO
     node.tracker = TrajectoryTrackerCore()
     node.tracker.active_trajectory = terminal
+    node.latest_prediction = None
     node.latest_target_state = None
     node.latest_state = None
     node.last_target_yaw = None
