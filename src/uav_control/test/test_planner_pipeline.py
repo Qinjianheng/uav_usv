@@ -36,7 +36,12 @@ def make_request(sequence_id=1, prediction_stamp=10.0, uav_stamp=10.02):
         velocity=(0.0, 0.0, 0.0),
         acceleration=(0.0, 0.0, 0.0),
     )
-    return PlannerRequest(mission_id=5, prediction=prediction, uav=uav)
+    return PlannerRequest(
+        mission_id=5,
+        prediction=prediction,
+        uav=uav,
+        trajectory_start_stamp=uav.stamp,
+    )
 
 
 def test_prediction_series_interpolates_without_future_truth_access():
@@ -70,6 +75,21 @@ def test_stale_prediction_and_uav_state_are_reported_separately():
     )
     assert validate_input(state_stale, now=10.01, maximum_age=0.125) == (
         FastPlanningFailure.STATE_STALE
+    )
+
+
+def test_prediction_staleness_remains_independent_of_minco_start_stamp():
+    """A fresh UAV start must not make an older prediction acceptable."""
+    request = make_request(prediction_stamp=9.90, uav_stamp=10.10)
+    request = PlannerRequest(
+        mission_id=request.mission_id,
+        prediction=request.prediction,
+        uav=request.uav,
+        trajectory_start_stamp=10.10,
+    )
+
+    assert validate_input(request, now=10.15, maximum_age=0.125) == (
+        FastPlanningFailure.PREDICTION_STALE
     )
 
 
@@ -137,6 +157,7 @@ def test_target_shift_uses_absolute_contact_time_when_sources_differ():
         mission_id=5,
         prediction=series(10.0, 100),
         uav=make_request().uav,
+        trajectory_start_stamp=make_request().uav.stamp,
     )
 
     failure = validate_target_shift(

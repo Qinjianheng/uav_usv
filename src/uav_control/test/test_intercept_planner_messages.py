@@ -2,15 +2,23 @@
 
 import ast
 import inspect
+from types import SimpleNamespace
 
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
 from uav_usv_interfaces.msg import PredictedTargetPoint, TargetPrediction
 
 from uav_control.guidance.fast_minco_planner import FastMincoPlanner
+from uav_control.guidance.fast_minco_planner import FastPlanningFailure
+from uav_control.guidance.fast_minco_planner import FastPlanningOutcome
+from uav_control.guidance.finite_horizon_intercept_planner import PlannerDiagnostics
 from uav_control.guidance.intercept_planner_node import plan_to_message
 from uav_control.guidance.intercept_planner_node import prediction_from_message
 from uav_control.guidance.intercept_planner_node import uav_state_from_message
+from uav_control.guidance.planner_pipeline import PlannerRequest
+from uav_control.guidance.planner_pipeline import PredictionSample
+from uav_control.guidance.planner_pipeline import PredictionSeries
+from uav_control.guidance.planner_pipeline import UavKinematicState
 import uav_control.guidance.intercept_planner_node as planner_node_module
 
 
@@ -90,6 +98,114 @@ def test_uav_input_uses_ros_receive_time_for_comparable_clock_domain():
     assert state.velocity == pytest.approx((4.0, 0.5, -0.2))
 
 
+def test_planner_request_uses_latest_uav_stamp_as_minco_start():
+    prediction = PredictionSeries(
+        mission_id=2,
+        sequence_id=4,
+        source_stamp=10.00,
+        valid_until=11.00,
+        samples=(
+            PredictionSample(
+                0.0,
+                (10.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                1.0,
+                (11.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        ),
+        source='simulation_truth',
+    )
+    uav = UavKinematicState(
+        stamp=10.10,
+        position=(0.0, 0.0, -1.0),
+        velocity=(0.0, 0.0, 0.0),
+        acceleration=(0.0, 0.0, 0.0),
+    )
+    node = SimpleNamespace(
+        mission_id=2,
+        latest_prediction=prediction,
+        latest_uav=uav,
+        contact_schedule=SimpleNamespace(contact_stamp=None),
+    )
+    decision = SimpleNamespace(
+        terminal_mode=False,
+        minimum_duration=1.0,
+    )
+
+    request = planner_node_module.InterceptPlannerNode._current_request(
+        node,
+        decision,
+    )
+
+    assert request.trajectory_start_stamp == pytest.approx(10.10)
+
+
+def test_planner_queries_prediction_at_absolute_minco_contact_time():
+    class CapturingPlanner:
+        minimum_duration = 0.10
+
+        def plan(self, **kwargs):
+            self.target_at_quarter_second = kwargs['target_state_at_time'](
+                0.25
+            )
+            return FastPlanningOutcome(
+                plan=None,
+                failure=FastPlanningFailure.CAPTURE_GEOMETRY,
+                diagnostics=PlannerDiagnostics(),
+            )
+
+    prediction = PredictionSeries(
+        mission_id=2,
+        sequence_id=4,
+        source_stamp=10.00,
+        valid_until=11.00,
+        samples=(
+            PredictionSample(
+                0.0,
+                (10.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                1.0,
+                (11.0, 0.0, -0.1),
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        ),
+        source='simulation_truth',
+    )
+    request = PlannerRequest(
+        mission_id=2,
+        prediction=prediction,
+        uav=UavKinematicState(
+            stamp=10.10,
+            position=(0.0, 0.0, -1.0),
+            velocity=(0.0, 0.0, 0.0),
+            acceleration=(0.0, 0.0, 0.0),
+        ),
+        trajectory_start_stamp=10.10,
+    )
+    planner = CapturingPlanner()
+    node = SimpleNamespace(
+        planner=planner,
+        maximum_input_age=0.20,
+        hard_deadline_seconds=1.0,
+        _ros_seconds=lambda: 10.15,
+    )
+
+    planner_node_module.InterceptPlannerNode._run_request(node, request)
+
+    assert planner.target_at_quarter_second[0] == pytest.approx(
+        (10.35, 0.0, -0.1)
+    )
+
+
 def test_minco_plan_message_contains_reconstructable_coefficients():
     planner = FastMincoPlanner(
         minimum_duration=1.0,
@@ -124,7 +240,7 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
         mission_id=2,
         plan_id=6,
         prediction_sequence_id=4,
-        source_stamp=10.0,
+        trajectory_start_stamp=10.10,
         planning_started_stamp=10.02,
         generated_stamp=10.04,
         target_state_source='simulation_truth',
@@ -137,6 +253,10 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
     assert message.mission_id == 2
     assert message.plan_id == 6
     assert message.prediction_sequence_id == 4
+    assert (
+        message.source_stamp.sec
+        + message.source_stamp.nanosec * 1e-9
+    ) == pytest.approx(10.10)
     assert message.planner_type == 'MINCO_T3_FAST'
     assert message.piece_count == len(message.segments) == 3
     assert sum(

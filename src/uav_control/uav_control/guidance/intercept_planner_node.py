@@ -95,7 +95,7 @@ def plan_to_message(
     mission_id,
     plan_id,
     prediction_sequence_id,
-    source_stamp,
+    trajectory_start_stamp,
     planning_started_stamp,
     generated_stamp,
     target_state_source,
@@ -105,19 +105,21 @@ def plan_to_message(
     terminal_mode=False,
     planned_capture_margin=0.0,
 ):
-    """Serialize a complete MINCO polynomial without resetting plan age."""
+    """Serialize a MINCO polynomial using its true execution start time."""
     message = InterceptTrajectory()
     message.mission_id = int(mission_id)
     message.plan_id = int(plan_id)
     message.prediction_sequence_id = int(prediction_sequence_id)
-    message.source_stamp = seconds_to_time(source_stamp)
+    message.source_stamp = seconds_to_time(trajectory_start_stamp)
     message.planning_started_stamp = seconds_to_time(
         planning_started_stamp
     )
     message.generated_stamp = seconds_to_time(generated_stamp)
-    message.valid_until = seconds_to_time(source_stamp + plan.duration)
+    message.valid_until = seconds_to_time(
+        trajectory_start_stamp + plan.duration
+    )
     if contact_stamp is None:
-        contact_stamp = source_stamp + plan.duration
+        contact_stamp = trajectory_start_stamp + plan.duration
     if remaining_t_go is None:
         remaining_t_go = plan.duration
     message.contact_stamp = seconds_to_time(contact_stamp)
@@ -454,6 +456,7 @@ class InterceptPlannerNode(Node):
             mission_id=self.mission_id,
             prediction=self.latest_prediction,
             uav=self.latest_uav,
+            trajectory_start_stamp=self.latest_uav.stamp,
             contact_stamp=self.contact_schedule.contact_stamp,
             terminal_mode=decision.terminal_mode,
             minimum_duration=decision.minimum_duration,
@@ -477,7 +480,7 @@ class InterceptPlannerNode(Node):
             if request.contact_stamp is not None:
                 remaining = (
                     request.contact_stamp
-                    - request.prediction.source_stamp
+                    - request.trajectory_start_stamp
                 )
                 if remaining >= minimum_duration:
                     preferred_duration = remaining
@@ -485,7 +488,12 @@ class InterceptPlannerNode(Node):
                 initial_position=request.uav.position,
                 initial_velocity=request.uav.velocity,
                 initial_acceleration=request.uav.acceleration,
-                target_state_at_time=request.prediction.state_at,
+                target_state_at_time=(
+                    lambda horizon: request.prediction
+                    .state_at_absolute_time(
+                        request.trajectory_start_stamp + horizon
+                    )
+                ),
                 preferred_duration=preferred_duration,
                 minimum_duration_override=(
                     minimum_duration
@@ -587,7 +595,7 @@ class InterceptPlannerNode(Node):
                 if job.request.contact_stamp is None
                 else (
                     job.request.contact_stamp
-                    - job.request.prediction.source_stamp
+                    - job.request.trajectory_start_stamp
                 )
             )
             rescheduled = (
@@ -595,12 +603,12 @@ class InterceptPlannerNode(Node):
                 and abs(outcome.plan.duration - preferred_duration) > 0.05
             )
             contact_stamp = self.contact_schedule.accept_plan(
-                job.request.prediction.source_stamp,
+                job.request.trajectory_start_stamp,
                 outcome.plan.duration,
                 rescheduled=rescheduled,
             )
             remaining_t_go = max(
-                contact_stamp - job.request.prediction.source_stamp,
+                contact_stamp - job.request.trajectory_start_stamp,
                 0.0,
             )
             terminal_mode = terminal_mode_for_plan(
@@ -693,7 +701,7 @@ class InterceptPlannerNode(Node):
                 prediction_sequence_id=(
                     job.request.prediction.sequence_id
                 ),
-                source_stamp=job.request.source_stamp,
+                trajectory_start_stamp=job.request.trajectory_start_stamp,
                 planning_started_stamp=job.planning_started_stamp,
                 generated_stamp=job.generated_stamp,
                 target_state_source=job.request.prediction.source,

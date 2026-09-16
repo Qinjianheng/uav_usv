@@ -52,6 +52,14 @@ def test_polynomial_is_sampled_from_original_source_time():
     assert sample.velocity == pytest.approx((1.0, 0.0, 0.2))
 
 
+def test_tracker_samples_minco_from_trajectory_start_not_prediction_stamp():
+    trajectory = linear_trajectory(source_stamp=10.10)
+
+    sample = trajectory.sample_at_ros_time(10.15)
+
+    assert sample.position == pytest.approx((0.05, 0.0, -0.99))
+
+
 def test_stale_or_wrong_mission_trajectory_cannot_replace_active_plan():
     tracker = TrajectoryTrackerCore(maximum_plan_age=0.125)
     accepted = tracker.accept(linear_trajectory(), state(), mission_id=4)

@@ -94,6 +94,7 @@ class PlannerRequest:
     mission_id: int
     prediction: PredictionSeries
     uav: UavKinematicState
+    trajectory_start_stamp: float
     contact_stamp: float = None
     terminal_mode: bool = False
     minimum_duration: float = None
@@ -275,7 +276,7 @@ def validate_target_shift(
         return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
     if contact_stamp is None:
         contact_stamp = (
-            request.prediction.source_stamp + float(intercept_time)
+            request.trajectory_start_stamp + float(intercept_time)
         )
     else:
         contact_stamp = float(contact_stamp)

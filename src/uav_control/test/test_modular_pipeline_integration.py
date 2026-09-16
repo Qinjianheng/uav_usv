@@ -52,15 +52,17 @@ def request(prediction_stamp=10.0, uav_stamp=10.02):
         ),
         source='simulation_truth',
     )
+    uav = UavKinematicState(
+        stamp=uav_stamp,
+        position=(0.0, 0.0, -1.0),
+        velocity=(1.0, 0.0, 0.2),
+        acceleration=(0.0, 0.0, 0.0),
+    )
     return PlannerRequest(
         mission_id=1,
         prediction=prediction,
-        uav=UavKinematicState(
-            stamp=uav_stamp,
-            position=(0.0, 0.0, -1.0),
-            velocity=(1.0, 0.0, 0.2),
-            acceleration=(0.0, 0.0, 0.0),
-        ),
+        uav=uav,
+        trajectory_start_stamp=uav.stamp,
     )
 
 
@@ -259,6 +261,7 @@ def test_async_20_5_20_hz_pipeline_accepts_completed_older_prediction():
         mission_id=1,
         prediction=prediction(10.0, 100),
         uav=first.uav,
+        trajectory_start_stamp=first.uav.stamp,
     )
     newer = prediction(10.2, 102)
     slot = LatestRequestSlot()
@@ -269,8 +272,18 @@ def test_async_20_5_20_hz_pipeline_accepts_completed_older_prediction():
         future = executor.submit(
             lambda: (time.sleep(0.055), worker_request)[1]
         )
-        slot.submit(PlannerRequest(1, prediction(10.1, 101), first.uav))
-        slot.submit(PlannerRequest(1, newer, first.uav))
+        slot.submit(PlannerRequest(
+            1,
+            prediction(10.1, 101),
+            first.uav,
+            first.uav.stamp,
+        ))
+        slot.submit(PlannerRequest(
+            1,
+            newer,
+            first.uav,
+            first.uav.stamp,
+        ))
         while not future.done():
             time.sleep(0.01)
         completed = future.result()

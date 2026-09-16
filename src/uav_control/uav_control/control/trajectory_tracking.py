@@ -82,7 +82,7 @@ class TrajectorySample:
 
 @dataclass(frozen=True)
 class PolynomialTrajectory:
-    """Complete cross-process MINCO trajectory with original timing."""
+    """Complete cross-process MINCO trajectory timed from its start stamp."""
 
     mission_id: int
     plan_id: int
@@ -118,7 +118,7 @@ class PolynomialTrajectory:
         raise RuntimeError('trajectory sampling failed')
 
     def sample_at_ros_time(self, now):
-        """Sample against source time, never against generation time."""
+        """Sample from the MINCO start time stored in ``source_stamp``."""
         return self.sample(float(now) - self.source_stamp)
 
 
