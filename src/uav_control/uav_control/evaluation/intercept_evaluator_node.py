@@ -237,6 +237,7 @@ class InterceptEvaluatorNode(Node):
         self.latest_truth = None
         self.latest_mission = None
         self.latest_controller = None
+        self.latest_tracker_rejection_reason = ''
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker = PredictionErrorTracker(PREDICTION_HORIZONS)
         self.prediction_sequences = set()
@@ -350,6 +351,10 @@ class InterceptEvaluatorNode(Node):
             compute_time=message.compute_time,
             generation_time=message.generation_time,
             completion_stamp=_stamp_seconds(message.generated_stamp),
+            input_age_at_publish=message.input_age_at_publish,
+            completion_to_publish_delay=(
+                message.completion_to_publish_delay
+            ),
         )
 
     def controller_callback(self, message):
@@ -358,7 +363,12 @@ class InterceptEvaluatorNode(Node):
             message.mission_id,
             message.plan_id,
             message.status,
+            message.rejection_reason,
         )
+        if message.status == 'PLAN_REJECTED':
+            self.latest_tracker_rejection_reason = (
+                str(message.rejection_reason)
+            )
         self.controller_compute_times.append(
             max(float(message.callback_compute_time), 0.0)
         )
@@ -384,6 +394,7 @@ class InterceptEvaluatorNode(Node):
             values.clear()
         self.latest_prediction_error.clear()
         self.controller_compute_times.clear()
+        self.latest_tracker_rejection_reason = ''
         self.writer = ExperimentArtifactWriter(
             self.log_directory,
             mission_id,
@@ -433,7 +444,27 @@ class InterceptEvaluatorNode(Node):
             'relative_speed': metrics[3],
             'closing_speed': metrics[4],
             'controller_status': controller.status if controller else '',
+            'tracker_rejection_reason': (
+                self.latest_tracker_rejection_reason
+                if controller and controller.status == 'PLAN_REJECTED'
+                else ''
+            ),
             'plan_id': controller.plan_id if controller else 0,
+            'plan_prediction_sequence_id': (
+                controller.prediction_sequence_id if controller else 0
+            ),
+            'latest_prediction_sequence_id': (
+                self.latest_prediction.sequence_id
+                if self.latest_prediction else 0
+            ),
+            'planner_source_age_at_publish': (
+                self.latest_planner_diagnostic.input_age_at_publish
+                if self.latest_planner_diagnostic else 0.0
+            ),
+            'planner_completion_to_publish_delay': (
+                self.latest_planner_diagnostic.completion_to_publish_delay
+                if self.latest_planner_diagnostic else 0.0
+            ),
             'plan_source_age': controller.source_age if controller else 0.0,
             'sea_safety_state': (
                 controller.safety_state if controller else ''

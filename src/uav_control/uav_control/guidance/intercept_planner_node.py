@@ -194,6 +194,7 @@ class InterceptPlannerNode(Node):
     def __init__(self):
         super().__init__('intercept_planner_node')
         self.declare_parameter('planning_rate_hz', 5.0)
+        self.declare_parameter('completion_poll_rate_hz', 100.0)
         self.declare_parameter('minimum_duration', 1.0)
         self.declare_parameter('maximum_duration', 4.0)
         self.declare_parameter('duration_margin', 0.35)
@@ -324,9 +325,23 @@ class InterceptPlannerNode(Node):
             '/planning/diagnostic',
             output_qos,
         )
-        self.timer = self.create_timer(
+        self.planning_timer = self.create_timer(
             1.0 / planning_rate_hz,
-            self.timer_callback,
+            self.planning_timer_callback,
+        )
+        completion_poll_rate_hz = float(
+            self.get_parameter('completion_poll_rate_hz').value
+        )
+        if (
+            not math.isfinite(completion_poll_rate_hz)
+            or completion_poll_rate_hz <= 0.0
+        ):
+            raise ValueError(
+                'completion_poll_rate_hz must be finite and positive'
+            )
+        self.completion_timer = self.create_timer(
+            1.0 / completion_poll_rate_hz,
+            self.completion_timer_callback,
         )
 
         self.latest_prediction = None
@@ -445,7 +460,20 @@ class InterceptPlannerNode(Node):
         )
 
     def _publish_job(self, job):
+        publish_stamp = self._ros_seconds()
         outcome = job.outcome
+        if outcome.plan is not None:
+            arrival_failure = validate_plan_arrival(
+                job.request,
+                publish_stamp,
+                self.maximum_input_age,
+            )
+            if arrival_failure != FastPlanningFailure.NONE:
+                outcome = FastPlanningOutcome(
+                    plan=None,
+                    failure=arrival_failure,
+                    diagnostics=outcome.diagnostics,
+                )
         if outcome.plan is not None:
             shift_failure = validate_target_shift(
                 request=job.request,
@@ -475,6 +503,7 @@ class InterceptPlannerNode(Node):
             job.planning_started_stamp
         )
         message.generated_stamp = seconds_to_time(job.generated_stamp)
+        message.published_stamp = seconds_to_time(publish_stamp)
         message.result = (
             PlannerDiagnostic.RESULT_SUCCESS
             if outcome.plan is not None
@@ -491,6 +520,13 @@ class InterceptPlannerNode(Node):
         message.input_age_at_finish = (
             job.generated_stamp - job.request.source_stamp
         )
+        message.input_age_at_publish = (
+            publish_stamp - job.request.source_stamp
+        )
+        message.completion_to_publish_delay = max(
+            publish_stamp - job.generated_stamp,
+            0.0,
+        )
         message.candidate_count = diagnostics.candidates_checked
         message.replaced_request_count = (
             self.request_slot.replaced_request_count
@@ -500,7 +536,7 @@ class InterceptPlannerNode(Node):
         self.diagnostic_pub.publish(message)
 
         if outcome.plan is not None:
-            self.trajectory_pub.publish(plan_to_message(
+            trajectory = plan_to_message(
                 outcome.plan,
                 mission_id=job.request.mission_id,
                 plan_id=self.plan_id,
@@ -512,12 +548,16 @@ class InterceptPlannerNode(Node):
                 generated_stamp=job.generated_stamp,
                 target_state_source=job.request.prediction.source,
                 frame_id=self.frame_id,
-            ))
+            )
+            trajectory.published_stamp = seconds_to_time(publish_stamp)
+            self.trajectory_pub.publish(trajectory)
 
-    def timer_callback(self):
+    def completion_timer_callback(self):
         if self.future is not None and self.future.done():
             self._publish_job(self.future.result())
             self.future = None
+
+    def planning_timer_callback(self):
 
         if not self.intercept_requested:
             return

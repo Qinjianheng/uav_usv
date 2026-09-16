@@ -2,12 +2,20 @@ import math
 
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
-from uav_usv_interfaces.msg import InterceptTrajectory, PolynomialSegment
+from uav_usv_interfaces.msg import (
+    InterceptTrajectory,
+    PolynomialSegment,
+    PredictedTargetPoint,
+    TargetPrediction,
+)
 
 from uav_control.control.trajectory_tracker_node import command_to_setpoint
 from uav_control.control.trajectory_tracker_node import flight_command_to_setpoint
 from uav_control.control.trajectory_tracker_node import trajectory_from_message
 from uav_control.control.trajectory_tracker_node import tracker_state_from_message
+from uav_control.control.trajectory_tracker_node import (
+    prediction_endpoint_from_message,
+)
 from uav_control.control.flight_guidance import FlightGuidanceCommand
 from uav_control.control.trajectory_tracking import TrackingCommand
 
@@ -92,6 +100,44 @@ def test_invalid_message_is_rejected_before_reaching_tracker_core():
 
     with pytest.raises(ValueError, match='invalid trajectory message'):
         trajectory_from_message(message)
+
+
+def test_tracker_endpoint_query_uses_absolute_contact_stamp():
+    message = make_prediction_message(
+        source_stamp=10.2,
+        samples=(
+            (0.0, 40.8),
+            (1.0, 44.8),
+            (2.0, 48.8),
+            (3.0, 52.8),
+        ),
+    )
+
+    endpoint = prediction_endpoint_from_message(message, contact_stamp=13.0)
+
+    assert endpoint[0] == pytest.approx(52.0)
+
+
+def make_prediction_message(source_stamp, samples):
+    """Create a complete prediction message for endpoint tests."""
+    message = TargetPrediction()
+    message.mission_id = 3
+    message.sequence_id = 12
+    message.source_stamp.sec = int(source_stamp)
+    message.source_stamp.nanosec = int(
+        round((source_stamp - int(source_stamp)) * 1e9)
+    )
+    message.valid = True
+    message.prediction_horizon = samples[-1][0]
+    for relative_time, x in samples:
+        sample = PredictedTargetPoint()
+        sample.relative_time.sec = int(relative_time)
+        sample.relative_time.nanosec = int(
+            round((relative_time - int(relative_time)) * 1e9)
+        )
+        sample.position.x = x
+        message.samples.append(sample)
+    return message
 
 
 def test_flight_velocity_command_does_not_activate_position_control():

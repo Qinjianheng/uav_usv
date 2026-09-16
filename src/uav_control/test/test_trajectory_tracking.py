@@ -180,9 +180,23 @@ def test_plan_identity_frame_and_target_endpoint_are_rechecked():
         target_endpoint=(3.0, 0.0, -0.6),
     )
 
-    assert prediction_mismatch == TrajectoryRejectReason.PREDICTION_MISMATCH
+    assert prediction_mismatch == TrajectoryRejectReason.NONE
     assert frame_mismatch == TrajectoryRejectReason.FRAME_MISMATCH
     assert endpoint_mismatch == TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
+
+
+def test_prediction_sequence_is_traceability_only_not_acceptance_gate():
+    tracker = TrajectoryTrackerCore()
+
+    rejected = tracker.accept(
+        linear_trajectory(),
+        state(),
+        mission_id=4,
+        prediction_sequence_id=99,
+        target_endpoint=(2.0, 0.0, -0.6),
+    )
+
+    assert rejected == TrajectoryRejectReason.NONE
 
 
 def test_unrecoverable_sea_margin_rejects_new_plan():

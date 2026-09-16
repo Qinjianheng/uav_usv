@@ -21,6 +21,7 @@ uint64 prediction_sequence_id
 builtin_interfaces/Time source_stamp
 builtin_interfaces/Time planning_started_stamp
 builtin_interfaces/Time generated_stamp
+builtin_interfaces/Time published_stamp
 uint8 result
 uint8 failure_reason
 string failure_detail
@@ -29,6 +30,8 @@ float64 generation_time
 float64 optimization_time
 float64 input_age_at_start
 float64 input_age_at_finish
+float64 input_age_at_publish
+float64 completion_to_publish_delay
 uint32 candidate_count
 uint64 replaced_request_count
 uint64 completed_plan_count

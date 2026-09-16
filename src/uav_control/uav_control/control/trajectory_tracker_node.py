@@ -148,11 +148,13 @@ def flight_command_to_setpoint(command, timestamp_us):
     return message
 
 
-def prediction_endpoint_from_message(message, relative_time):
-    """Interpolate a target endpoint solely for trajectory acceptance."""
+def prediction_endpoint_from_message(message, contact_stamp):
+    """Interpolate a target endpoint at one absolute ROS contact time."""
     if not message.valid or not message.samples:
         raise ValueError('target prediction is unavailable')
-    desired_time = max(float(relative_time), 0.0)
+    desired_time = float(contact_stamp) - _stamp_seconds(message.source_stamp)
+    if not math.isfinite(desired_time) or desired_time < 0.0:
+        raise ValueError('contact time precedes prediction source')
     samples = list(message.samples)
     first_time = _duration_seconds(samples[0].relative_time)
     if desired_time <= first_time:
@@ -172,6 +174,8 @@ def prediction_endpoint_from_message(message, relative_time):
                 )
                 for axis in ('x', 'y', 'z')
             )
+    if desired_time > _duration_seconds(samples[-1].relative_time) + 1e-9:
+        raise ValueError('contact time exceeds prediction horizon')
     point = samples[-1].position
     return float(point.x), float(point.y), float(point.z)
 
@@ -505,39 +509,41 @@ class TrajectoryTrackerNode(Node):
         rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         try:
             trajectory = trajectory_from_message(message)
-            if self.latest_state is None or self.latest_prediction is None:
-                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
-            elif (
-                int(self.latest_prediction.mission_id) != self.mission_id
-                or int(self.latest_prediction.sequence_id)
-                != trajectory.prediction_sequence_id
-            ):
-                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
-            else:
-                endpoint = prediction_endpoint_from_message(
-                    self.latest_prediction,
-                    trajectory.duration,
-                )
-                rejection = self.tracker.accept(
-                    trajectory,
-                    self.latest_state,
-                    self.mission_id,
-                    prediction_sequence_id=(
-                        self.latest_prediction.sequence_id
-                    ),
-                    target_endpoint=endpoint,
-                )
         except (TypeError, ValueError):
             rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
+        else:
+            if self.latest_state is None or self.latest_prediction is None:
+                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
+            elif int(self.latest_prediction.mission_id) != self.mission_id:
+                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
+            else:
+                try:
+                    endpoint = prediction_endpoint_from_message(
+                        self.latest_prediction,
+                        trajectory.source_stamp + trajectory.duration,
+                    )
+                except (TypeError, ValueError):
+                    rejection = TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
+                else:
+                    rejection = self.tracker.accept(
+                        trajectory,
+                        self.latest_state,
+                        self.mission_id,
+                        prediction_sequence_id=None,
+                        target_endpoint=endpoint,
+                    )
         self.last_rejection = rejection
         self.last_callback_time = time.perf_counter() - started
-        if rejection == TrajectoryRejectReason.NONE:
-            self._publish_diagnostic(
-                self._ros_seconds(),
-                None,
-                'PLAN_ACCEPTED',
-                self.last_callback_time,
-            )
+        self._publish_diagnostic(
+            self._ros_seconds(),
+            None,
+            (
+                'PLAN_ACCEPTED'
+                if rejection == TrajectoryRejectReason.NONE
+                else 'PLAN_REJECTED'
+            ),
+            self.last_callback_time,
+        )
 
     def _publish_offboard_mode(self, timestamp_us, velocity_control=False):
         message = OffboardControlMode()

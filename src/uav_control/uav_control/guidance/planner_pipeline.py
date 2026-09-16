@@ -69,8 +69,12 @@ class PredictionSeries:
                         fraction,
                     ),
                 )
-        sample = self.samples[-1]
-        return sample.position, sample.velocity, sample.acceleration
+        raise ValueError('prediction time exceeds available horizon')
+
+    def state_at_absolute_time(self, absolute_time):
+        """Return the state at an absolute ROS time in this snapshot."""
+        relative_time = float(absolute_time) - self.source_stamp
+        return self.state_at(relative_time)
 
 
 @dataclass(frozen=True)
@@ -154,8 +158,16 @@ def validate_target_shift(
         return FastPlanningFailure.PREDICTION_STALE
     if latest_prediction.mission_id != request.mission_id:
         return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
-    planned_position = request.prediction.state_at(intercept_time)[0]
-    latest_position = latest_prediction.state_at(intercept_time)[0]
+    contact_stamp = request.prediction.source_stamp + float(intercept_time)
+    try:
+        planned_position = request.prediction.state_at_absolute_time(
+            contact_stamp
+        )[0]
+        latest_position = latest_prediction.state_at_absolute_time(
+            contact_stamp
+        )[0]
+    except (TypeError, ValueError):
+        return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
     shift = math.sqrt(sum(
         (latest - planned) ** 2
         for latest, planned in zip(latest_position, planned_position)

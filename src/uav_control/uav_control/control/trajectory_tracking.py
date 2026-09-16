@@ -209,12 +209,6 @@ class TrajectoryTrackerCore:
         """Validate then atomically replace the active trajectory."""
         if trajectory.mission_id != int(mission_id):
             return TrajectoryRejectReason.MISSION_MISMATCH
-        if (
-            prediction_sequence_id is not None
-            and trajectory.prediction_sequence_id
-            != int(prediction_sequence_id)
-        ):
-            return TrajectoryRejectReason.PREDICTION_MISMATCH
         if trajectory.frame_id != self.expected_frame_id:
             return TrajectoryRejectReason.FRAME_MISMATCH
         source_age = state.stamp - trajectory.source_stamp

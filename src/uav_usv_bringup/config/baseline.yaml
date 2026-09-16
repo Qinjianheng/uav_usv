@@ -176,6 +176,7 @@ target_predictor_node:
 intercept_planner_node:
   ros__parameters:
     planning_rate_hz: 5.0
+    completion_poll_rate_hz: 100.0
     minimum_duration: 1.0
     # The previous 3.0 s cap rejected five-metre terminal descents whose
     # minimum-time bound was feasible but whose jerk-continuous MINCO profile

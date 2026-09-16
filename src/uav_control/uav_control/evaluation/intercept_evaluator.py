@@ -59,9 +59,12 @@ class PlannerEventAccumulator:
         self._completion_stamps = []
         self._compute_times = []
         self._generation_times = []
+        self._publish_ages = []
+        self._publication_delays = []
         self._executed_plan_ids = set()
         self._controller_event_count = 0
         self._hold_event_count = 0
+        self._tracker_rejection_histogram = {}
 
     def observe_planner(
         self,
@@ -72,6 +75,8 @@ class PlannerEventAccumulator:
         compute_time,
         generation_time,
         completion_stamp,
+        input_age_at_publish=0.0,
+        completion_to_publish_delay=0.0,
     ):
         """Store a completed event if its mission/plan identity is new."""
         key = int(mission_id), int(plan_id)
@@ -83,14 +88,29 @@ class PlannerEventAccumulator:
             'compute_time': max(float(compute_time), 0.0),
             'generation_time': max(float(generation_time), 0.0),
             'completion_stamp': float(completion_stamp),
+            'input_age_at_publish': max(float(input_age_at_publish), 0.0),
+            'completion_to_publish_delay': max(
+                float(completion_to_publish_delay),
+                0.0,
+            ),
         }
         self._planner_events[key] = event
         self._completion_stamps.append(event['completion_stamp'])
         self._compute_times.append(event['compute_time'])
         self._generation_times.append(event['generation_time'])
+        self._publish_ages.append(event['input_age_at_publish'])
+        self._publication_delays.append(
+            event['completion_to_publish_delay']
+        )
         return True
 
-    def observe_controller(self, mission_id, plan_id, status):
+    def observe_controller(
+        self,
+        mission_id,
+        plan_id,
+        status,
+        rejection_reason='',
+    ):
         """Record execution and hold events without duplicating plan IDs."""
         self._controller_event_count += 1
         status = str(status)
@@ -98,6 +118,11 @@ class PlannerEventAccumulator:
             self._executed_plan_ids.add((int(mission_id), int(plan_id)))
         if status in ('NO_VALID_PLAN', 'SAFE_WAIT', 'HOLD'):
             self._hold_event_count += 1
+        if status == 'PLAN_REJECTED' and rejection_reason:
+            reason = str(rejection_reason)
+            self._tracker_rejection_histogram[reason] = (
+                self._tracker_rejection_histogram.get(reason, 0) + 1
+            )
 
     def summary(self, elapsed_time):
         """Return numeric event rates even when no event has occurred."""
@@ -143,6 +168,9 @@ class PlannerEventAccumulator:
                 self._hold_event_count / self._controller_event_count
                 if self._controller_event_count else 0.0
             ),
+            'tracker_rejection_histogram': dict(sorted(
+                self._tracker_rejection_histogram.items()
+            )),
             'actual_completion_hz': completion_hz,
             'planner_compute_p50': _percentile(self._compute_times, 0.50),
             'planner_compute_p95': _percentile(self._compute_times, 0.95),
@@ -157,6 +185,30 @@ class PlannerEventAccumulator:
             ),
             'generation_compute_max': max(
                 self._generation_times,
+                default=0.0,
+            ),
+            'planner_source_age_at_publish_p50': _percentile(
+                self._publish_ages,
+                0.50,
+            ),
+            'planner_source_age_at_publish_p95': _percentile(
+                self._publish_ages,
+                0.95,
+            ),
+            'planner_source_age_at_publish_max': max(
+                self._publish_ages,
+                default=0.0,
+            ),
+            'planner_publish_delay_p50': _percentile(
+                self._publication_delays,
+                0.50,
+            ),
+            'planner_publish_delay_p95': _percentile(
+                self._publication_delays,
+                0.95,
+            ),
+            'planner_publish_delay_max': max(
+                self._publication_delays,
                 default=0.0,
             ),
         }

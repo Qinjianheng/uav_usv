@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+import time
+
 from uav_control.control.trajectory_tracking import PolynomialSegmentData
 from uav_control.control.trajectory_tracking import PolynomialTrajectory
 from uav_control.control.trajectory_tracking import TrackerKinematicState
@@ -12,6 +15,8 @@ from uav_control.guidance.planner_pipeline import PredictionSeries
 from uav_control.guidance.planner_pipeline import UavKinematicState
 from uav_control.guidance.planner_pipeline import validate_input
 from uav_control.guidance.planner_pipeline import validate_plan_arrival
+from uav_control.guidance.planner_pipeline import LatestRequestSlot
+from uav_control.guidance.planner_pipeline import validate_target_shift
 from uav_control.mission.mission_manager import MissionManagerCore
 from uav_control.mission.mission_manager import MissionPhase
 from uav_control.tracking.target_prediction import PredictionEngine
@@ -225,3 +230,66 @@ def test_mission_reset_immediately_rejects_old_trajectory():
     rejected = tracker.accept(old, tracker_state(), manager.mission_id)
 
     assert rejected == TrajectoryRejectReason.MISSION_MISMATCH
+
+
+def test_async_20_5_20_hz_pipeline_accepts_completed_older_prediction():
+    """A 55 ms worker result survives newer prediction frames."""
+    first = request()
+
+    def prediction(source_stamp, sequence_id):
+        samples = tuple(
+            PredictionSample(
+                float(index),
+                (4.0 * (source_stamp + index - 12.5), 0.0, -0.1),
+                (4.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            )
+            for index in range(5)
+        )
+        return PredictionSeries(
+            mission_id=1,
+            sequence_id=sequence_id,
+            source_stamp=source_stamp,
+            valid_until=source_stamp + 4.0,
+            samples=samples,
+            source='simulation_truth',
+        )
+
+    first = PlannerRequest(
+        mission_id=1,
+        prediction=prediction(10.0, 100),
+        uav=first.uav,
+    )
+    newer = prediction(10.2, 102)
+    slot = LatestRequestSlot()
+    slot.submit(first)
+    worker_request = slot.take()
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            lambda: (time.sleep(0.055), worker_request)[1]
+        )
+        slot.submit(PlannerRequest(1, prediction(10.1, 101), first.uav))
+        slot.submit(PlannerRequest(1, newer, first.uav))
+        while not future.done():
+            time.sleep(0.01)
+        completed = future.result()
+    published = time.perf_counter()
+
+    assert 0.05 <= published - started < 0.20
+    assert published - (started + 0.055) < 0.03
+    assert validate_target_shift(
+        completed,
+        newer,
+        intercept_time=3.0,
+        tolerance=0.05,
+    ) == FastPlanningFailure.NONE
+
+    tracker = TrajectoryTrackerCore()
+    assert tracker.accept(
+        trajectory(),
+        tracker_state(),
+        mission_id=1,
+        prediction_sequence_id=102,
+        target_endpoint=(2.0, 0.0, -0.6),
+    ) == TrajectoryRejectReason.NONE

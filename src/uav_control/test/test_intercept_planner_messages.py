@@ -31,6 +31,24 @@ def test_planner_node_does_not_shadow_rclpy_executor_property():
     assert 'executor' not in assignments
 
 
+def test_planner_submission_and_completion_use_independent_timers():
+    tree = ast.parse(inspect.getsource(planner_node_module.InterceptPlannerNode))
+    timer_callbacks = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != 'create_timer' or len(node.args) < 2:
+            continue
+        callback = node.args[1]
+        if isinstance(callback, ast.Attribute):
+            timer_callbacks.append(callback.attr)
+
+    assert 'planning_timer_callback' in timer_callbacks
+    assert 'completion_timer_callback' in timer_callbacks
+
+
 def test_planner_input_conversion_preserves_prediction_source_stamp():
     message = TargetPrediction()
     message.mission_id = 3

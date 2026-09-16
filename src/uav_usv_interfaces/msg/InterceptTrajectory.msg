@@ -4,6 +4,7 @@ uint64 prediction_sequence_id
 builtin_interfaces/Time source_stamp
 builtin_interfaces/Time planning_started_stamp
 builtin_interfaces/Time generated_stamp
+builtin_interfaces/Time published_stamp
 builtin_interfaces/Time valid_until
 string target_state_source
 string frame_id

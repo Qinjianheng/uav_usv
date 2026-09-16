@@ -66,6 +66,8 @@ def test_planner_statistics_are_unique_per_plan_event():
         compute_time=0.02,
         generation_time=0.01,
         completion_stamp=1.0,
+        input_age_at_publish=0.06,
+        completion_to_publish_delay=0.005,
     )
     assert not metrics.observe_planner(
         mission_id=2,
@@ -84,10 +86,18 @@ def test_planner_statistics_are_unique_per_plan_event():
         compute_time=0.08,
         generation_time=0.03,
         completion_stamp=1.5,
+        input_age_at_publish=0.07,
+        completion_to_publish_delay=0.006,
     )
     metrics.observe_controller(2, 7, 'PLAN_ACCEPTED')
     metrics.observe_controller(2, 7, 'TRACKING')
     metrics.observe_controller(2, 0, 'NO_VALID_PLAN')
+    metrics.observe_controller(
+        2,
+        8,
+        'PLAN_REJECTED',
+        'TARGET_ENDPOINT_MISMATCH',
+    )
 
     summary = metrics.summary(elapsed_time=2.0)
 
@@ -96,12 +106,19 @@ def test_planner_statistics_are_unique_per_plan_event():
     assert summary['planner_succeeded'] == 1
     assert summary['planner_failed'] == 1
     assert summary['planner_deadline'] == 1
+    assert summary['planner_source_age_at_publish_p95'] == pytest.approx(
+        0.07
+    )
+    assert summary['planner_publish_delay_p95'] == pytest.approx(0.006)
     assert summary['planner_failure_histogram'] == {
         'DEADLINE_EXCEEDED': 1,
     }
+    assert summary['tracker_rejection_histogram'] == {
+        'TARGET_ENDPOINT_MISMATCH': 1,
+    }
     assert summary['attempt_rate'] == pytest.approx(1.0)
     assert summary['execution_rate'] == pytest.approx(1.0)
-    assert summary['hold_rate'] == pytest.approx(1.0 / 3.0)
+    assert summary['hold_rate'] == pytest.approx(1.0 / 4.0)
 
 
 def test_empty_event_rates_are_numeric_not_null():
@@ -112,6 +129,9 @@ def test_empty_event_rates_are_numeric_not_null():
     assert summary['hold_rate'] == 0.0
     assert summary['actual_completion_hz'] == 0.0
     assert summary['planner_failure_histogram'] == {}
+    assert summary['tracker_rejection_histogram'] == {}
+    assert summary['planner_source_age_at_publish_p95'] == 0.0
+    assert summary['planner_publish_delay_p95'] == 0.0
 
 
 def test_artifact_writer_creates_csv_summary_and_config(tmp_path):

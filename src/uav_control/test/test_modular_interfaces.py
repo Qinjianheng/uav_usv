@@ -59,7 +59,8 @@ def test_intercept_trajectory_carries_complete_piecewise_polynomial():
     message.source_stamp.sec = 50
     message.planning_started_stamp.sec = 51
     message.generated_stamp.sec = 52
-    message.valid_until.sec = 53
+    message.published_stamp.sec = 53
+    message.valid_until.sec = 54
     message.piece_count = 1
     message.trajectory_duration = 2.0
     message.valid = True
@@ -76,7 +77,8 @@ def test_intercept_trajectory_carries_complete_piecewise_polynomial():
     assert restored.source_stamp.sec == 50
     assert restored.planning_started_stamp.sec == 51
     assert restored.generated_stamp.sec == 52
-    assert restored.valid_until.sec == 53
+    assert restored.published_stamp.sec == 53
+    assert restored.valid_until.sec == 54
     assert restored.piece_count == len(restored.segments) == 1
     assert restored.segments[0].duration.sec == 2
     assert list(restored.segments[0].coefficients) == [
@@ -102,6 +104,20 @@ def test_planner_diagnostic_failure_reasons_are_distinct_constants():
 
     assert diagnostic.NONE not in reasons
     assert len(reasons) == 11
+
+
+def test_planner_diagnostic_carries_publish_age_and_completion_delay():
+    diagnostic = message_class('PlannerDiagnostic')
+    message = diagnostic()
+    message.input_age_at_finish = 0.058
+    message.input_age_at_publish = 0.064
+    message.completion_to_publish_delay = 0.006
+
+    restored = round_trip(message, diagnostic)
+
+    assert restored.input_age_at_finish == pytest.approx(0.058)
+    assert restored.input_age_at_publish == pytest.approx(0.064)
+    assert restored.completion_to_publish_delay == pytest.approx(0.006)
 
 
 def test_mission_state_constants_are_machine_parseable():

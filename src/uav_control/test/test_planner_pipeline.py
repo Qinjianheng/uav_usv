@@ -113,6 +113,71 @@ def test_changed_prediction_endpoint_rejects_completed_plan():
     assert failure == FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
 
 
+def test_target_shift_uses_absolute_contact_time_when_sources_differ():
+    def series(source_stamp, sequence_id):
+        return PredictionSeries(
+            mission_id=5,
+            sequence_id=sequence_id,
+            source_stamp=source_stamp,
+            valid_until=source_stamp + 4.0,
+            samples=tuple(
+                PredictionSample(
+                    relative_time=float(index),
+                    position=(4.0 * (source_stamp + index), 0.0, -0.1),
+                    velocity=(4.0, 0.0, 0.0),
+                    acceleration=(0.0, 0.0, 0.0),
+                )
+                for index in range(5)
+            ),
+            source='simulation_truth',
+        )
+
+    request = PlannerRequest(
+        mission_id=5,
+        prediction=series(10.0, 100),
+        uav=make_request().uav,
+    )
+
+    failure = validate_target_shift(
+        request=request,
+        latest_prediction=series(10.2, 102),
+        intercept_time=3.0,
+        tolerance=0.05,
+    )
+
+    assert failure == FastPlanningFailure.NONE
+
+
+def test_target_shift_rejects_latest_prediction_beyond_available_horizon():
+    request = make_request()
+    short_latest = PredictionSeries(
+        mission_id=5,
+        sequence_id=2,
+        source_stamp=10.2,
+        valid_until=11.2,
+        samples=(
+            PredictionSample(
+                0.0, (1.0, 0.0, -0.1), (2.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+            PredictionSample(
+                1.0, (3.0, 0.0, -0.1), (2.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        ),
+        source='simulation_truth',
+    )
+
+    failure = validate_target_shift(
+        request=request,
+        latest_prediction=short_latest,
+        intercept_time=3.0,
+        tolerance=0.5,
+    )
+
+    assert failure == FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+
+
 def test_total_planner_deadline_includes_diagnostics_overhead():
     assert validate_total_deadline(0.079, 0.08) == FastPlanningFailure.NONE
     assert validate_total_deadline(0.080, 0.08) == (
