@@ -148,6 +148,10 @@ class InterceptEvaluatorNode(Node):
             'data/experiments/current',
         )
         self.declare_parameter('truth_topic', '/target/state')
+        self.declare_parameter(
+            'shadow_prediction_topic',
+            '/planning/shadow_target_prediction',
+        )
         self.declare_parameter('gazebo_world_name', 'default')
         self.declare_parameter('gazebo_pause_timeout_ms', 250)
         self.declare_parameter('gazebo_pause_maximum_attempts', 2)
@@ -173,6 +177,9 @@ class InterceptEvaluatorNode(Node):
             self.get_parameter('log_directory').value
         )
         self.truth_topic = str(self.get_parameter('truth_topic').value)
+        self.shadow_prediction_topic = str(
+            self.get_parameter('shadow_prediction_topic').value
+        )
         self.gazebo_pauser = None
         try:
             pause_client = GazeboWorldPauseClient(
@@ -235,6 +242,12 @@ class InterceptEvaluatorNode(Node):
             TargetPrediction,
             '/planning/target_prediction',
             self.prediction_callback,
+            sensor_qos,
+        )
+        self.shadow_prediction_sub = self.create_subscription(
+            TargetPrediction,
+            self.shadow_prediction_topic,
+            self.shadow_prediction_callback,
             sensor_qos,
         )
         self.planner_sub = self.create_subscription(
@@ -308,9 +321,14 @@ class InterceptEvaluatorNode(Node):
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker = PredictionErrorTracker(PREDICTION_HORIZONS)
         self.prediction_sequences = set()
+        self.shadow_prediction_sequences = set()
         self.prediction_errors = {
             (model, horizon): []
-            for model in ('guidance', 'kf')
+            for model in (
+                'guidance',
+                'kf',
+                'shadow_bctra',
+            )
             for horizon in PREDICTION_HORIZONS
         }
         self.latest_prediction_error = {}
@@ -347,7 +365,11 @@ class InterceptEvaluatorNode(Node):
             return
         truth_stamp = _stamp_seconds(message.stamp) or self._now()
         self.truth_history.add(truth_stamp, self.latest_truth)
-        for model in ('guidance', 'kf'):
+        for model in (
+            'guidance',
+            'kf',
+            'shadow_bctra',
+        ):
             for horizon in PREDICTION_HORIZONS:
                 evaluation = self.prediction_tracker.evaluate(
                     model,
@@ -389,24 +411,60 @@ class InterceptEvaluatorNode(Node):
         }
         self.prediction_tracker.add('kf', stamp, predictions)
 
-    def prediction_callback(self, message):
-        self.latest_prediction = message if message.valid else self.latest_prediction
-        key = int(message.mission_id), int(message.sequence_id)
-        if not message.valid or key in self.prediction_sequences:
+    def _queue_prediction(
+        self,
+        model,
+        message,
+        seen_sequences,
+    ):
+        key = (
+            int(message.mission_id),
+            int(message.sequence_id),
+        )
+        if (
+            not message.valid
+            or key in seen_sequences
+        ):
             return
-        self.prediction_sequences.add(key)
+
+        seen_sequences.add(key)
         try:
             predictions = {
-                horizon: _prediction_at(message, horizon)
+                horizon: _prediction_at(
+                    message,
+                    horizon,
+                )
                 for horizon in PREDICTION_HORIZONS
-                if horizon <= float(message.prediction_horizon) + 1e-9
+                if (
+                    horizon
+                    <= float(message.prediction_horizon)
+                    + 1e-9
+                )
             }
         except (TypeError, ValueError):
             return
+
         self.prediction_tracker.add(
-            'guidance',
+            model,
             _stamp_seconds(message.source_stamp),
             predictions,
+        )
+
+    def prediction_callback(self, message):
+        if message.valid:
+            self.latest_prediction = message
+
+        self._queue_prediction(
+            'guidance',
+            message,
+            self.prediction_sequences,
+        )
+
+    def shadow_prediction_callback(self, message):
+        self._queue_prediction(
+            'shadow_bctra',
+            message,
+            self.shadow_prediction_sequences,
         )
 
     @staticmethod
@@ -467,6 +525,9 @@ class InterceptEvaluatorNode(Node):
             'maximum_duration': self.evaluator.maximum_duration,
             'truth_topic': self.truth_topic,
             'truth_role': 'evaluation_only',
+            'shadow_prediction_topic': (
+                self.shadow_prediction_topic
+            ),
         }
 
     def _start_mission(self, mission_id, now):
@@ -474,6 +535,7 @@ class InterceptEvaluatorNode(Node):
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker.reset()
         self.prediction_sequences.clear()
+        self.shadow_prediction_sequences.clear()
         for values in self.prediction_errors.values():
             values.clear()
         self.latest_prediction_error.clear()
@@ -630,6 +692,42 @@ class InterceptEvaluatorNode(Node):
             'prediction_2p0_error': self.latest_prediction_error.get(
                 ('guidance', 2.0),
                 '',
+            ),
+            'kf_prediction_0p5_error': (
+                self.latest_prediction_error.get(
+                    ('kf', 0.5),
+                    '',
+                )
+            ),
+            'kf_prediction_1p0_error': (
+                self.latest_prediction_error.get(
+                    ('kf', 1.0),
+                    '',
+                )
+            ),
+            'kf_prediction_2p0_error': (
+                self.latest_prediction_error.get(
+                    ('kf', 2.0),
+                    '',
+                )
+            ),
+            'shadow_bctra_prediction_0p5_error': (
+                self.latest_prediction_error.get(
+                    ('shadow_bctra', 0.5),
+                    '',
+                )
+            ),
+            'shadow_bctra_prediction_1p0_error': (
+                self.latest_prediction_error.get(
+                    ('shadow_bctra', 1.0),
+                    '',
+                )
+            ),
+            'shadow_bctra_prediction_2p0_error': (
+                self.latest_prediction_error.get(
+                    ('shadow_bctra', 2.0),
+                    '',
+                )
             ),
             **self.performance_values,
             'tracker_hz': self.tracker_rate.rate(now),

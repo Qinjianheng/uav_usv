@@ -59,6 +59,14 @@ def generate_launch_description():
         ),
         Node(
             package='uav_control',
+            executable='target_predictor_node',
+            name='shadow_target_predictor_node',
+            output='screen',
+            parameters=[config_file],
+            condition=IfCondition(enable_shadow_perception),
+        ),
+        Node(
+            package='uav_control',
             executable='intercept_planner_node',
             name='intercept_planner_node',
             output='screen',

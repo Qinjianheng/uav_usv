@@ -105,3 +105,27 @@ def test_prediction_horizon_covers_vertical_intercept_duration():
     assert legacy['terminal_plan_absolute_max_duration'] == pytest.approx(
         planner['maximum_duration']
     )
+
+
+def test_shadow_camera_prediction_chain_is_isolated_from_truth_control():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+
+    control = parameters(config, 'target_predictor_node')
+    shadow = parameters(config, 'shadow_target_predictor_node')
+    kalman = parameters(config, 'target_kalman_filter')
+    localizer = parameters(config, 'rgbd_target_localizer')
+    evaluator = parameters(config, 'intercept_evaluator_node')
+
+    assert control['target_state_source'] == 'simulation_truth'
+    assert control['prediction_topic'] == '/planning/target_prediction'
+
+    assert shadow['target_state_source'] == 'tracking'
+    assert shadow['tracking_topic'] == kalman['state_topic']
+    assert shadow['prediction_topic'] != control['prediction_topic']
+
+    assert kalman['input_topic'] == localizer['observation_topic']
+
+    assert (
+        evaluator['shadow_prediction_topic']
+        == shadow['prediction_topic']
+    )

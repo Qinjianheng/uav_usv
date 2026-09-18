@@ -234,3 +234,10 @@ def test_artifact_writer_creates_csv_summary_and_config(tmp_path):
     summary = json.loads(paths.summary_path.read_text(encoding='utf-8'))
     assert summary['mission_id'] == 3
     assert summary['attempt_rate'] == 0.0
+
+
+def test_csv_records_camera_shadow_prediction_errors():
+    for prefix in ('kf', 'shadow_bctra'):
+        for label in ('0p5', '1p0', '2p0'):
+            field = f'{prefix}_prediction_{label}_error'
+            assert field in ExperimentArtifactWriter.CSV_FIELDS

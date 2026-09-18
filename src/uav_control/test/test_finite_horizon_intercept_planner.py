@@ -268,3 +268,41 @@ def test_minco_relaxes_target_curve_weight_to_remain_dynamically_feasible():
     assert plan.planner_type in ('MINCO_T3', 'MINCO_T3_OPT')
     assert 0.0 < plan.target_curve_weight < 0.7
     assert plan.maximum_horizontal_acceleration <= 3.5
+
+
+def test_moving_target_reachability_recovers_after_early_infinite_bound():
+    planner = make_planner(
+        minimum_duration=0.8,
+        maximum_duration=4.0,
+        absolute_maximum_duration=4.0,
+        duration_step=0.35,
+        maximum_horizontal_speed=7.0,
+        maximum_horizontal_acceleration=3.0,
+        maximum_vertical_speed=4.0,
+        maximum_vertical_acceleration=3.0,
+        desired_closing_speed=1.5,
+        minimum_closing_speed=0.3,
+        closing_speed_step=1.2,
+        capture_radius=0.35,
+        preferred_clearance=0.1,
+    )
+
+    def receding_target(horizon):
+        return (
+            (-2.0 + 4.0 * horizon, 0.0, -0.1),
+            (4.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )
+
+    planner.plan(
+        (0.0, 0.0, -1.0),
+        (6.5, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        receding_target,
+    )
+
+    diagnostics = planner.last_diagnostics
+
+    assert math.isfinite(diagnostics.required_time)
+    assert diagnostics.search_min_time > 0.8
+    assert diagnostics.search_min_time <= 4.0

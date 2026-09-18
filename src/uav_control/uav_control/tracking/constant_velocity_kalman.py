@@ -40,14 +40,27 @@ class ConstantVelocityKalmanFilter:
             self.measurement_position_std ** 2 * np.eye(3)
         )
 
-    def initialize(self, position):
+    def initialize(
+        self,
+        position,
+        measurement_covariance=None,
+    ):
         measurement = self._validated_position(position)
+        covariance = self._validated_measurement_covariance(
+            measurement_covariance
+        )
+
         self.state.fill(0.0)
         self.state[:self.POSITION_SIZE] = measurement
-        position_variance = self.measurement_position_std ** 2
+
         velocity_variance = self.initial_velocity_std ** 2
-        self.covariance = np.diag(
-            [position_variance] * 3 + [velocity_variance] * 3
+        self.covariance = np.zeros(
+            (self.STATE_SIZE, self.STATE_SIZE),
+            dtype=float,
+        )
+        self.covariance[:3, :3] = covariance
+        self.covariance[3:, 3:] = (
+            velocity_variance * np.eye(3)
         )
         self.initialized = True
 
@@ -69,28 +82,45 @@ class ConstantVelocityKalmanFilter:
             self.covariance + self.covariance.T
         )
 
-    def update(self, position):
+    def update(
+        self,
+        position,
+        measurement_covariance=None,
+    ):
         self._require_initialized()
         measurement = self._validated_position(position)
-        innovation = measurement - self.measurement_matrix @ self.state
+        covariance = self._validated_measurement_covariance(
+            measurement_covariance
+        )
+
+        innovation = (
+            measurement
+            - self.measurement_matrix @ self.state
+        )
         innovation_covariance = (
             self.measurement_matrix
             @ self.covariance
             @ self.measurement_matrix.T
-            + self.measurement_covariance
+            + covariance
         )
         kalman_gain = np.linalg.solve(
             innovation_covariance,
             self.measurement_matrix @ self.covariance,
         ).T
+
         self.state = self.state + kalman_gain @ innovation
 
         identity = np.eye(self.STATE_SIZE)
-        correction = identity - kalman_gain @ self.measurement_matrix
+        correction = (
+            identity
+            - kalman_gain @ self.measurement_matrix
+        )
         self.covariance = (
-            correction @ self.covariance @ correction.T
+            correction
+            @ self.covariance
+            @ correction.T
             + kalman_gain
-            @ self.measurement_covariance
+            @ covariance
             @ kalman_gain.T
         )
         self.covariance = 0.5 * (
@@ -137,6 +167,31 @@ class ConstantVelocityKalmanFilter:
             covariance[velocity_axis, velocity_axis] = velocity_variance
 
         return covariance
+
+    def _validated_measurement_covariance(self, covariance):
+        if covariance is None:
+            return self.measurement_covariance.copy()
+
+        matrix = np.asarray(covariance, dtype=float)
+        if matrix.shape == (9,):
+            matrix = matrix.reshape((3, 3))
+
+        if matrix.shape != (3, 3):
+            raise ValueError(
+                'measurement covariance must be 3x3'
+            )
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError(
+                'measurement covariance must be finite'
+            )
+
+        matrix = 0.5 * (matrix + matrix.T)
+        if np.linalg.eigvalsh(matrix).min() < -1e-12:
+            raise ValueError(
+                'measurement covariance must be '
+                'positive semidefinite'
+            )
+        return matrix
 
     @staticmethod
     def _validated_position(position):

@@ -17,4 +17,4 @@ data/experiments/current/*
 !data/experiments/current/.gitkeep
 data/models/*
 !data/models/.gitkeep
-
+*.bak

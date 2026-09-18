@@ -954,13 +954,8 @@ class FiniteHorizonInterceptPlanner:
                 target_state_cache[key] = target_state_at_time(float(time))
             return target_state_cache[key]
 
-        # Fixed-point evaluation accounts for a moving endpoint without
-        # changing the target-prediction model itself.
-        estimate_time = self.minimum_duration
-        reachability = None
-        contact_position = None
-        for _ in range(4):
-            target_state = cached_target_state(estimate_time)
+        def reachability_at(contact_time):
+            target_state = cached_target_state(contact_time)
             if len(target_state) != 3:
                 raise ValueError(
                     'target state must contain position, velocity, '
@@ -974,17 +969,13 @@ class FiniteHorizonInterceptPlanner:
                 target_state[1],
                 'target velocity',
             )
-            contact_position = self._capture_contact_position(target_position)
-            if contact_position is None:
-                self.last_diagnostics = PlannerDiagnostics(
-                    failure_reason=PlanningFailureReason.SEA_CLEARANCE,
-                    total_compute_time=time.perf_counter() - compute_start,
-                )
-                return None
-            reachability = estimate_reachability(
+            contact = self._capture_contact_position(target_position)
+            if contact is None:
+                return None, None
+            estimate = estimate_reachability(
                 initial_position,
                 initial_velocity,
-                contact_position,
+                contact,
                 target_velocity,
                 self.maximum_horizontal_speed,
                 self.maximum_vertical_speed,
@@ -994,21 +985,104 @@ class FiniteHorizonInterceptPlanner:
                 self.response_delay,
                 self.absolute_maximum_duration,
             )
+            return estimate, contact
+
+        def first_finite_reachability(start_time):
+            probe_time = min(
+                max(float(start_time), self.minimum_duration),
+                self.absolute_maximum_duration,
+            )
+
+            while True:
+                probe_reachability, probe_contact = reachability_at(
+                    probe_time
+                )
+
+                if probe_contact is None:
+                    return probe_time, None, None
+
+                if math.isfinite(
+                    probe_reachability.required_time
+                ):
+                    return (
+                        probe_time,
+                        probe_reachability,
+                        probe_contact,
+                    )
+
+                if (
+                    probe_time
+                    >= self.absolute_maximum_duration - 1e-9
+                ):
+                    return (
+                        probe_time,
+                        probe_reachability,
+                        probe_contact,
+                    )
+
+                probe_time = min(
+                    probe_time + self.duration_step,
+                    self.absolute_maximum_duration,
+                )
+
+        # For a moving endpoint an early contact can be unreachable while a
+        # later target state inside the same prediction horizon is reachable.
+        # Do not classify the whole horizon from the first infinite bound.
+        estimate_time, reachability, contact_position = (
+            first_finite_reachability(self.minimum_duration)
+        )
+
+        if contact_position is None:
+            self.last_diagnostics = PlannerDiagnostics(
+                failure_reason=PlanningFailureReason.SEA_CLEARANCE,
+                total_compute_time=time.perf_counter() - compute_start,
+            )
+            return None
+
+        # Fixed-point refinement starts at the first finite moving-target
+        # contact probe and never moves the contact floor backward.
+        for _ in range(4):
             required_time = reachability.required_time
             if not math.isfinite(required_time):
                 break
-            updated_time = max(self.minimum_duration, required_time)
+
+            updated_time = max(
+                estimate_time,
+                required_time,
+            )
+
             if abs(updated_time - estimate_time) <= 0.02:
-                estimate_time = updated_time
                 break
-            estimate_time = min(updated_time, self.absolute_maximum_duration)
+
+            if (
+                estimate_time
+                >= self.absolute_maximum_duration - 1e-9
+            ):
+                break
+
+            estimate_time, reachability, contact_position = (
+                first_finite_reachability(updated_time)
+            )
+
+            if contact_position is None:
+                self.last_diagnostics = PlannerDiagnostics(
+                    failure_reason=PlanningFailureReason.SEA_CLEARANCE,
+                    total_compute_time=(
+                        time.perf_counter() - compute_start
+                    ),
+                )
+                return None
 
         required_time = (
             reachability.required_time
             if reachability is not None
             else math.inf
         )
-        search_minimum = max(self.minimum_duration, required_time)
+        search_minimum = max(
+            self.minimum_duration,
+            estimate_time,
+            required_time,
+        )
         search_maximum = min(
             self.absolute_maximum_duration,
             max(

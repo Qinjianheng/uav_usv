@@ -173,6 +173,34 @@ target_predictor_node:
     vertical_observation_margin: 0.25
     vertical_history_window: 1.0
 
+
+shadow_target_predictor_node:
+  ros__parameters:
+    # Camera/KF BCTRA stays shadow-only and never feeds the planner.
+    target_state_source: tracking
+    simulation_truth_topic: /target/state
+    tracking_topic: /tracking/target_state
+    prediction_topic: /planning/shadow_target_prediction
+    frame_id: local_ned
+    update_rate_hz: 20.0
+    prediction_horizon: 4.0
+    prediction_sample_period: 0.1
+    input_timeout: 0.125
+    turn_rate_filter_alpha: 0.25
+    max_target_turn_rate: 0.7
+    maneuver_prediction_horizon: 2.0
+    minimum_target_speed: 0.2
+    minimum_turn_updates: 3
+    turn_acceleration_filter_alpha: 0.2
+    max_target_turn_acceleration: 1.5
+    speed_acceleration_filter_alpha: 0.2
+    max_target_longitudinal_acceleration: 2.0
+    maneuver_acceleration_decay_time: 1.0
+    vertical_velocity_decay_time: 0.75
+    maximum_vertical_displacement: 0.5
+    vertical_observation_margin: 0.25
+    vertical_history_window: 1.0
+
 intercept_planner_node:
   ros__parameters:
     planning_rate_hz: 5.0
@@ -272,6 +300,7 @@ intercept_evaluator_node:
     # Simulation truth is consumed only by this evaluator and by the explicitly
     # configured truth-control baseline predictor.
     truth_topic: /target/state
+    shadow_prediction_topic: /planning/shadow_target_prediction
     gazebo_world_name: default
     gazebo_pause_timeout_ms: 250
     gazebo_pause_maximum_attempts: 2
@@ -281,7 +310,7 @@ target_kalman_filter:
   ros__parameters:
     frame_id: local_ned
     # Camera-derived positions are filtered; truth remains evaluation-only.
-    input_topic: /perception/front/target_position
+    input_topic: /perception/front/target_observation
     state_topic: /tracking/target_state
     prediction_topic: /tracking/predicted_position
     update_rate_hz: 20.0

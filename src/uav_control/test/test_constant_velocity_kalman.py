@@ -103,3 +103,25 @@ def test_half_second_prediction_tracks_configured_heave():
             vertical_errors.append(predicted_z - true_z)
 
     assert max(abs(error) for error in vertical_errors) < 0.11
+
+
+def test_filter_uses_per_measurement_covariance():
+    low_noise = make_filter()
+    high_noise = make_filter()
+
+    low_noise.initialize([0.0, 0.0, 0.0])
+    high_noise.initialize([0.0, 0.0, 0.0])
+
+    low_noise.predict(0.1)
+    high_noise.predict(0.1)
+
+    low_noise.update(
+        [1.0, 0.0, 0.0],
+        np.eye(3) * 1.0e-4,
+    )
+    high_noise.update(
+        [1.0, 0.0, 0.0],
+        np.eye(3) * 1.0,
+    )
+
+    assert low_noise.state[0] > high_noise.state[0]

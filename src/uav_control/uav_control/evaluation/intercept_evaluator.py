@@ -623,6 +623,12 @@ class ExperimentArtifactWriter:
         'tracker_hz', 'tracker_callback_time', 'planner_compute_time',
         'prediction_0p5_error', 'prediction_1p0_error',
         'prediction_2p0_error',
+        'kf_prediction_0p5_error',
+        'kf_prediction_1p0_error',
+        'kf_prediction_2p0_error',
+        'shadow_bctra_prediction_0p5_error',
+        'shadow_bctra_prediction_1p0_error',
+        'shadow_bctra_prediction_2p0_error',
     )
 
     def __init__(
