@@ -2,7 +2,15 @@
 # shellcheck disable=SC1090,SC1091
 set -eo pipefail
 
-WS_ROOT="${UAV_USV_WS:-/home/qin/data/uav_usv}"
+SCRIPT_DIR="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    pwd -P
+)"
+DEFAULT_WS_ROOT="$(
+    cd -- "${SCRIPT_DIR}/.."
+    pwd -P
+)"
+WS_ROOT="${UAV_USV_WS:-${DEFAULT_WS_ROOT}}"
 PX4_ROOT="${PX4_ROOT:-/home/qin/Projects/PX4-Autopilot}"
 OCEAN_WORLD="${WS_ROOT}/src/uav_usv_bringup/worlds/ocean.sdf"
 PX4_GZ_ENV="${PX4_ROOT}/build/px4_sitl_default/rootfs/gz_env.sh"
@@ -364,7 +372,8 @@ export UAV_USV_WS='${WS_ROOT}' &&
 source /opt/ros/humble/setup.bash &&
 source '${WS_ROOT}/install/setup.bash' &&
 cd '${WS_ROOT}' &&
-ros2 launch uav_usv_bringup '${EXPERIMENT_LAUNCH}';
+ros2 launch uav_usv_bringup '${EXPERIMENT_LAUNCH}' \
+    enable_shadow_perception:=true;
 component_status=\$?;
 if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
 exit \${component_status}"
