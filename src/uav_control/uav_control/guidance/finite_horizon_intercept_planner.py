@@ -39,10 +39,13 @@ class PlannerDiagnostics:
     selected_time: float = math.nan
     candidates_checked: int = 0
     total_compute_time: float = 0.0
+    reachability_compute_time: float = 0.0
     generation_compute_time: float = 0.0
+    validation_compute_time: float = 0.0
     optimization_compute_time: float = 0.0
     optimization_attempted: bool = False
     optimization_succeeded: bool = False
+    candidate_diagnostics: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -748,6 +751,10 @@ class FiniteHorizonInterceptPlanner:
             dynamically_feasible=True,
         )
 
+    def _validate_infeasible_candidates(self):
+        """Return whether dense validation should diagnose rejected seeds."""
+        return False
+
     def _geometrically_optimize_candidate(self, seed_plan, candidate_args):
         """Optimize MINCO waypoints and interval times."""
         if (
@@ -933,7 +940,9 @@ class FiniteHorizonInterceptPlanner:
         compute/mission cap.
         """
         compute_start = time.perf_counter()
+        reachability_compute_time = 0.0
         generation_compute_time = 0.0
+        validation_compute_time = 0.0
         optimization_compute_time = 0.0
         optimization_succeeded = False
         initial_position = self._vector(initial_position, 'initial position')
@@ -1028,14 +1037,19 @@ class FiniteHorizonInterceptPlanner:
         # For a moving endpoint an early contact can be unreachable while a
         # later target state inside the same prediction horizon is reachable.
         # Do not classify the whole horizon from the first infinite bound.
+        reachability_start = time.perf_counter()
         estimate_time, reachability, contact_position = (
             first_finite_reachability(self.minimum_duration)
         )
 
         if contact_position is None:
+            reachability_compute_time = (
+                time.perf_counter() - reachability_start
+            )
             self.last_diagnostics = PlannerDiagnostics(
                 failure_reason=PlanningFailureReason.SEA_CLEARANCE,
                 total_compute_time=time.perf_counter() - compute_start,
+                reachability_compute_time=reachability_compute_time,
             )
             return None
 
@@ -1065,13 +1079,21 @@ class FiniteHorizonInterceptPlanner:
             )
 
             if contact_position is None:
+                reachability_compute_time = (
+                    time.perf_counter() - reachability_start
+                )
                 self.last_diagnostics = PlannerDiagnostics(
                     failure_reason=PlanningFailureReason.SEA_CLEARANCE,
                     total_compute_time=(
                         time.perf_counter() - compute_start
                     ),
+                    reachability_compute_time=reachability_compute_time,
                 )
                 return None
+
+        reachability_compute_time = (
+            time.perf_counter() - reachability_start
+        )
 
         required_time = (
             reachability.required_time
@@ -1091,6 +1113,7 @@ class FiniteHorizonInterceptPlanner:
             ),
         )
         base_diagnostics = dict(
+            reachability_compute_time=reachability_compute_time,
             horizontal_min_time=(
                 reachability.horizontal_min_time
                 if reachability is not None else math.inf
@@ -1192,9 +1215,14 @@ class FiniteHorizonInterceptPlanner:
                         sea_rejection = True
                     elif not candidate.dynamically_feasible:
                         dynamic_rejection = True
-                        candidate = None
+                        if not self._validate_infeasible_candidates():
+                            candidate = None
                     if candidate is not None:
+                        validation_start = time.perf_counter()
                         candidate = self._densely_validated_plan(candidate)
+                        validation_compute_time += (
+                            time.perf_counter() - validation_start
+                        )
                     if candidate is not None:
                         if (
                             self.enable_minco_geometric_optimization
@@ -1210,8 +1238,12 @@ class FiniteHorizonInterceptPlanner:
                             optimization_compute_time += (
                                 time.perf_counter() - optimization_start
                             )
+                            validation_start = time.perf_counter()
                             validated_optimized = self._densely_validated_plan(
                                 optimized,
+                            )
+                            validation_compute_time += (
+                                time.perf_counter() - validation_start
                             )
                             if validated_optimized is not None:
                                 candidate = validated_optimized
@@ -1225,6 +1257,7 @@ class FiniteHorizonInterceptPlanner:
                                 time.perf_counter() - compute_start
                             ),
                             generation_compute_time=generation_compute_time,
+                            validation_compute_time=validation_compute_time,
                             optimization_compute_time=(
                                 optimization_compute_time
                             ),
@@ -1298,7 +1331,11 @@ class FiniteHorizonInterceptPlanner:
                 time.perf_counter() - optimization_start
             )
             optimization_attempted = True
+            validation_start = time.perf_counter()
             optimized = self._densely_validated_plan(optimized)
+            validation_compute_time += (
+                time.perf_counter() - validation_start
+            )
             if optimized is not None:
                 optimization_succeeded = True
                 self._last_duration = optimized.duration
@@ -1308,6 +1345,7 @@ class FiniteHorizonInterceptPlanner:
                     candidates_checked=candidate_count + 1,
                     total_compute_time=time.perf_counter() - compute_start,
                     generation_compute_time=generation_compute_time,
+                    validation_compute_time=validation_compute_time,
                     optimization_compute_time=optimization_compute_time,
                     optimization_attempted=optimization_attempted,
                     optimization_succeeded=optimization_succeeded,
@@ -1327,6 +1365,7 @@ class FiniteHorizonInterceptPlanner:
             candidates_checked=candidate_count,
             total_compute_time=time.perf_counter() - compute_start,
             generation_compute_time=generation_compute_time,
+            validation_compute_time=validation_compute_time,
             optimization_compute_time=optimization_compute_time,
             optimization_attempted=optimization_attempted,
             optimization_succeeded=optimization_succeeded,

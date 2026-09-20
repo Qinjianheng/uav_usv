@@ -21,6 +21,10 @@ def test_csv_separates_prediction_and_trajectory_age():
 def test_csv_records_planner_failure_diagnostics():
     assert 'planner_failure_reason' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_failure_detail' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_reachability_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_generation_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_validation_time' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_candidate_diagnostics' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_required_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_horizontal_min_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_vertical_min_time' in ExperimentArtifactWriter.CSV_FIELDS

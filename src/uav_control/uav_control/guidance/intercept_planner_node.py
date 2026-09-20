@@ -1,10 +1,11 @@
 """Independent latest-input-only Fast MINCO planning node."""
 
+import json
 import math
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import rclpy
 from px4_msgs.msg import VehicleLocalPosition
@@ -742,8 +743,15 @@ class InterceptPlannerNode(Node):
         message.failure_reason = FAILURE_CONSTANTS[outcome.failure]
         message.failure_detail = outcome.failure.value
         message.compute_time = job.compute_time
+        message.reachability_time = diagnostics.reachability_compute_time
         message.generation_time = diagnostics.generation_compute_time
+        message.validation_time = diagnostics.validation_compute_time
         message.optimization_time = diagnostics.optimization_compute_time
+        message.candidate_diagnostics = json.dumps(
+            [asdict(value) for value in diagnostics.candidate_diagnostics],
+            ensure_ascii=True,
+            separators=(',', ':'),
+        )
         message.input_age_at_start = (
             job.planning_started_stamp - job.request.source_stamp
         )

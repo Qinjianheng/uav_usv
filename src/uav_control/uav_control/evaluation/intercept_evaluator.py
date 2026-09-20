@@ -140,7 +140,9 @@ class PlannerEventAccumulator:
         self._planner_events = {}
         self._completion_stamps = []
         self._compute_times = []
+        self._reachability_times = []
         self._generation_times = []
+        self._validation_times = []
         self._publish_ages = []
         self._publication_delays = []
         self._executed_plan_ids = set()
@@ -157,6 +159,8 @@ class PlannerEventAccumulator:
         compute_time,
         generation_time,
         completion_stamp,
+        reachability_time=0.0,
+        validation_time=0.0,
         input_age_at_publish=0.0,
         completion_to_publish_delay=0.0,
     ):
@@ -168,7 +172,9 @@ class PlannerEventAccumulator:
             'success': bool(success),
             'failure_reason': str(failure_reason),
             'compute_time': max(float(compute_time), 0.0),
+            'reachability_time': max(float(reachability_time), 0.0),
             'generation_time': max(float(generation_time), 0.0),
+            'validation_time': max(float(validation_time), 0.0),
             'completion_stamp': float(completion_stamp),
             'input_age_at_publish': max(float(input_age_at_publish), 0.0),
             'completion_to_publish_delay': max(
@@ -179,7 +185,9 @@ class PlannerEventAccumulator:
         self._planner_events[key] = event
         self._completion_stamps.append(event['completion_stamp'])
         self._compute_times.append(event['compute_time'])
+        self._reachability_times.append(event['reachability_time'])
         self._generation_times.append(event['generation_time'])
+        self._validation_times.append(event['validation_time'])
         self._publish_ages.append(event['input_age_at_publish'])
         self._publication_delays.append(
             event['completion_to_publish_delay']
@@ -257,6 +265,18 @@ class PlannerEventAccumulator:
             'planner_compute_p50': _percentile(self._compute_times, 0.50),
             'planner_compute_p95': _percentile(self._compute_times, 0.95),
             'planner_compute_max': max(self._compute_times, default=0.0),
+            'reachability_compute_p50': _percentile(
+                self._reachability_times,
+                0.50,
+            ),
+            'reachability_compute_p95': _percentile(
+                self._reachability_times,
+                0.95,
+            ),
+            'reachability_compute_max': max(
+                self._reachability_times,
+                default=0.0,
+            ),
             'generation_compute_p50': _percentile(
                 self._generation_times,
                 0.50,
@@ -267,6 +287,18 @@ class PlannerEventAccumulator:
             ),
             'generation_compute_max': max(
                 self._generation_times,
+                default=0.0,
+            ),
+            'validation_compute_p50': _percentile(
+                self._validation_times,
+                0.50,
+            ),
+            'validation_compute_p95': _percentile(
+                self._validation_times,
+                0.95,
+            ),
+            'validation_compute_max': max(
+                self._validation_times,
                 default=0.0,
             ),
             'planner_source_age_at_publish_p50': _percentile(
@@ -610,6 +642,8 @@ class ExperimentArtifactWriter:
         'planner_search_min_time', 'planner_search_max_time',
         'planner_available_prediction_duration',
         'planner_locked_remaining_t_go',
+        'planner_reachability_time', 'planner_generation_time',
+        'planner_validation_time', 'planner_candidate_diagnostics',
         'planner_source_age_at_publish',
         'planner_completion_to_publish_delay',
         'selected_t_go', 'contact_stamp', 'remaining_t_go',

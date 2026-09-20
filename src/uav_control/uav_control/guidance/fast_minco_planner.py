@@ -37,6 +37,25 @@ class FastPlanningOutcome:
     diagnostics: object
 
 
+@dataclass(frozen=True)
+class CandidateDiagnostic:
+    """Bounded summary of one generated and densely checked candidate."""
+
+    duration: float
+    closing_speed: float
+    curve_weight: float
+    generation_time: float
+    validation_time: float = 0.0
+    maximum_horizontal_speed: float = 0.0
+    maximum_vertical_speed: float = 0.0
+    maximum_horizontal_acceleration: float = 0.0
+    maximum_vertical_acceleration: float = 0.0
+    maximum_sea_clearance_violation: float = 0.0
+    sea_clearance_violation_time: float = -1.0
+    failure: str = FastPlanningFailure.NONE.value
+    violations: tuple = ()
+
+
 class FastMincoPlanner(FiniteHorizonInterceptPlanner):
     """Use reachability-driven horizons and no realtime L-BFGS search."""
 
@@ -87,6 +106,7 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         self._active_deadline = None
         self._deadline_exceeded = False
         self._candidate_failures = []
+        self._candidate_diagnostics = []
         super().__init__(
             minimum_duration=minimum_duration,
             maximum_duration=maximum_duration,
@@ -139,21 +159,50 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
     def _duration_candidates(self, minimum=None, maximum=None):
         minimum = self.minimum_duration if minimum is None else float(minimum)
         maximum = self.maximum_duration if maximum is None else float(maximum)
-        middle = min(minimum + self.duration_margin, maximum)
-        candidates = [minimum, middle, maximum]
+        attempted = []
+
+        def available(value):
+            return not any(abs(value - old) <= 1e-9 for old in attempted)
+
         preferred = self._preferred_duration
         if preferred is not None and minimum <= preferred <= maximum:
-            candidates = [preferred, minimum, maximum]
-        elif (
+            first = preferred
+        else:
+            first = minimum
+        attempted.append(first)
+        yield first
+
+        continuity = None
+        if (
             self.last_success_duration is not None
             and minimum <= self.last_success_duration <= maximum
+            and available(self.last_success_duration)
         ):
-            candidates = [
-                self.last_success_duration,
-                minimum,
-                maximum,
-            ]
-        return self._unique(candidates)[:3]
+            continuity = self.last_success_duration
+        elif available(minimum):
+            continuity = minimum
+        elif available(maximum):
+            continuity = maximum
+        if continuity is not None:
+            attempted.append(continuity)
+            yield continuity
+
+        dynamic_failures = {
+            FastPlanningFailure.DYNAMIC_LIMIT_HORIZONTAL,
+            FastPlanningFailure.DYNAMIC_LIMIT_VERTICAL,
+        }
+        if any(
+            failure in dynamic_failures
+            for failure in self._candidate_failures
+        ):
+            adaptive = min(minimum + self.duration_margin, maximum)
+        else:
+            adaptive = minimum + 0.5 * (maximum - minimum)
+        fallbacks = (adaptive, maximum, minimum)
+        for value in fallbacks:
+            if available(value):
+                yield value
+                return
 
     def _closing_speed_candidates(self):
         return tuple(self._unique((
@@ -170,37 +219,71 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             and self.clock() >= self._active_deadline
         )
 
-    def _classify_infeasible(self, candidate):
-        sample_count = max(
-            int(math.ceil(candidate.duration / self.sample_step)),
-            1,
-        )
-        sea_violation = any(
-            candidate.sample(
-                candidate.duration * index / sample_count
-            ).position[2] > candidate.sea_clearance_ceiling_z + 1e-6
-            for index in range(sample_count + 1)
-        )
-        if sea_violation:
+    @staticmethod
+    def _failure_from_violations(violations):
+        if 'SEA_CLEARANCE' in violations:
             return FastPlanningFailure.SEA_CLEARANCE
-        horizontal_ratio = max(
-            candidate.maximum_horizontal_speed
-            / self.maximum_horizontal_speed,
-            candidate.maximum_horizontal_acceleration
-            / self.maximum_horizontal_acceleration,
-        )
-        vertical_ratio = max(
-            candidate.maximum_vertical_speed / self.maximum_vertical_speed,
-            candidate.maximum_vertical_acceleration
-            / self.maximum_vertical_acceleration,
-        )
-        if vertical_ratio > horizontal_ratio:
+        if any(value.startswith('VERTICAL_') for value in violations):
             return FastPlanningFailure.DYNAMIC_LIMIT_VERTICAL
-        return FastPlanningFailure.DYNAMIC_LIMIT_HORIZONTAL
+        if any(value.startswith('HORIZONTAL_') for value in violations):
+            return FastPlanningFailure.DYNAMIC_LIMIT_HORIZONTAL
+        return FastPlanningFailure.NONE
+
+    def _record_candidate(
+        self,
+        duration,
+        closing_speed,
+        curve_weight,
+        generation_time,
+        candidate=None,
+        failure=FastPlanningFailure.NONE,
+        violations=(),
+    ):
+        if len(self._candidate_diagnostics) >= 6:
+            return
+        self._candidate_diagnostics.append(CandidateDiagnostic(
+            duration=float(duration),
+            closing_speed=float(closing_speed),
+            curve_weight=float(curve_weight),
+            generation_time=max(float(generation_time), 0.0),
+            maximum_horizontal_speed=(
+                float(candidate.maximum_horizontal_speed)
+                if candidate is not None else 0.0
+            ),
+            maximum_vertical_speed=(
+                float(candidate.maximum_vertical_speed)
+                if candidate is not None else 0.0
+            ),
+            maximum_horizontal_acceleration=(
+                float(candidate.maximum_horizontal_acceleration)
+                if candidate is not None else 0.0
+            ),
+            maximum_vertical_acceleration=(
+                float(candidate.maximum_vertical_acceleration)
+                if candidate is not None else 0.0
+            ),
+            failure=failure.value,
+            violations=tuple(violations),
+        ))
 
     def _candidate(self, *args, **kwargs):
+        generation_start = time.perf_counter()
+        duration = kwargs.get('duration', args[6] if len(args) > 6 else 0.0)
+        closing_speed = kwargs.get(
+            'closing_speed',
+            args[7] if len(args) > 7 else 0.0,
+        )
+        curve_weight = kwargs.get('target_curve_weight', 0.0)
         if self._deadline_reached():
             self._deadline_exceeded = True
+            self._record_candidate(
+                duration,
+                closing_speed,
+                curve_weight,
+                time.perf_counter() - generation_start,
+                failure=FastPlanningFailure.DEADLINE_EXCEEDED,
+                violations=('DEADLINE_EXCEEDED',),
+            )
             return None
         target_position = kwargs.get('target_position')
         if target_position is None and len(args) >= 4:
@@ -209,20 +292,164 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             self._candidate_failures.append(
                 FastPlanningFailure.CAPTURE_GEOMETRY
             )
+            self._record_candidate(
+                duration,
+                closing_speed,
+                curve_weight,
+                time.perf_counter() - generation_start,
+                failure=FastPlanningFailure.CAPTURE_GEOMETRY,
+                violations=('CAPTURE_GEOMETRY',),
+            )
             return None
         candidate = super()._candidate(*args, **kwargs)
+        generation_time = time.perf_counter() - generation_start
         if self._deadline_reached():
             self._deadline_exceeded = True
+            self._record_candidate(
+                duration,
+                closing_speed,
+                curve_weight,
+                generation_time,
+                candidate=candidate,
+                failure=FastPlanningFailure.DEADLINE_EXCEEDED,
+                violations=('DEADLINE_EXCEEDED',),
+            )
             return None
         if candidate is None:
             self._candidate_failures.append(
                 FastPlanningFailure.MINCO_CONSTRUCTION_FAIL
             )
-        elif not candidate.dynamically_feasible:
-            self._candidate_failures.append(
-                self._classify_infeasible(candidate)
+            self._record_candidate(
+                duration,
+                closing_speed,
+                curve_weight,
+                generation_time,
+                failure=FastPlanningFailure.MINCO_CONSTRUCTION_FAIL,
+                violations=('MINCO_CONSTRUCTION_FAIL',),
+            )
+        else:
+            self._record_candidate(
+                duration,
+                closing_speed,
+                curve_weight,
+                generation_time,
+                candidate=candidate,
             )
         return candidate
+
+    def _validate_infeasible_candidates(self):
+        return True
+
+    def _densely_validated_plan(self, candidate):
+        """Validate every hard constraint and retain one compact summary."""
+        if candidate is None:
+            return None
+        validation_start = time.perf_counter()
+        sample_count = max(
+            int(math.ceil(candidate.duration / self.sample_step)),
+            1,
+        )
+        maximum_horizontal_speed = 0.0
+        maximum_vertical_speed = 0.0
+        maximum_horizontal_acceleration = 0.0
+        maximum_vertical_acceleration = 0.0
+        maximum_sea_violation = 0.0
+        sea_violation_time = -1.0
+        violations = set()
+        for index in range(sample_count + 1):
+            sample_time = candidate.duration * index / sample_count
+            sample = candidate.sample(sample_time)
+            horizontal_speed = math.hypot(
+                sample.velocity[0], sample.velocity[1]
+            )
+            vertical_speed = abs(sample.velocity[2])
+            horizontal_acceleration = math.hypot(
+                sample.acceleration[0], sample.acceleration[1]
+            )
+            vertical_acceleration = abs(sample.acceleration[2])
+            maximum_horizontal_speed = max(
+                maximum_horizontal_speed, horizontal_speed
+            )
+            maximum_vertical_speed = max(
+                maximum_vertical_speed, vertical_speed
+            )
+            maximum_horizontal_acceleration = max(
+                maximum_horizontal_acceleration, horizontal_acceleration
+            )
+            maximum_vertical_acceleration = max(
+                maximum_vertical_acceleration, vertical_acceleration
+            )
+            sea_violation = max(
+                sample.position[2] - candidate.sea_clearance_ceiling_z,
+                0.0,
+            )
+            if sea_violation > max(maximum_sea_violation, 1e-6):
+                maximum_sea_violation = sea_violation
+                sea_violation_time = sample_time
+            else:
+                maximum_sea_violation = max(
+                    maximum_sea_violation,
+                    sea_violation,
+                )
+            if horizontal_speed > self.maximum_horizontal_speed + 1e-6:
+                violations.add('HORIZONTAL_SPEED')
+            if vertical_speed > self.maximum_vertical_speed + 1e-6:
+                violations.add('VERTICAL_SPEED')
+            if (
+                horizontal_acceleration
+                > self.maximum_horizontal_acceleration + 1e-6
+            ):
+                violations.add('HORIZONTAL_ACCELERATION')
+            if (
+                vertical_acceleration
+                > self.maximum_vertical_acceleration + 1e-6
+            ):
+                violations.add('VERTICAL_ACCELERATION')
+            if sea_violation > 1e-6:
+                violations.add('SEA_CLEARANCE')
+
+        validation_time = time.perf_counter() - validation_start
+        failure = self._failure_from_violations(violations)
+        if failure != FastPlanningFailure.NONE:
+            self._candidate_failures.append(failure)
+        if self._candidate_diagnostics:
+            current = self._candidate_diagnostics[-1]
+            self._candidate_diagnostics[-1] = replace(
+                current,
+                validation_time=validation_time,
+                maximum_horizontal_speed=maximum_horizontal_speed,
+                maximum_vertical_speed=maximum_vertical_speed,
+                maximum_horizontal_acceleration=(
+                    maximum_horizontal_acceleration
+                ),
+                maximum_vertical_acceleration=maximum_vertical_acceleration,
+                maximum_sea_clearance_violation=maximum_sea_violation,
+                sea_clearance_violation_time=sea_violation_time,
+                failure=failure.value,
+                violations=tuple(sorted(violations)),
+            )
+        if self._deadline_reached():
+            self._deadline_exceeded = True
+            if self._candidate_diagnostics:
+                current = self._candidate_diagnostics[-1]
+                self._candidate_diagnostics[-1] = replace(
+                    current,
+                    failure=FastPlanningFailure.DEADLINE_EXCEEDED.value,
+                    violations=tuple(sorted(
+                        set(current.violations) | {'DEADLINE_EXCEEDED'}
+                    )),
+                )
+            return None
+        if violations:
+            return None
+        return replace(
+            candidate,
+            maximum_horizontal_speed=maximum_horizontal_speed,
+            maximum_vertical_speed=maximum_vertical_speed,
+            maximum_horizontal_acceleration=maximum_horizontal_acceleration,
+            maximum_vertical_acceleration=maximum_vertical_acceleration,
+            dynamically_feasible=True,
+        )
 
     def _mapped_failure(self):
         if self._deadline_exceeded:
@@ -286,6 +513,7 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         self._active_deadline = start + self.deadline_seconds
         self._deadline_exceeded = False
         self._candidate_failures = []
+        self._candidate_diagnostics = []
         try:
             plan = super().plan(*args, **kwargs)
             if self.clock() >= self._active_deadline:
@@ -297,6 +525,11 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             self.minimum_duration = normal_minimum_duration
             self.maximum_duration = normal_maximum_duration
             self.absolute_maximum_duration = normal_absolute_maximum_duration
+
+        self.last_diagnostics = replace(
+            self.last_diagnostics,
+            candidate_diagnostics=tuple(self._candidate_diagnostics),
+        )
 
         if plan is None:
             return FastPlanningOutcome(

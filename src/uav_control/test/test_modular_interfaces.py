@@ -155,6 +155,22 @@ def test_planner_diagnostic_carries_publish_age_and_completion_delay():
     assert restored.locked_remaining_t_go == pytest.approx(0.90)
 
 
+def test_planner_diagnostic_carries_stage_and_candidate_diagnostics():
+    diagnostic = message_class('PlannerDiagnostic')
+    message = diagnostic()
+    message.reachability_time = 0.004
+    message.validation_time = 0.012
+    message.candidate_diagnostics = (
+        '[{"duration":1.4,"violations":["VERTICAL_SPEED"]}]'
+    )
+
+    restored = round_trip(message, diagnostic)
+
+    assert restored.reachability_time == pytest.approx(0.004)
+    assert restored.validation_time == pytest.approx(0.012)
+    assert 'VERTICAL_SPEED' in restored.candidate_diagnostics
+
+
 def test_mission_state_constants_are_machine_parseable():
     mission_state = message_class('MissionState')
 

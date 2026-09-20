@@ -26,8 +26,11 @@ uint8 result
 uint8 failure_reason
 string failure_detail
 float64 compute_time
+float64 reachability_time
 float64 generation_time
+float64 validation_time
 float64 optimization_time
+string candidate_diagnostics
 float64 input_age_at_start
 float64 input_age_at_finish
 float64 input_age_at_publish

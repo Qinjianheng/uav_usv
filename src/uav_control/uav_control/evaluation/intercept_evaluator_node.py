@@ -486,6 +486,8 @@ class InterceptEvaluatorNode(Node):
             compute_time=message.compute_time,
             generation_time=message.generation_time,
             completion_stamp=_stamp_seconds(message.generated_stamp),
+            reachability_time=message.reachability_time,
+            validation_time=message.validation_time,
             input_age_at_publish=message.input_age_at_publish,
             completion_to_publish_delay=(
                 message.completion_to_publish_delay
@@ -650,6 +652,22 @@ class InterceptEvaluatorNode(Node):
             'planner_locked_remaining_t_go': (
                 self.latest_planner_diagnostic.locked_remaining_t_go
                 if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_reachability_time': (
+                self.latest_planner_diagnostic.reachability_time
+                if self.latest_planner_diagnostic else 0.0
+            ),
+            'planner_generation_time': (
+                self.latest_planner_diagnostic.generation_time
+                if self.latest_planner_diagnostic else 0.0
+            ),
+            'planner_validation_time': (
+                self.latest_planner_diagnostic.validation_time
+                if self.latest_planner_diagnostic else 0.0
+            ),
+            'planner_candidate_diagnostics': (
+                self.latest_planner_diagnostic.candidate_diagnostics
+                if self.latest_planner_diagnostic else '[]'
             ),
             'planner_source_age_at_publish': (
                 self.latest_planner_diagnostic.input_age_at_publish

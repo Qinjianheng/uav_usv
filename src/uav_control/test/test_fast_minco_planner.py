@@ -53,6 +53,61 @@ def test_realtime_search_checks_at_most_six_candidates():
     assert outcome.diagnostics.candidates_checked <= 6
 
 
+def test_staged_duration_search_keeps_middle_after_short_and_long_failures():
+    """A continuity duration must not hide the nearby feasible interval."""
+    planner = make_planner(maximum_duration=4.0)
+    planner.last_success_duration = 3.5
+
+    durations = iter(planner._duration_candidates(1.2, 4.0))
+    assert next(durations) == pytest.approx(1.2)
+    planner._candidate_failures.append(
+        FastPlanningFailure.DYNAMIC_LIMIT_VERTICAL
+    )
+    assert next(durations) == pytest.approx(3.5)
+    planner._candidate_failures.append(FastPlanningFailure.SEA_CLEARANCE)
+
+    assert next(durations) == pytest.approx(1.55)
+    with pytest.raises(StopIteration):
+        next(durations)
+
+
+def test_candidate_diagnostics_preserve_all_constraint_violations():
+    planner = make_planner(
+        maximum_horizontal_speed=2.1,
+        maximum_horizontal_acceleration=0.5,
+        maximum_vertical_speed=4.0,
+        maximum_vertical_acceleration=8.0,
+    )
+
+    outcome = planner.plan(
+        initial_position=(0.0, 0.0, -0.1),
+        initial_velocity=(2.0, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=lambda _horizon: (
+            (5.0, 0.0, -0.1),
+            (2.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ),
+    )
+
+    diagnostics = outcome.diagnostics
+    assert diagnostics.reachability_compute_time >= 0.0
+    assert diagnostics.validation_compute_time >= 0.0
+    assert 1 <= len(diagnostics.candidate_diagnostics) <= 6
+    candidate = diagnostics.candidate_diagnostics[0]
+    assert candidate.duration > 0.0
+    assert candidate.closing_speed > 0.0
+    assert candidate.generation_time >= 0.0
+    assert candidate.validation_time >= 0.0
+    assert candidate.maximum_horizontal_speed >= 0.0
+    assert candidate.maximum_vertical_speed >= 0.0
+    assert candidate.maximum_horizontal_acceleration >= 0.0
+    assert candidate.maximum_vertical_acceleration >= 0.0
+    assert candidate.maximum_sea_clearance_violation >= 0.0
+    assert candidate.failure != FastPlanningFailure.NONE.value
+    assert candidate.violations
+
+
 def test_fast_feasible_plan_does_not_wait_for_geometric_optimization():
     planner = make_planner(maximum_horizontal_acceleration=8.0)
 

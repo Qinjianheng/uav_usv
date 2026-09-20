@@ -1,6 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 import time
 
+import pytest
+
+from uav_control.control.trajectory_tracker_node import trajectory_from_message
 from uav_control.control.trajectory_tracking import PolynomialSegmentData
 from uav_control.control.trajectory_tracking import PolynomialTrajectory
 from uav_control.control.trajectory_tracking import TrackerKinematicState
@@ -9,6 +12,8 @@ from uav_control.control.trajectory_tracking import TrajectoryTrackerCore
 from uav_control.evaluation.intercept_evaluator import InterceptEvaluatorCore
 from uav_control.evaluation.intercept_evaluator import KinematicState
 from uav_control.guidance.fast_minco_planner import FastPlanningFailure
+from uav_control.guidance.fast_minco_planner import FastMincoPlanner
+from uav_control.guidance.intercept_planner_node import plan_to_message
 from uav_control.guidance.planner_pipeline import PlannerRequest
 from uav_control.guidance.planner_pipeline import PredictionSample
 from uav_control.guidance.planner_pipeline import PredictionSeries
@@ -166,6 +171,91 @@ def test_fast_valid_plan_flows_tracker_to_mission_and_truth_evaluator():
     assert accepted == TrajectoryRejectReason.NONE
     assert manager.phase == MissionPhase.MINCO_TRACKING
     assert result.success
+
+
+def test_forward_contact_minco_message_is_safe_and_tracker_accepts_it():
+    """An unreachable locked contact may move forward only to a valid plan."""
+    planner = FastMincoPlanner(
+        minimum_duration=0.8,
+        maximum_duration=4.0,
+        duration_margin=0.35,
+        sample_step=0.05,
+        maximum_horizontal_speed=7.0,
+        maximum_vertical_speed=4.0,
+        maximum_horizontal_acceleration=3.0,
+        maximum_vertical_acceleration=3.0,
+        preferred_closing_speed=1.5,
+        conservative_closing_speed=0.3,
+        capture_radius=0.35,
+        sea_surface_z=0.0,
+        contact_clearance=0.05,
+        preferred_clearance=0.1,
+        piece_count=3,
+        target_curve_weight=0.7,
+        deadline_seconds=0.08,
+    )
+
+    def receding_target(horizon):
+        return (
+            (-2.0 + 4.0 * horizon, 0.0, -0.1),
+            (4.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )
+
+    outcome = planner.plan(
+        initial_position=(0.0, 0.0, -1.0),
+        initial_velocity=(5.5, 0.0, 0.0),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=receding_target,
+        preferred_duration=0.8,
+        minimum_duration_override=0.8,
+    )
+
+    assert outcome.failure == FastPlanningFailure.NONE
+    assert outcome.plan is not None
+    assert outcome.plan.duration > 0.8
+    assert outcome.plan.maximum_horizontal_speed <= 7.0 + 1e-6
+    assert outcome.plan.maximum_vertical_speed <= 4.0 + 1e-6
+    assert outcome.plan.maximum_horizontal_acceleration <= 3.0 + 1e-6
+    assert outcome.plan.maximum_vertical_acceleration <= 3.0 + 1e-6
+    assert all(
+        outcome.plan.sample(index * outcome.plan.duration / 80).position[2]
+        <= outcome.plan.sea_clearance_ceiling_z + 1e-6
+        for index in range(81)
+    )
+
+    message = plan_to_message(
+        outcome.plan,
+        mission_id=1,
+        plan_id=9,
+        prediction_sequence_id=102,
+        trajectory_start_stamp=10.0,
+        planning_started_stamp=10.0,
+        generated_stamp=10.05,
+        target_state_source='simulation_truth',
+        contact_stamp=10.0 + outcome.plan.duration,
+        remaining_t_go=outcome.plan.duration,
+        terminal_mode=True,
+    )
+    reconstructed = trajectory_from_message(message)
+    sample = outcome.plan.sample(0.05)
+    state = TrackerKinematicState(
+        stamp=10.05,
+        position=sample.position,
+        velocity=sample.velocity,
+    )
+    target_endpoint = receding_target(outcome.plan.duration)[0]
+
+    assert reconstructed.contact_stamp == pytest.approx(
+        10.0 + outcome.plan.duration
+    )
+    assert TrajectoryTrackerCore().accept(
+        reconstructed,
+        state,
+        mission_id=1,
+        prediction_sequence_id=103,
+        target_endpoint=target_endpoint,
+    ) == TrajectoryRejectReason.NONE
 
 
 def test_planner_failure_retains_old_plan_then_recovers_from_safe_wait():
