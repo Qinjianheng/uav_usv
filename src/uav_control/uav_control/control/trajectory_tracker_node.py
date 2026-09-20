@@ -138,13 +138,25 @@ def rate_limited_target_yaw(previous_yaw, desired_yaw, maximum_rate, dt):
     return _wrap_angle(float(previous_yaw) + delta)
 
 
-def command_to_setpoint(command, timestamp_us, yaw=math.nan):
-    """Map the post-guard command to a PX4 position-feedforward setpoint."""
+def command_to_setpoint(command, timestamp_us, yaw=math.nan, velocity_mode=False):
+    """
+    Map the post-guard command to a PX4 setpoint.
+
+    ``velocity_mode`` sends the tracker's acceleration-limited velocity as the
+    commanded setpoint with NaN position, so PX4 consumes the closing speed
+    the tracker builds.  Position mode keeps the previous behaviour of sending
+    the MINCO reference and is retained for callers that still want it.
+    """
     message = TrajectorySetpoint()
     message.timestamp = int(timestamp_us)
-    message.position = [float(value) for value in command.position]
-    message.velocity = [float(value) for value in command.velocity]
-    message.acceleration = [float(value) for value in command.acceleration]
+    if velocity_mode:
+        message.position = [math.nan, math.nan, math.nan]
+        message.velocity = [float(value) for value in command.velocity]
+        message.acceleration = [math.nan, math.nan, math.nan]
+    else:
+        message.position = [float(value) for value in command.position]
+        message.velocity = [float(value) for value in command.velocity]
+        message.acceleration = [float(value) for value in command.acceleration]
     message.jerk = [math.nan, math.nan, math.nan]
     message.yaw = math.nan if yaw is None else float(yaw)
     message.yawspeed = math.nan
@@ -255,6 +267,7 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('recovery_clearance', 0.5)
         self.declare_parameter('recovery_climb_speed', 1.0)
         self.declare_parameter('maximum_state_age', 0.125)
+        self.declare_parameter('use_velocity_control', True)
         self.declare_parameter('frame_id', 'local_ned')
         self.declare_parameter('target_state_topic', '/target/state')
         self.declare_parameter('offboard_prestream_time', 2.0)
@@ -281,6 +294,14 @@ class TrajectoryTrackerNode(Node):
             self.get_parameter('maximum_state_age').value
         )
         self.expected_frame_id = str(self.get_parameter('frame_id').value)
+        # Drive MINCO tracking with the tracker's acceleration-limited velocity
+        # command.  Position mode re-sends a reference that is rebuilt from the
+        # measured state every replan, so the position error never grows past a
+        # few centimetres and the vehicle can only hold the speed it already
+        # has; velocity mode is what lets it build the closing speed.
+        self.use_velocity_control = bool(
+            self.get_parameter('use_velocity_control').value
+        )
         self.target_state_topic = str(
             self.get_parameter('target_state_topic').value
         )
@@ -912,6 +933,7 @@ class TrajectoryTrackerNode(Node):
             self._publish_bool(self.flight_ready_pub, False)
             self._request_flight_mode()
             command = self.tracker.command(current, self.mission_id)
+            velocity_mode = self.use_velocity_control
             if command is None:
                 # Keep the recovery reference continuous instead of snapping
                 # the position setpoint to the measured state, and climb out of
@@ -921,10 +943,11 @@ class TrajectoryTrackerNode(Node):
                     command,
                     timestamp_us,
                     yaw=target_yaw,
+                    velocity_mode=velocity_mode,
                 )
                 self._publish_offboard_mode(
                     timestamp_us,
-                    velocity_control=False,
+                    velocity_control=velocity_mode,
                 )
                 status = 'NO_VALID_PLAN'
             else:
@@ -932,10 +955,11 @@ class TrajectoryTrackerNode(Node):
                     command,
                     timestamp_us,
                     yaw=target_yaw,
+                    velocity_mode=velocity_mode,
                 )
                 self._publish_offboard_mode(
                     timestamp_us,
-                    velocity_control=False,
+                    velocity_control=velocity_mode,
                 )
                 status = 'TRACKING'
         else:

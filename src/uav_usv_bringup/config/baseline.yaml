@@ -324,6 +324,14 @@ trajectory_tracker_node:
     recovery_clearance: 0.5
     recovery_climb_speed: 1.0
     maximum_state_age: 0.125
+    # Drive MINCO tracking with the tracker's acceleration-limited velocity
+    # command instead of a position reference.  In position mode the reference
+    # is rebuilt from the measured state on every replan, so the position error
+    # never grows past a few centimetres and the vehicle can only maintain the
+    # speed it already has -- which is why the first descent used to fly at the
+    # target's 4 m/s and never close.  Set false to fall back to position
+    # tracking.
+    use_velocity_control: true
     frame_id: local_ned
 
 mission_manager_node:

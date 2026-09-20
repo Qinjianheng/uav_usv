@@ -78,6 +78,14 @@ def test_planned_contact_point_stays_above_the_body_contact_threshold():
     )
 
 
+def test_tracking_is_velocity_driven():
+    """Guard the mode that lets the vehicle build closing speed."""
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    tracker = parameters(config, 'trajectory_tracker_node')
+
+    assert tracker['use_velocity_control'] is True
+
+
 def test_sea_barrier_reserve_covers_the_airframe():
     """Guard the barrier that reported SAFE while the gear was at the water."""
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))

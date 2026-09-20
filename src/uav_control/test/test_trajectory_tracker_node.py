@@ -351,3 +351,35 @@ def test_flight_velocity_command_does_not_activate_position_control():
 
     assert all(math.isnan(value) for value in message.position)
     assert list(message.velocity) == pytest.approx([3.0, 4.0, -1.0])
+
+
+def test_tracking_velocity_mode_drops_position_and_sends_the_command_velocity():
+    """
+    Guard velocity-driven MINCO tracking, which is what builds closing speed.
+
+    In position mode the reference is rebuilt from the measured state on every
+    replan, so the position error never grows past a few centimetres and the
+    vehicle can only hold the speed it already has: it flew at the target's
+    4 m/s and closed at under 0.7 m/s.  Velocity mode lets PX4 consume the
+    tracker's acceleration-limited command instead.
+    """
+    command = TrackingCommand(
+        position=(1.0, 2.0, -3.0),
+        velocity=(6.2, 0.4, -0.3),
+        acceleration=(0.1, 0.2, 0.3),
+        plan_id=9,
+        safety_state='SAFE',
+        safety_margin=0.3,
+    )
+
+    message = command_to_setpoint(
+        command,
+        timestamp_us=77,
+        velocity_mode=True,
+    )
+
+    assert message.timestamp == 77
+    assert all(math.isnan(value) for value in message.position)
+    assert list(message.velocity) == pytest.approx([6.2, 0.4, -0.3])
+    assert all(math.isnan(value) for value in message.acceleration)
+    assert math.isnan(message.yaw)
