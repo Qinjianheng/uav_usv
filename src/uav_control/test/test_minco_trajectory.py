@@ -142,3 +142,41 @@ def test_invalid_piece_definition_is_rejected(waypoints, durations):
             waypoints,
             durations,
         )
+
+
+def test_sample_does_not_jump_across_shared_piece_boundaries():
+    """
+    Guard the piece scan inside ``sample`` against a boundary off-by-one.
+
+    Adjacent pieces share their boundary state, so sampling an epsilon either
+    side of a boundary may only move by O(epsilon).  Selecting the wrong piece
+    would produce an O(1) jump instead.
+    """
+    trajectory = MincoS3Trajectory(
+        (0.0, 0.0, -2.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (6.0, 1.0, -0.1),
+        (2.0, 0.2, 0.0),
+        (0.0, 0.0, 0.0),
+        ((2.0, 0.3, -1.5), (4.0, 0.8, -0.8)),
+        (0.6, 0.7, 0.8),
+    )
+
+    for boundary, waypoint in ((0.6, (2.0, 0.3, -1.5)),
+                               (1.3, (4.0, 0.8, -0.8))):
+        at = trajectory.sample(boundary)
+        assert at.position == pytest.approx(waypoint, abs=1e-8)
+        speed = max(abs(value) for value in at.velocity)
+        for epsilon in (1e-12, 1e-9, 1e-6, 1e-3):
+            tolerance = 20.0 * speed * epsilon + 1e-9
+            before = trajectory.sample(boundary - epsilon)
+            after = trajectory.sample(boundary + epsilon)
+            assert before.position == pytest.approx(
+                at.position,
+                abs=tolerance,
+            )
+            assert after.position == pytest.approx(
+                at.position,
+                abs=tolerance,
+            )

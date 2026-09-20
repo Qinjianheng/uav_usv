@@ -1,4 +1,5 @@
 import math
+import random
 
 import pytest
 
@@ -136,3 +137,112 @@ def test_dynamic_horizon_reports_insufficient_absolute_horizon():
         PlanningFailureReason.HORIZON_INSUFFICIENT
     )
     assert planner.last_diagnostics.vertical_min_time > 2.2
+
+
+def _oracle_velocity_envelope_integral(
+    duration,
+    initial_velocity,
+    final_velocity,
+    maximum_speed,
+    positive_acceleration,
+    negative_acceleration,
+    maximize,
+):
+    """
+    Keep the pre-optimization form as an exact regression oracle.
+
+    The production version unrolls the pointwise minimum of the three affine
+    envelope lines because that inner loop dominates the reachability cost.
+    This copy retains the original ``min(lines, key=...)`` expression and the
+    set/sorted breakpoints so any silent change to the result is caught.
+    """
+    duration = max(float(duration), 0.0)
+    if duration <= 0.0:
+        return 0.0
+
+    def upper_integral(
+        start_velocity,
+        end_velocity,
+        acceleration,
+        braking_acceleration,
+    ):
+        lines = (
+            (float(start_velocity), float(acceleration)),
+            (
+                float(end_velocity) + braking_acceleration * duration,
+                -float(braking_acceleration),
+            ),
+            (float(maximum_speed), 0.0),
+        )
+        breakpoints = {0.0, duration}
+        for left_index, left in enumerate(lines):
+            for right in lines[left_index + 1:]:
+                slope_difference = left[1] - right[1]
+                if abs(slope_difference) <= 1e-12:
+                    continue
+                intersection = (right[0] - left[0]) / slope_difference
+                if 0.0 < intersection < duration:
+                    breakpoints.add(intersection)
+        ordered = sorted(breakpoints)
+        integral = 0.0
+        for left_time, right_time in zip(ordered, ordered[1:]):
+            midpoint = 0.5 * (left_time + right_time)
+            intercept, slope = min(
+                lines,
+                key=lambda line: line[0] + line[1] * midpoint,
+            )
+            integral += (
+                intercept * (right_time - left_time)
+                + 0.5 * slope
+                * (right_time * right_time - left_time * left_time)
+            )
+        return integral
+
+    if maximize:
+        return upper_integral(
+            initial_velocity,
+            final_velocity,
+            positive_acceleration,
+            negative_acceleration,
+        )
+    return -upper_integral(
+        -initial_velocity,
+        -final_velocity,
+        negative_acceleration,
+        positive_acceleration,
+    )
+
+
+def test_velocity_envelope_integral_matches_the_unoptimized_oracle():
+    """The unrolled pointwise minimum must stay bit-identical to the oracle."""
+    arguments = (
+        (1.0, 0.0, 0.2, 10.0, 1.0, 2.0, True),
+        (1.0, 0.0, -0.2, 10.0, 2.0, 1.0, False),
+        (2.5, 0.7, 1.4, 7.0, 3.0, 2.5, True),
+        (2.5, 0.7, 1.4, 7.0, 3.0, 2.5, False),
+        (0.4, -3.0, 5.0, 4.0, 2.0, 4.0, True),
+        (3.9, 5.9, -2.1, 6.0, 1.5, 3.5, False),
+        (0.0, 1.0, 1.0, 1.0, 1.0, 1.0, True),
+    )
+    for case in arguments:
+        assert _velocity_envelope_integral(*case) == (
+            _oracle_velocity_envelope_integral(*case)
+        )
+
+    # Fixed seed keeps the sweep deterministic while covering the mixed
+    # acceleration/braking and saturated-speed regimes.
+    generator = random.Random(20260920)
+    for _ in range(2000):
+        maximum_speed = generator.uniform(0.2, 8.0)
+        case = (
+            generator.uniform(0.0, 4.0),
+            generator.uniform(-maximum_speed, maximum_speed),
+            generator.uniform(-maximum_speed, maximum_speed),
+            maximum_speed,
+            generator.uniform(0.1, 6.0),
+            generator.uniform(0.1, 6.0),
+            generator.random() < 0.5,
+        )
+        assert _velocity_envelope_integral(*case) == (
+            _oracle_velocity_envelope_integral(*case)
+        )

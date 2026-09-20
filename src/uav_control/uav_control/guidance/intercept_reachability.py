@@ -73,22 +73,36 @@ def _velocity_envelope_integral(
             (float(maximum_speed), 0.0),
         )
         breakpoints = {0.0, duration}
-        for left_index, left in enumerate(lines):
-            for right in lines[left_index + 1:]:
-                slope_difference = left[1] - right[1]
-                if abs(slope_difference) <= 1e-12:
-                    continue
-                intersection = (right[0] - left[0]) / slope_difference
-                if 0.0 < intersection < duration:
-                    breakpoints.add(intersection)
+        for left, right in (
+            (lines[0], lines[1]),
+            (lines[0], lines[2]),
+            (lines[1], lines[2]),
+        ):
+            slope_difference = left[1] - right[1]
+            if abs(slope_difference) <= 1e-12:
+                continue
+            intersection = (right[0] - left[0]) / slope_difference
+            if 0.0 < intersection < duration:
+                breakpoints.add(intersection)
         ordered = sorted(breakpoints)
         integral = 0.0
         for left_time, right_time in zip(ordered, ordered[1:]):
             midpoint = 0.5 * (left_time + right_time)
-            intercept, slope = min(
-                lines,
-                key=lambda line: line[0] + line[1] * midpoint,
-            )
+            # Pointwise minimum of the three affine lines.  Unrolled instead of
+            # min(lines, key=...): this inner loop runs ~600k times per
+            # planning burst and dominates the reachability prefilter.
+            intercept, slope = lines[0]
+            best = intercept + slope * midpoint
+            other_intercept, other_slope = lines[1]
+            value = other_intercept + other_slope * midpoint
+            if value < best:
+                best = value
+                intercept = other_intercept
+                slope = other_slope
+            other_intercept, other_slope = lines[2]
+            if other_intercept + other_slope * midpoint < best:
+                intercept = other_intercept
+                slope = other_slope
             integral += (
                 intercept * (right_time - left_time)
                 + 0.5 * slope

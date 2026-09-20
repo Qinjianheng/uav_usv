@@ -99,6 +99,20 @@ class MincoS3Trajectory:
         self.coefficients = coefficients.reshape(self.piece_count, 6, 3)
         self.duration = float(sum(self.durations))
         self._cumulative_times = np.cumsum(self.durations)
+        # Python-float mirrors of the immutable geometry.  ``sample`` is the
+        # hottest function in the planning loop, where rebuilding numpy
+        # scalars and calling np.searchsorted for every sample dominated the
+        # cost of reachability and dense constraint validation.
+        self._piece_start_times = (0.0,) + tuple(
+            float(value) for value in self._cumulative_times[:-1]
+        )
+        self._sample_coefficients = tuple(
+            tuple(
+                tuple(float(value) for value in power)
+                for power in piece
+            )
+            for piece in self.coefficients
+        )
 
     @staticmethod
     def durations_from_logits(total_duration, logits):
@@ -248,41 +262,53 @@ class MincoS3Trajectory:
         if not math.isfinite(time):
             raise ValueError('sample time must be finite')
         time = min(max(time, 0.0), self.duration)
-        piece = int(np.searchsorted(
-            self._cumulative_times,
-            time,
-            side='right',
-        ))
-        piece = min(piece, self.piece_count - 1)
-        start_time = 0.0 if piece == 0 else self._cumulative_times[piece - 1]
+        # Plain scan over at most six piece boundaries.  It reproduces
+        # np.searchsorted(..., side='right') exactly, including the tie at a
+        # shared boundary, without the per-sample numpy call overhead.
+        piece = 0
+        start_time = 0.0
+        for index in range(1, self.piece_count):
+            boundary = self._piece_start_times[index]
+            if time < boundary:
+                break
+            piece = index
+            start_time = boundary
         return piece, time - start_time
 
     def sample(self, time):
         """Sample position, velocity, acceleration, and jerk."""
         piece, local_time = self._piece_and_local_time(time)
-        c0, c1, c2, c3, c4, c5 = self.coefficients[piece]
+        c0, c1, c2, c3, c4, c5 = self._sample_coefficients[piece]
         time2 = local_time * local_time
         time3 = time2 * local_time
         time4 = time3 * local_time
         time5 = time4 * local_time
-        position = (
-            c0 + c1 * local_time + c2 * time2 + c3 * time3
-            + c4 * time4 + c5 * time5
+        # Same left-associative evaluation order as the vectorized form, so
+        # the returned values are bit-identical.
+        position = tuple(
+            a + b * local_time + c * time2 + d * time3
+            + e * time4 + f * time5
+            for a, b, c, d, e, f in zip(c0, c1, c2, c3, c4, c5)
         )
-        velocity = (
-            c1 + 2.0 * c2 * local_time + 3.0 * c3 * time2
-            + 4.0 * c4 * time3 + 5.0 * c5 * time4
+        velocity = tuple(
+            b + 2.0 * c * local_time + 3.0 * d * time2
+            + 4.0 * e * time3 + 5.0 * f * time4
+            for b, c, d, e, f in zip(c1, c2, c3, c4, c5)
         )
-        acceleration = (
-            2.0 * c2 + 6.0 * c3 * local_time + 12.0 * c4 * time2
-            + 20.0 * c5 * time3
+        acceleration = tuple(
+            2.0 * c + 6.0 * d * local_time + 12.0 * e * time2
+            + 20.0 * f * time3
+            for c, d, e, f in zip(c2, c3, c4, c5)
         )
-        jerk = 6.0 * c3 + 24.0 * c4 * local_time + 60.0 * c5 * time2
+        jerk = tuple(
+            6.0 * d + 24.0 * e * local_time + 60.0 * f * time2
+            for d, e, f in zip(c3, c4, c5)
+        )
         return MincoTrajectorySample(
-            tuple(position),
-            tuple(velocity),
-            tuple(acceleration),
-            tuple(jerk),
+            position,
+            velocity,
+            acceleration,
+            jerk,
         )
 
     def quadrature_samples(self, intervals_per_piece):
