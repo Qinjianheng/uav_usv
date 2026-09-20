@@ -1,4 +1,7 @@
+import ast
+import inspect
 import math
+import textwrap
 
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
@@ -383,3 +386,25 @@ def test_tracking_velocity_mode_drops_position_and_sends_the_command_velocity():
     assert list(message.velocity) == pytest.approx([6.2, 0.4, -0.3])
     assert all(math.isnan(value) for value in message.acceleration)
     assert math.isnan(message.yaw)
+
+
+def test_approach_parameters_are_wired_to_flight_guidance_not_tracker():
+    """Catch ROS-node startup failure from passing kwargs to the wrong core."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(
+        trajectory_tracker_node.TrajectoryTrackerNode.__init__
+    )))
+    calls = {
+        call.func.id: {keyword.arg for keyword in call.keywords}
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        and call.func.id in ('TrajectoryTrackerCore', 'FlightGuidanceCore')
+    }
+    approach_parameters = {
+        'approach_contact_clearance',
+        'approach_closing_speed',
+        'approach_horizon',
+        'approach_response_delay',
+    }
+
+    assert approach_parameters.isdisjoint(calls['TrajectoryTrackerCore'])
+    assert approach_parameters <= calls['FlightGuidanceCore']

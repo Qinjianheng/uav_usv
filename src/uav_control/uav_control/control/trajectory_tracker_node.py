@@ -370,16 +370,6 @@ class TrajectoryTrackerNode(Node):
             vertical_braking_acceleration=self.get_parameter(
                 'vertical_braking_acceleration'
             ).value,
-            approach_contact_clearance=self.get_parameter(
-                'approach_contact_clearance'
-            ).value,
-            approach_closing_speed=self.get_parameter(
-                'approach_closing_speed'
-            ).value,
-            approach_horizon=self.get_parameter('approach_horizon').value,
-            approach_response_delay=self.get_parameter(
-                'approach_response_delay'
-            ).value,
             control_dt=1.0 / control_rate,
             recovery_clearance=self.get_parameter(
                 'recovery_clearance'
@@ -441,6 +431,16 @@ class TrajectoryTrackerNode(Node):
             ).value,
             vertical_braking_acceleration=self.get_parameter(
                 'vertical_braking_acceleration'
+            ).value,
+            approach_contact_clearance=self.get_parameter(
+                'approach_contact_clearance'
+            ).value,
+            approach_closing_speed=self.get_parameter(
+                'approach_closing_speed'
+            ).value,
+            approach_horizon=self.get_parameter('approach_horizon').value,
+            approach_response_delay=self.get_parameter(
+                'approach_response_delay'
             ).value,
             control_dt=1.0 / control_rate,
         )
