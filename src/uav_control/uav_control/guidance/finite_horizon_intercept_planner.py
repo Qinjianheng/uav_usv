@@ -449,6 +449,13 @@ class FiniteHorizonInterceptPlanner:
             self.preferred_clearance,
             capture_compatible_clearance,
         )
+        # Keep the validated ceiling on the hard floor rather than on the
+        # preferred (larger) contact clearance.  The trajectory ends exactly at
+        # the contact altitude, so using that same altitude as the ceiling made
+        # millimetre-level interpolation sag mid-flight trip SEA_CLEARANCE.
+        sea_clearance_ceiling_z = (
+            self.sea_surface_z - self.contact_clearance
+        )
         contact_position = self._capture_contact_position(target_position)
         if contact_position is None:
             return None
@@ -637,8 +644,7 @@ class FiniteHorizonInterceptPlanner:
                 vertical_acceleration
                 / self.maximum_vertical_acceleration - 1.0,
                 (
-                    sample.position[2]
-                    - (self.sea_surface_z - effective_clearance)
+                    sample.position[2] - sea_clearance_ceiling_z
                 ) / clearance_scale,
             )
             positive_violations = tuple(
@@ -702,7 +708,7 @@ class FiniteHorizonInterceptPlanner:
             constraint_penalty,
             int(optimization_iterations),
             dynamically_feasible,
-            self.sea_surface_z - effective_clearance,
+            sea_clearance_ceiling_z,
         )
         if dynamically_feasible or return_infeasible:
             return plan

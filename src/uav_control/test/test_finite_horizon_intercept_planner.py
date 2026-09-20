@@ -270,6 +270,40 @@ def test_minco_relaxes_target_curve_weight_to_remain_dynamically_feasible():
     assert plan.maximum_horizontal_acceleration <= 3.5
 
 
+def test_validated_ceiling_stays_strictly_below_the_contact_altitude():
+    """
+    Catch the plan endpoint resting exactly on the validated sea ceiling.
+
+    The trajectory ends at the contact altitude, so validating against that
+    same altitude turned millimetre-level interpolation sag into SEA_CLEARANCE
+    rejections.  The ceiling must use the hard floor instead.
+    """
+    planner = make_planner(
+        capture_radius=0.50,
+        preferred_clearance=0.35,
+        contact_clearance=0.33,
+    )
+
+    def surface_target(_horizon):
+        return (
+            (2.0, 0.0, 0.05),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )
+
+    plan = planner.plan(
+        (0.0, 0.0, -1.0),
+        (2.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        surface_target,
+    )
+
+    assert plan is not None
+    assert plan.target_position[2] == pytest.approx(-0.35)
+    assert plan.sea_clearance_ceiling_z == pytest.approx(-0.33)
+    assert plan.sea_clearance_ceiling_z > plan.target_position[2]
+
+
 def test_moving_target_reachability_recovers_after_early_infinite_bound():
     planner = make_planner(
         minimum_duration=0.8,

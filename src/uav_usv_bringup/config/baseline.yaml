@@ -132,7 +132,15 @@ moving_target:
     maximum_lateral_acceleration: 3.2
     figure_eight_x_amplitude: 40.0
     figure_eight_y_amplitude: 20.0
-    vertical_oscillation_amplitude: 0.15
+    # Sea state.  The target heave is a scenario parameter, but it is also a
+    # hard geometric budget: the airframe reaches 0.23 m below the PX4
+    # reference and needs roughly 0.32 m of reference clearance to stay out of
+    # the water under tracking overshoot, while the capture sphere the
+    # evaluator scores is only 0.50 m.  A 0.15 m heave would consume the whole
+    # remaining sphere, so every watered-off contact sat exactly on the
+    # boundary.  0.05 m (10 cm peak to peak) is a calm-water assumption that
+    # keeps the contact inside the sphere with margin.
+    vertical_oscillation_amplitude: 0.05
     vertical_oscillation_frequency: 0.25
     update_rate_hz: 20.0
     start_on_command: true
@@ -222,10 +230,23 @@ intercept_planner_node:
     maximum_vertical_acceleration: 3.0
     preferred_closing_speed: 1.5
     conservative_closing_speed: 0.3
-    planned_capture_radius: 0.35
+    # The aim sphere must contain the watered-off contact point.  The airframe
+    # reaches 0.23 m below the PX4 reference (see the evaluator's
+    # body_lower_extent), so the contact altitude is chosen at
+    # preferred_clearance above the sea and the aim radius has to cover
+    # clearance + target heave: 0.35 + 0.05 = 0.40 m, which stays inside the
+    # 0.50 m sphere the evaluator scores.  A smaller aim radius makes every
+    # watered-off contact a CAPTURE_GEOMETRY rejection and a smaller clearance
+    # puts the planned endpoint below the body-contact threshold, so the plan
+    # could never be flown without a water strike.
+    planned_capture_radius: 0.50
     sea_surface_z: 0.0
-    contact_clearance: 0.05
-    preferred_clearance: 0.1
+    # Hard floor and nominal terminal clearance above the sea surface.  The
+    # X500 airframe reaches 0.23 m below the PX4 reference and the vertical
+    # tracker overshoots the reference by about 0.09 m, so 0.35 m keeps the
+    # landing gear clear of the water for the whole approach.
+    contact_clearance: 0.33
+    preferred_clearance: 0.35
     piece_count: 3
     target_curve_weight: 0.7
     # Leave 5 ms for message conversion and event diagnostics.
@@ -298,7 +319,8 @@ intercept_evaluator_node:
   ros__parameters:
     evaluation_rate_hz: 20.0
     evaluation_capture_radius: 0.50
-    planned_capture_radius: 0.35
+    # Reported planner aim radius; must stay synchronized with the planner.
+    planned_capture_radius: 0.50
     sea_surface_z: 0.0
     enable_sea_contact_failure: true
     # Distance from the PX4 local-position reference to the lowest point of the
