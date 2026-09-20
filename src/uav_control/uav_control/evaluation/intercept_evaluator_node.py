@@ -88,7 +88,9 @@ def result_to_message(result, stamp_seconds, radius):
     message.success = bool(result.success)
     message.outcome = str(result.outcome)
     message.reason = str(result.reason)
-    message.detail = 'determined by simulation truth in evaluator only'
+    message.detail = str(result.detail) or (
+        'determined by simulation truth in evaluator only'
+    )
     message.elapsed_time = float(result.elapsed_time)
     message.capture_radius = float(radius)
     message.minimum_distance = float(result.minimum_distance)
@@ -142,6 +144,7 @@ class InterceptEvaluatorNode(Node):
         self.declare_parameter('planned_capture_radius', 0.35)
         self.declare_parameter('sea_surface_z', 0.0)
         self.declare_parameter('enable_sea_contact_failure', True)
+        self.declare_parameter('body_lower_extent', 0.23)
         self.declare_parameter('maximum_duration', 30.0)
         self.declare_parameter(
             'log_directory',
@@ -172,6 +175,7 @@ class InterceptEvaluatorNode(Node):
                 'enable_sea_contact_failure'
             ).value,
             maximum_duration=self.get_parameter('maximum_duration').value,
+            body_lower_extent=self.get_parameter('body_lower_extent').value,
         )
         self.log_directory = str(
             self.get_parameter('log_directory').value
@@ -524,6 +528,10 @@ class InterceptEvaluatorNode(Node):
             'enable_sea_contact_failure': (
                 self.evaluator.enable_sea_contact_failure
             ),
+            # Body-water contact is tested body_lower_extent below the PX4
+            # reference point, independently of any control-barrier state.
+            'body_lower_extent': self.evaluator.body_lower_extent,
+            'body_contact_z': self.evaluator.body_contact_z,
             'maximum_duration': self.evaluator.maximum_duration,
             'truth_topic': self.truth_topic,
             'truth_role': 'evaluation_only',

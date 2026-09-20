@@ -127,7 +127,7 @@ uav_usv/
 
 ## 截击结果
 
-截击成功或失败后，节点在 `/simulation/impact/result` 发布 `uav_usv_interfaces/InterceptResult`。Evaluator以0.50米三维球作为实验成功判据，planner则瞄准0.35米内部区域；两个半径分别记录在config和summary中。若无人机未先进入捕获球就接触海面（NED `z >= 0`），结果为 `FAILURE / SEA_CONTACT`。SUCCESS、SEA_CONTACT和TIMEOUT都会触发独立Gazebo暂停请求（失败时短时重试），MissionManager同时进入终态并让tracker清除旧MINCO，只保留海面上方的安全保持点。`/simulation/impact/hit` 只表示SUCCESS，不表示是否已经发生终止事件。结果还记录真实最小距离、相对速度、规划/跟踪拒绝原因、接触时间倒计时及按目标距离分桶的运行性能。
+截击成功或失败后，节点在 `/simulation/impact/result` 发布 `uav_usv_interfaces/InterceptResult`。Evaluator以0.50米三维球作为实验成功判据，planner则瞄准0.35米内部区域；两个半径分别记录在config和summary中。触海判据以**机体最低点**而非PX4参考点为准：X500起落架最低点在 `base_link` 下方0.227米，因此当参考点高度达到 `sea_surface_z - body_lower_extent`（当前为 `-0.23` 米）时即判为机体触水，结果为 `FAILURE / SEA_CONTACT`。`InterceptResult.detail` 区分两种触发方式：`BODY_LOWEST_POINT_AT_SEA_SURFACE`（机体刚触水，参考点仍在水面以上）与 `REFERENCE_POINT_BELOW_SEA_SURFACE`（参考点已越海平面，进水更深）。控制侧 `sea_safety` 的 `UNRECOVERABLE` 只是制动权威耗尽的告警，不构成物理触水，二者不可互相替代。SUCCESS、SEA_CONTACT和TIMEOUT都会触发独立Gazebo暂停请求（失败时短时重试），MissionManager同时进入终态并让tracker清除旧MINCO，只保留海面上方的安全保持点。`/simulation/impact/hit` 只表示SUCCESS，不表示是否已经发生终止事件。结果还记录真实最小距离、相对速度、规划/跟踪拒绝原因、接触时间倒计时及按目标距离分桶的运行性能。
 
 终端轨迹使用与PX4指令一致的有效运动上限进行可行性检查；末端闭合速度、动态时域、有效垂向制动能力以及其他实验参数均以 [`baseline.yaml`](src/uav_usv_bringup/config/baseline.yaml) 和每次运行生成的 `*_config.yaml` 为准，不在本文重复维护数值。实际飞行硬限制仍由 `max_actual_horizontal_acceleration` 和 `max_actual_vertical_acceleration` 独立设置，持续超过实际硬限制才返回 `CONSTRAINT_VIOLATION`。
 

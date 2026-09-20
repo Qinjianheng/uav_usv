@@ -295,6 +295,12 @@ intercept_evaluator_node:
     planned_capture_radius: 0.35
     sea_surface_z: 0.0
     enable_sea_contact_failure: true
+    # Distance from the PX4 local-position reference to the lowest point of the
+    # airframe.  The X500 landing-gear skids reach 0.227 m below base_link, so
+    # body contact is tested at a reference altitude of -0.23 m.  Waiting for
+    # the reference point itself to cross z = 0 lets the vehicle fly with its
+    # gear submerged without raising SEA_CONTACT.
+    body_lower_extent: 0.23
     maximum_duration: 30.0
     log_directory: data/experiments/current
     # Simulation truth is consumed only by this evaluator and by the explicitly

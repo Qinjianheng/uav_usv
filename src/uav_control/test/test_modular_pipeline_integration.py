@@ -155,22 +155,27 @@ def test_fast_valid_plan_flows_tracker_to_mission_and_truth_evaluator():
     )
     manager.tick(10.10)
 
-    evaluator = InterceptEvaluatorCore(capture_radius=0.25)
+    # Truth evaluation uses the production capture radius.  The UAV holds
+    # z = -0.30 m, so its lowest point stays 0.07 m above the sea while the
+    # body-contact threshold is -0.23 m; the capture sphere is therefore
+    # entered before any water strike.
+    evaluator = InterceptEvaluatorCore(capture_radius=0.50)
     evaluator.begin(manager.mission_id, 10.0)
     evaluator.update(
         10.0,
-        KinematicState((0.0, 0.0, -0.1), (2.0, 0.0, 0.0)),
-        KinematicState((1.0, 0.0, -0.1), (0.0, 0.0, 0.0)),
+        KinematicState((0.0, 0.0, -0.30), (2.0, 0.0, 0.0)),
+        KinematicState((1.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
     )
     result = evaluator.update(
         10.5,
-        KinematicState((2.0, 0.0, -0.1), (2.0, 0.0, 0.0)),
-        KinematicState((1.0, 0.0, -0.1), (0.0, 0.0, 0.0)),
+        KinematicState((1.0, 0.0, -0.30), (2.0, 0.0, 0.0)),
+        KinematicState((1.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
     )
 
     assert accepted == TrajectoryRejectReason.NONE
     assert manager.phase == MissionPhase.MINCO_TRACKING
     assert result.success
+    assert result.reason == 'CAPTURE_RADIUS_REACHED'
 
 
 def test_forward_contact_minco_message_is_safe_and_tracker_accepts_it():

@@ -1,5 +1,7 @@
 """Behavior tests for the bounded realtime MINCO search."""
 
+import math
+
 import pytest
 
 from uav_control.guidance.fast_minco_planner import FastMincoPlanner
@@ -268,4 +270,73 @@ def test_horizontal_and_vertical_dynamic_failures_are_distinct():
     assert vertical.failure in (
         FastPlanningFailure.DYNAMIC_LIMIT_VERTICAL,
         FastPlanningFailure.HORIZON_INSUFFICIENT,
+    )
+
+
+def test_sea_state_heave_must_not_pull_waypoints_into_the_clearance_zone():
+    """
+    A heaving surface target must not drag MINCO waypoints toward the sea.
+
+    The target curve weight used to be applied to all three axes, so the USV's
+    vertical heave was blended into the intermediate waypoints.  Because the
+    USV sits at the sea surface, that pushed the waypoints below the clearance
+    ceiling and rejected otherwise flyable terminal dives with SEA_CLEARANCE.
+    """
+    planner = make_planner(
+        maximum_duration=4.0,
+        sample_step=0.1,
+        # Production envelope from baseline.yaml: relaxing these would let a
+        # shallower dive pass and hide the geometry defect.
+        maximum_horizontal_acceleration=3.0,
+        maximum_vertical_acceleration=3.0,
+        effective_vertical_braking_acceleration=2.5,
+        capture_radius=0.35,
+        preferred_clearance=0.1,
+        quadrature_intervals_per_piece=10,
+        # Keep this geometry regression independent of host timing.
+        deadline_seconds=0.5,
+    )
+
+    amplitude = 0.15
+    angular_frequency = 2.0 * math.pi * 0.25
+    # Phase chosen so the heave pushes the target below the sea surface while
+    # the waypoints are being placed.
+    heave_phase = 3.0
+
+    def heaving_surface_target(horizon):
+        angle = angular_frequency * horizon + heave_phase
+        return (
+            (
+                -3.0 + 4.0 * horizon,
+                0.8,
+                amplitude * math.sin(angle),
+            ),
+            (
+                4.0,
+                0.0,
+                amplitude * angular_frequency * math.cos(angle),
+            ),
+            (
+                0.0,
+                0.0,
+                -amplitude * angular_frequency**2 * math.sin(angle),
+            ),
+        )
+
+    outcome = planner.plan(
+        initial_position=(0.0, 0.0, -0.35),
+        initial_velocity=(0.35, 0.0, 0.10),
+        initial_acceleration=(0.0, 0.0, 0.0),
+        target_state_at_time=heaving_surface_target,
+    )
+
+    assert outcome.failure == FastPlanningFailure.NONE
+    assert outcome.plan is not None
+    samples = [
+        outcome.plan.sample(outcome.plan.duration * index / 200.0)
+        for index in range(201)
+    ]
+    assert all(
+        sample.position[2] <= outcome.plan.sea_clearance_ceiling_z + 1e-6
+        for sample in samples
     )

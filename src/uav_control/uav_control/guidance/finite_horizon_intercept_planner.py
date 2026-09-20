@@ -457,10 +457,15 @@ class FiniteHorizonInterceptPlanner:
             contact_position[:2],
             target_velocity[:2],
         )
+        # Vertical target motion is sea-state heave, not a track to follow.
+        # Matching it at contact forces the trajectory to dip below the
+        # clearance ceiling just before the endpoint whenever the target
+        # rises, so the UAV levels off vertically at the contact instead.  The
+        # tiny upward bias keeps the contact strictly non-descending.
         terminal_velocity = (
             target_velocity[0] + closing_speed * horizontal_direction[0],
             target_velocity[1] + closing_speed * horizontal_direction[1],
-            min(target_velocity[2], -1e-9),
+            -1e-9,
         )
         axes = tuple(
             QuinticAxis.from_boundary(
@@ -502,13 +507,24 @@ class FiniteHorizonInterceptPlanner:
                             target_position,
                         )
                     )
-                    guide_positions.append(tuple(
-                        base + target_curve_weight * (guide - linear)
-                        for base, guide, linear in zip(
-                            baseline,
-                            target_guide,
-                            linear_target,
-                        )
+                    # The target curve only shapes the horizontal intercept.
+                    # Vertical target motion is sea-state heave, not a path to
+                    # follow: blending it into the waypoints drags them below
+                    # the sea-clearance ceiling and makes otherwise safe
+                    # terminal dives infeasible.  Keep the vertical baseline
+                    # and clamp it to the clearance floor as a hard backstop.
+                    curve_weight = float(target_curve_weight)
+                    guide_positions.append((
+                        baseline[0] + curve_weight * (
+                            target_guide[0] - linear_target[0]
+                        ),
+                        baseline[1] + curve_weight * (
+                            target_guide[1] - linear_target[1]
+                        ),
+                        min(
+                            baseline[2],
+                            self.sea_surface_z - effective_clearance,
+                        ),
                     ))
             else:
                 guide_positions = [
@@ -790,9 +806,13 @@ class FiniteHorizonInterceptPlanner:
                 )
             )
             waypoint_baselines.append(baseline)
-            waypoint_curve_offsets.append(tuple(
-                guide - linear
-                for guide, linear in zip(target_guide, linear_target)
+            # Match the horizontal-only curve guidance used by _candidate so
+            # the optimizer never seeds or rewards waypoints pulled toward the
+            # sea by the target's vertical heave.
+            waypoint_curve_offsets.append((
+                target_guide[0] - linear_target[0],
+                target_guide[1] - linear_target[1],
+                0.0,
             ))
 
         initial_weight = min(
@@ -981,11 +1001,20 @@ class FiniteHorizonInterceptPlanner:
             contact = self._capture_contact_position(target_position)
             if contact is None:
                 return None, None
+            # The trajectory levels off vertically at contact, so the vertical
+            # reachability bound must use a zero endpoint heave velocity
+            # instead of the target's, or the search interval disagrees with
+            # the boundary conditions actually imposed by _candidate.
+            guidance_velocity = (
+                target_velocity[0],
+                target_velocity[1],
+                0.0,
+            )
             estimate = estimate_reachability(
                 initial_position,
                 initial_velocity,
                 contact,
-                target_velocity,
+                guidance_velocity,
                 self.maximum_horizontal_speed,
                 self.maximum_vertical_speed,
                 self.maximum_horizontal_acceleration,

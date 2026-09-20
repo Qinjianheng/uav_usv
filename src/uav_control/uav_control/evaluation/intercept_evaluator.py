@@ -9,6 +9,15 @@ import math
 from pathlib import Path
 
 
+# Distance from the PX4 local-position reference to the lowest point of the
+# vehicle body.  The X500 landing-gear skids reach 0.227 m below base_link, so
+# a reference altitude of ``-body_lower_extent`` already puts the skids at the
+# sea surface.  Testing "reference point above sea_surface_z" instead lets the
+# vehicle fly with its gear submerged and never raises SEA_CONTACT, which is
+# why a physical water strike was not terminating the run.
+DEFAULT_BODY_LOWER_EXTENT = 0.23
+
+
 @dataclass(frozen=True)
 class KinematicState:
     """Three-dimensional position and velocity in local NED coordinates."""
@@ -116,6 +125,7 @@ class EvaluationResult:
     maximum_vertical_speed: float
     maximum_horizontal_acceleration: float
     maximum_vertical_acceleration: float
+    detail: str = ''
 
 
 def _norm(values):
@@ -381,12 +391,19 @@ class InterceptEvaluatorCore:
         sea_surface_z=0.0,
         enable_sea_contact_failure=True,
         maximum_duration=30.0,
+        body_lower_extent=DEFAULT_BODY_LOWER_EXTENT,
     ):
         self.capture_radius = float(capture_radius)
         self.sea_surface_z = float(sea_surface_z)
         self.enable_sea_contact_failure = bool(enable_sea_contact_failure)
         self.maximum_duration = float(maximum_duration)
+        self.body_lower_extent = max(float(body_lower_extent), 0.0)
         self.reset()
+
+    @property
+    def body_contact_z(self):
+        """Return the reference altitude at which the body reaches water."""
+        return self.sea_surface_z - self.body_lower_extent
 
     def reset(self):
         """Clear all mission-scoped evaluation state."""
@@ -395,6 +412,7 @@ class InterceptEvaluatorCore:
         self.previous_time = None
         self.previous_uav = None
         self.previous_target = None
+        self.detail = ''
         self.minimum_distance = math.inf
         self.closest_horizontal_distance = math.inf
         self.closest_vertical_error = math.inf
@@ -469,15 +487,30 @@ class InterceptEvaluatorCore:
         return min(valid) if valid else None
 
     def _sea_fraction(self, start_z, end_z):
+        """
+        Return where the body first reaches the water inside the interval.
+
+        The PX4 local-position reference sits ``body_lower_extent`` above the
+        lowest point of the airframe, so the body makes contact at a reference
+        altitude of ``sea_surface_z - body_lower_extent`` instead of at the sea
+        surface itself.
+        """
         if not self.enable_sea_contact_failure:
             return None
-        if start_z >= self.sea_surface_z:
+        contact_z = self.body_contact_z
+        if start_z >= contact_z:
             return 0.0
         delta = end_z - start_z
         if delta <= 0.0:
             return None
-        fraction = (self.sea_surface_z - start_z) / delta
+        fraction = (contact_z - start_z) / delta
         return fraction if 0.0 <= fraction <= 1.0 else None
+
+    def _sea_contact_detail(self, reference_z):
+        """Name how deep the reference point already was at body contact."""
+        if float(reference_z) >= self.sea_surface_z:
+            return 'REFERENCE_POINT_BELOW_SEA_SURFACE'
+        return 'BODY_LOWEST_POINT_AT_SEA_SURFACE'
 
     @staticmethod
     def instantaneous_metrics(uav, target):
@@ -534,6 +567,7 @@ class InterceptEvaluatorCore:
                 self.maximum_horizontal_acceleration
             ),
             maximum_vertical_acceleration=self.maximum_vertical_acceleration,
+            detail=self.detail,
         )
         return self.result
 
@@ -575,6 +609,7 @@ class InterceptEvaluatorCore:
             ):
                 event = True, 'CAPTURE_RADIUS_REACHED'
             elif sea_fraction is not None:
+                self.detail = self._sea_contact_detail(uav.position[2])
                 event = False, 'SEA_CONTACT'
             dt = now - self.previous_time
             if dt > 1e-6:
@@ -598,8 +633,9 @@ class InterceptEvaluatorCore:
                 event = True, 'CAPTURE_RADIUS_REACHED'
             elif (
                 self.enable_sea_contact_failure
-                and uav.position[2] >= self.sea_surface_z
+                and uav.position[2] >= self.body_contact_z
             ):
+                self.detail = self._sea_contact_detail(uav.position[2])
                 event = False, 'SEA_CONTACT'
 
         self.previous_time = now

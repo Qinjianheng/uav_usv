@@ -54,7 +54,13 @@ def test_csv_records_planner_failure_diagnostics():
 
 
 def test_capture_is_detected_between_truth_samples():
-    evaluator = InterceptEvaluatorCore(capture_radius=0.25)
+    # Isolate capture interpolation from the body-water barrier: these samples
+    # sit at the sea-level target altitude, which already counts as body
+    # contact once the airframe extent is applied.
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.25,
+        body_lower_extent=0.0,
+    )
     evaluator.begin(mission_id=4, now=10.0)
 
     assert evaluator.update(
@@ -77,7 +83,11 @@ def test_async_truth_histories_are_interpolated_before_capture_evaluation():
     """Catch false misses caused by pairing latest samples from different times."""
     uav_history = intercept_evaluator.TimestampedStateHistory(0.25)
     target_history = intercept_evaluator.TimestampedStateHistory(0.25)
-    evaluator = InterceptEvaluatorCore(capture_radius=0.50)
+    # Same isolation as above: this test is about history interpolation.
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.50,
+        body_lower_extent=0.0,
+    )
     evaluator.begin(mission_id=8, now=10.025)
 
     uav_history.add(10.00, state((0.0, 0.0, -0.1)))
@@ -132,6 +142,152 @@ def test_sea_contact_before_capture_is_a_failure():
 
     assert not result.success
     assert result.reason == 'SEA_CONTACT'
+
+
+def test_body_contact_fires_while_the_reference_point_is_still_dry():
+    """
+    Catch a water strike being missed while the gear is already submerged.
+
+    The X500 skids reach 0.227 m below the PX4 local-position reference, so a
+    reference altitude of -0.1 m already means the airframe is in the water
+    even though the old "reference point at z >= 0" test saw nothing.
+    """
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.25,
+        sea_surface_z=0.0,
+        enable_sea_contact_failure=True,
+        body_lower_extent=0.23,
+    )
+    evaluator.begin(mission_id=6, now=30.0)
+    assert evaluator.body_contact_z == pytest.approx(-0.23)
+    assert evaluator.update(
+        30.0,
+        state((0.0, 0.0, -0.6), (0.0, 0.0, 0.5)),
+        state((10.0, 0.0, 0.0)),
+    ) is None
+
+    result = evaluator.update(
+        30.5,
+        state((0.0, 0.0, -0.1), (0.0, 0.0, 0.5)),
+        state((10.0, 0.0, 0.0)),
+    )
+
+    assert result is not None
+    assert not result.success
+    assert result.reason == 'SEA_CONTACT'
+    assert result.detail == 'BODY_LOWEST_POINT_AT_SEA_SURFACE'
+
+
+def test_submerged_reference_point_reports_the_deeper_contact_detail():
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.25,
+        sea_surface_z=0.0,
+        enable_sea_contact_failure=True,
+        body_lower_extent=0.23,
+    )
+    evaluator.begin(mission_id=7, now=40.0)
+    assert evaluator.update(
+        40.0,
+        state((0.0, 0.0, -0.30), (0.0, 0.0, 0.5)),
+        state((10.0, 0.0, 0.0)),
+    ) is None
+
+    result = evaluator.update(
+        40.5,
+        state((0.0, 0.0, 0.05), (0.0, 0.0, 0.5)),
+        state((10.0, 0.0, 0.0)),
+    )
+
+    assert result.reason == 'SEA_CONTACT'
+    assert result.detail == 'REFERENCE_POINT_BELOW_SEA_SURFACE'
+
+
+def test_zero_body_lower_extent_keeps_the_reference_point_criterion():
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.25,
+        sea_surface_z=0.0,
+        enable_sea_contact_failure=True,
+        body_lower_extent=0.0,
+    )
+    evaluator.begin(mission_id=8, now=50.0)
+
+    assert evaluator.body_contact_z == pytest.approx(0.0)
+    assert evaluator.update(
+        50.0,
+        state((0.0, 0.0, -0.10), (0.0, 0.0, 0.4)),
+        state((10.0, 0.0, 0.0)),
+    ) is None
+    result = evaluator.update(
+        50.5,
+        state((0.0, 0.0, 0.05), (0.0, 0.0, 0.4)),
+        state((10.0, 0.0, 0.0)),
+    )
+
+    assert result.reason == 'SEA_CONTACT'
+
+
+def test_capture_inside_the_body_contact_band_still_succeeds():
+    """A capture must be credited before the airframe reaches the water."""
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.50,
+        sea_surface_z=0.0,
+        enable_sea_contact_failure=True,
+        body_lower_extent=0.23,
+    )
+    evaluator.begin(mission_id=9, now=60.0)
+    evaluator.update(
+        60.0,
+        state((-1.0, 0.0, -0.45), (2.0, 0.0, 0.3)),
+        state((0.0, 0.0, 0.0)),
+    )
+    result = evaluator.update(
+        60.5,
+        state((0.0, 0.0, -0.30), (2.0, 0.0, 0.3)),
+        state((0.0, 0.0, 0.0)),
+    )
+
+    assert result is not None
+    assert result.success
+    assert result.reason == 'CAPTURE_RADIUS_REACHED'
+
+
+def test_control_unrecoverable_alone_is_not_a_water_contact():
+    """A barrier warning is not a strike; only airframe geometry terminates."""
+    from uav_control.common.sea_safety import apply_sea_safety_guard
+
+    guard = apply_sea_safety_guard(
+        current_z=-0.26,
+        current_vz=1.0,
+        proposed_vz=1.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.07,
+        response_delay=0.15,
+        effective_braking_acceleration=2.5,
+        control_dt=0.05,
+    )
+    assert guard.state == 'UNRECOVERABLE'
+
+    evaluator = InterceptEvaluatorCore(
+        capture_radius=0.25,
+        sea_surface_z=0.0,
+        enable_sea_contact_failure=True,
+        body_lower_extent=0.23,
+    )
+    evaluator.begin(mission_id=10, now=70.0)
+    # z = -0.26 is still above the -0.23 body-contact altitude, so the
+    # evaluator must not manufacture a strike from the barrier state.
+    evaluator.update(
+        70.0,
+        state((0.0, 0.0, -0.26), (0.0, 0.0, 1.0)),
+        state((10.0, 0.0, 0.0)),
+    )
+    result = evaluator.update(
+        70.5,
+        state((0.0, 0.0, -0.26), (0.0, 0.0, 1.0)),
+        state((10.0, 0.0, 0.0)),
+    )
+
+    assert result is None
 
 
 def test_planner_statistics_are_unique_per_plan_event():
