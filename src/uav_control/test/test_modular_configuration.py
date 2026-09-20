@@ -78,12 +78,18 @@ def test_planned_contact_point_stays_above_the_body_contact_threshold():
     )
 
 
-def test_tracking_is_velocity_driven():
-    """Guard the mode that lets the vehicle build closing speed."""
+def test_tracking_velocity_mode_stays_off_until_the_reference_leads():
+    """
+    Guard the mode that made the 2026-09-20 intercept worse.
+
+    Velocity-driven tracking is only viable once the plan stops re-anchoring
+    its initial state to the measurement on every replan; with the current
+    planner it executes a ~4 m/s reference and the vehicle falls behind.
+    """
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     tracker = parameters(config, 'trajectory_tracker_node')
 
-    assert tracker['use_velocity_control'] is True
+    assert tracker['use_velocity_control'] is False
 
 
 def test_sea_barrier_reserve_covers_the_airframe():

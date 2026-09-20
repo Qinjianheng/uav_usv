@@ -331,16 +331,26 @@ trajectory_tracker_node:
     # maximum_actual_vertical_acceleration derates the vertical allowance once
     # the measured acceleration exceeds it.
     maximum_command_dt: 0.1
+    # NOTE: the derating below rides on the tracker's velocity command, so with
+    # use_velocity_control=false it is inert -- PX4 is tracking the position
+    # reference, whose own acceleration is bounded by the planner limit.  To
+    # bound the MEASURED vertical acceleration in position mode, lower the
+    # planner's maximum_vertical_acceleration instead (measured actual ran
+    # 1.8-1.9x the planned value).
     maximum_actual_vertical_acceleration: 4.0
     maximum_state_age: 0.125
-    # Drive MINCO tracking with the tracker's acceleration-limited velocity
-    # command instead of a position reference.  In position mode the reference
-    # is rebuilt from the measured state on every replan, so the position error
-    # never grows past a few centimetres and the vehicle can only maintain the
-    # speed it already has -- which is why the first descent used to fly at the
-    # target's 4 m/s and never close.  Set false to fall back to position
-    # tracking.
-    use_velocity_control: true
+    # Velocity-driven tracking was tried on 2026-09-20 and made the intercept
+    # worse, so it is off.  The planner rebuilds the reference from the
+    # measured state on every replan, so the sampled reference velocity is
+    # anchored at the measured speed (~4 m/s): position mode still chases the
+    # position reference and builds speed, while velocity mode faithfully
+    # executes that slow command and the vehicle falls behind the target.
+    # Measured: with it on, the UAV slowed to 2.8-4.2 m/s, the range grew from
+    # 9.2 m to 13.4 m, and the run ended in SEA_CONTACT 13 m from the target;
+    # with it off the same code closed 5.84 -> 0.27 m in 4.3 s and captured.
+    # Re-enable only together with a reference that is not re-anchored to the
+    # measured state every replan.
+    use_velocity_control: false
     frame_id: local_ned
 
 mission_manager_node:
