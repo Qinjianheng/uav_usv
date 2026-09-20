@@ -244,12 +244,13 @@ intercept_planner_node:
     # Hard floor and nominal terminal clearance above the sea surface.  The
     # budget is tight: the evaluator scores a 0.50 m sphere and the airframe
     # already occupies 0.23 m of it, so clearance + horizontal closing error
-    # must fit in the remaining 0.27 m.  At 0.29 m the gear keeps 0.06 m of
-    # margin while the capture still tolerates sqrt(0.50^2 - 0.29^2) = 0.41 m
-    # of horizontal error; pushing the clearance higher trades capture rate
-    # away faster than it buys safety.
-    contact_clearance: 0.27
-    preferred_clearance: 0.29
+    # must fit in the remaining 0.27 m.  0.33 m keeps 0.10 m of airframe
+    # margin, which covers the ~0.06 m vertical overshoot measured on the
+    # 2026-09-20 runs, and still leaves sqrt(0.50^2 - 0.33^2) = 0.38 m of
+    # horizontal capture tolerance.  Lowering it to 0.29 put the landing gear
+    # on the water before the vehicle had closed the gap.
+    contact_clearance: 0.31
+    preferred_clearance: 0.33
     piece_count: 3
     # Blending the intermediate MINCO waypoints toward the target's curved
     # path costs lateral acceleration, and the figure-eight target turns hard
@@ -307,7 +308,13 @@ trajectory_tracker_node:
     maximum_vertical_acceleration: 3.0
     sea_surface_z: 0.0
     # contact_clearance (0.05 m) + terminal_safety_margin (0.02 m).
-    reserve_clearance: 0.07
+    # Last-resort vertical barrier.  It must sit above the airframe's lowest
+    # point, not just above the PX4 reference: the landing gear reaches 0.23 m
+    # below the reference, so the previous 0.07 m reserve reported SAFE while
+    # the gear was already level with the water.  0.20 m engages the brake
+    # around 0.26 m of reference clearance, which still leaves the planned
+    # 0.33 m contact reachable.
+    reserve_clearance: 0.20
     safety_response_delay: 0.15
     vertical_braking_acceleration: 2.5
     # A lost plan must not hold the measured position inside the water margin.

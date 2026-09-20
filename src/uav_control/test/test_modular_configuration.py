@@ -78,6 +78,23 @@ def test_planned_contact_point_stays_above_the_body_contact_threshold():
     )
 
 
+def test_sea_barrier_reserve_covers_the_airframe():
+    """Guard the barrier that reported SAFE while the gear was at the water."""
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    tracker = parameters(config, 'trajectory_tracker_node')
+    planner = parameters(config, 'intercept_planner_node')
+    evaluator = parameters(config, 'intercept_evaluator_node')
+
+    reserve = tracker['reserve_clearance']
+    body = evaluator['body_lower_extent']
+
+    # The planned contact must stay reachable, so the barrier sits below it.
+    assert reserve < planner['preferred_clearance']
+    # A token reserve far below the airframe extent lets the vehicle fly with
+    # its gear level with the water while the guard still reports SAFE.
+    assert reserve >= 0.6 * body
+
+
 def test_curve_weight_stays_inside_the_lateral_acceleration_budget():
     """Guard the 2026-09-20 jittering first-descent regression."""
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))

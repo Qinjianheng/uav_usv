@@ -75,7 +75,7 @@ def test_staged_duration_search_sweeps_the_horizon_after_dynamic_failures():
     assert next(durations) == pytest.approx(3.5)
     planner._candidate_failures.append(FastPlanningFailure.SEA_CLEARANCE)
 
-    assert list(durations) == pytest.approx([1.9, 2.6, 3.3, 4.0])
+    assert list(durations) == pytest.approx([2.6, 4.0])
 
 
 def test_candidate_diagnostics_preserve_all_constraint_violations():

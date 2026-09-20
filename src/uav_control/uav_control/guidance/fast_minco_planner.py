@@ -199,14 +199,13 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             for failure in self._candidate_failures
         ):
             # A dynamic-limit rejection means the profile is too aggressive and
-            # only more time can cure it, so walk the rest of the horizon at
-            # quarter-span steps.  The previous form advanced by a single
-            # duration_margin step and then gave up, which left the whole
-            # long-duration end -- exactly where the acceleration becomes
-            # feasible -- unexplored, so a fixable terminal plan was rejected
-            # on every tick until its locked contact time expired.
+            # only more time can cure it, so probe the rest of the horizon
+            # instead of advancing by a single duration_margin step and giving
+            # up.  Two probes are enough: a quarter-span sweep measured the
+            # same success rate for roughly twice the compute, and the extra
+            # candidates pushed plans into DEADLINE_EXCEEDED.
             span = maximum - minimum
-            for fraction in (0.25, 0.5, 0.75, 1.0):
+            for fraction in (0.5, 1.0):
                 value = minimum + fraction * span
                 if available(value):
                     attempted.append(value)
