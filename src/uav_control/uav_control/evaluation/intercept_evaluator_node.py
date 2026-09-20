@@ -146,6 +146,7 @@ class InterceptEvaluatorNode(Node):
         self.declare_parameter('enable_sea_contact_failure', True)
         self.declare_parameter('body_lower_extent', 0.23)
         self.declare_parameter('maximum_duration', 30.0)
+        self.declare_parameter('detailed_diagnostics_enabled', False)
         self.declare_parameter(
             'log_directory',
             'data/experiments/current',
@@ -179,6 +180,9 @@ class InterceptEvaluatorNode(Node):
         )
         self.log_directory = str(
             self.get_parameter('log_directory').value
+        )
+        self.detailed_diagnostics_enabled = bool(
+            self.get_parameter('detailed_diagnostics_enabled').value
         )
         self.truth_topic = str(self.get_parameter('truth_topic').value)
         self.shadow_prediction_topic = str(
@@ -342,6 +346,17 @@ class InterceptEvaluatorNode(Node):
         self.terminal_pause_result = None
         self.writer = None
         self.result_published = False
+        self.approach_phase = 'PREPARATION'
+        self.terminal_approach_count = 0
+        self.recovery_count = 0
+        self.handover_jump_count = 0
+        self.first_terminal_approach_result = ''
+        self.minimum_body_clearance = math.inf
+        self.safety_event_histogram = {
+            name: 0
+            for name in ('WARNING', 'BRAKE', 'UNRECOVERABLE', 'SEA_CONTACT')
+        }
+        self.last_safety_state = ''
         self.get_logger().info(
             'Truth-only evaluator ready | truth='
             f'{self.truth_topic} | capture='
@@ -482,7 +497,7 @@ class InterceptEvaluatorNode(Node):
 
     def planner_callback(self, message):
         self.latest_planner_diagnostic = message
-        self.event_metrics.observe_planner(
+        is_new = self.event_metrics.observe_planner(
             mission_id=message.mission_id,
             plan_id=message.plan_id,
             success=message.result == PlannerDiagnostic.RESULT_SUCCESS,
@@ -496,7 +511,71 @@ class InterceptEvaluatorNode(Node):
             completion_to_publish_delay=(
                 message.completion_to_publish_delay
             ),
+            admission_wait=(
+                message.result == PlannerDiagnostic.RESULT_IDLE
+            ),
         )
+        if is_new and self.writer is not None:
+            self.writer.append_detail_event(
+                'planner',
+                f'{int(message.mission_id)}:{int(message.plan_id)}',
+                {
+                    'result': int(message.result),
+                    'failure_reason': self._failure_name(message),
+                    'failure_detail': message.failure_detail,
+                    'rejection_stage': message.rejection_stage,
+                    'rejection_detail': message.rejection_detail,
+                    'planning_cycle_id': int(message.planning_cycle_id),
+                    'prediction_sequence_id': int(
+                        message.prediction_sequence_id
+                    ),
+                    'candidate_diagnostics': message.candidate_diagnostics,
+                    'candidate_count': int(message.candidate_count),
+                    'contact_recovery_reason': (
+                        message.contact_recovery_reason
+                    ),
+                    'contact_delay': float(message.contact_delay),
+                    'target_prediction_shift': float(
+                        message.target_prediction_shift
+                    ),
+                    'candidate_published': bool(message.candidate_published),
+                    'required_time': float(message.required_time),
+                    'horizontal_min_time': float(
+                        message.horizontal_min_time
+                    ),
+                    'vertical_min_time': float(message.vertical_min_time),
+                    'sea_safe_min_time': float(message.sea_safe_min_time),
+                    'search_min_time': float(message.search_min_time),
+                    'search_max_time': float(message.search_max_time),
+                    'available_prediction_duration': float(
+                        message.available_prediction_duration
+                    ),
+                    'locked_remaining_t_go': float(
+                        message.locked_remaining_t_go
+                    ),
+                    'terminal_admission': bool(message.terminal_admission),
+                    'terminal_admission_reason': (
+                        message.terminal_admission_reason
+                    ),
+                    'compute_time': float(message.compute_time),
+                    'reachability_time': float(message.reachability_time),
+                    'generation_time': float(message.generation_time),
+                    'validation_time': float(message.validation_time),
+                    'optimization_time': float(message.optimization_time),
+                    'input_age_at_start': float(
+                        message.input_age_at_start
+                    ),
+                    'input_age_at_finish': float(
+                        message.input_age_at_finish
+                    ),
+                    'input_age_at_publish': float(
+                        message.input_age_at_publish
+                    ),
+                    'completion_to_publish_delay': float(
+                        message.completion_to_publish_delay
+                    ),
+                },
+            )
 
     def controller_callback(self, message):
         self.tracker_rate.observe(self._now())
@@ -510,6 +589,38 @@ class InterceptEvaluatorNode(Node):
         if message.status == 'PLAN_REJECTED':
             self.latest_tracker_rejection_reason = (
                 str(message.rejection_reason)
+            )
+            if str(message.rejection_reason).startswith('REFERENCE_'):
+                self.handover_jump_count += 1
+        safety_state = str(message.safety_state)
+        if (
+            safety_state in self.safety_event_histogram
+            and safety_state != self.last_safety_state
+        ):
+            self.safety_event_histogram[safety_state] += 1
+        self.last_safety_state = safety_state
+        if (
+            self.writer is not None
+            and message.status in ('PLAN_ACCEPTED', 'PLAN_REJECTED')
+        ):
+            self.writer.append_detail_event(
+                'tracker',
+                f'{int(message.mission_id)}:{int(message.attempted_plan_id)}',
+                {
+                    'status': str(message.status),
+                    'active_plan_id': int(message.plan_id),
+                    'rejection_reason': str(message.rejection_reason),
+                    'trajectory_replaced': bool(message.trajectory_replaced),
+                    'handover_position_error': float(
+                        message.handover_position_error
+                    ),
+                    'handover_velocity_error': float(
+                        message.handover_velocity_error
+                    ),
+                    'handover_acceleration_error': float(
+                        message.handover_acceleration_error
+                    ),
+                },
             )
         self.controller_compute_times.append(
             max(float(message.callback_compute_time), 0.0)
@@ -538,6 +649,9 @@ class InterceptEvaluatorNode(Node):
             'shadow_prediction_topic': (
                 self.shadow_prediction_topic
             ),
+            'detailed_diagnostics_enabled': (
+                self.detailed_diagnostics_enabled
+            ),
         }
 
     def _start_mission(self, mission_id, now):
@@ -558,14 +672,31 @@ class InterceptEvaluatorNode(Node):
         self.terminal_pause_result = None
         self.latest_tracker_rejection_reason = ''
         self.latest_planner_diagnostic = None
+        self.approach_phase = 'PREPARATION'
+        self.terminal_approach_count = 0
+        self.recovery_count = 0
+        self.handover_jump_count = 0
+        self.first_terminal_approach_result = ''
+        self.minimum_body_clearance = math.inf
+        self.safety_event_histogram = {
+            name: 0
+            for name in ('WARNING', 'BRAKE', 'UNRECOVERABLE', 'SEA_CONTACT')
+        }
+        self.last_safety_state = ''
         self.writer = ExperimentArtifactWriter(
             self.log_directory,
             mission_id,
             self._config_snapshot(),
+            detailed_diagnostics_enabled=(
+                self.detailed_diagnostics_enabled
+            ),
         )
         self.result_published = False
 
     def mission_callback(self, message):
+        previous_phase = (
+            self.latest_mission.state_name if self.latest_mission else ''
+        )
         self.latest_mission = message
         now = self._now()
         if (
@@ -576,6 +707,27 @@ class InterceptEvaluatorNode(Node):
             )
         ):
             self._start_mission(int(message.mission_id), now)
+        state_name = str(message.state_name)
+        terminal_states = {
+            'MINCO_READY', 'MINCO_TRACKING', 'TERMINAL_MINCO'
+        }
+        if state_name in terminal_states:
+            self.approach_phase = 'TERMINAL_APPROACH'
+            if previous_phase not in terminal_states:
+                self.terminal_approach_count += 1
+        elif state_name in ('PLAN_RECOVERY', 'SAFE_WAIT'):
+            self.approach_phase = 'RECOVERY'
+            if previous_phase not in ('PLAN_RECOVERY', 'SAFE_WAIT'):
+                self.recovery_count += 1
+                if (
+                    self.terminal_approach_count == 1
+                    and not self.first_terminal_approach_result
+                ):
+                    self.first_terminal_approach_result = 'RECOVERY'
+        elif state_name == 'FAR_GUIDANCE':
+            self.approach_phase = 'PREPARATION'
+        elif state_name in ('CAPTURE', 'FAILURE', 'ABORTED'):
+            self.approach_phase = state_name
 
     def _sample_row(self, now):
         metrics = self.evaluator.instantaneous_metrics(
@@ -583,6 +735,14 @@ class InterceptEvaluatorNode(Node):
             self.latest_truth,
         )
         controller = self.latest_controller
+        planner = self.latest_planner_diagnostic
+        body_clearance = (
+            self.evaluator.body_contact_z - self.latest_uav.position[2]
+        )
+        self.minimum_body_clearance = min(
+            self.minimum_body_clearance,
+            body_clearance,
+        )
         return {
             'time': now - self.evaluator.started_at,
             'mission_id': self.evaluator.mission_id,
@@ -606,6 +766,8 @@ class InterceptEvaluatorNode(Node):
             'vertical_error': metrics[2],
             'relative_speed': metrics[3],
             'closing_speed': metrics[4],
+            'approach_phase': self.approach_phase,
+            'first_terminal_approach': self.terminal_approach_count == 1,
             'controller_status': controller.status if controller else '',
             'tracker_rejection_reason': (
                 self.latest_tracker_rejection_reason
@@ -613,6 +775,11 @@ class InterceptEvaluatorNode(Node):
                 else ''
             ),
             'plan_id': controller.plan_id if controller else 0,
+            'planner_event_id': (
+                f'{int(planner.mission_id)}:{int(planner.plan_id)}'
+                if planner else ''
+            ),
+            'planner_result': int(planner.result) if planner else 0,
             'attempted_plan_id': (
                 controller.attempted_plan_id if controller else 0
             ),
@@ -626,6 +793,12 @@ class InterceptEvaluatorNode(Node):
             'planner_failure_reason': (
                 self._failure_name(self.latest_planner_diagnostic)
                 if self.latest_planner_diagnostic else ''
+            ),
+            'terminal_admission': (
+                planner.terminal_admission if planner else False
+            ),
+            'terminal_admission_reason': (
+                planner.terminal_admission_reason if planner else ''
             ),
             'planner_failure_detail': (
                 self.latest_planner_diagnostic.failure_detail
@@ -735,6 +908,7 @@ class InterceptEvaluatorNode(Node):
             'sea_safety_state': (
                 controller.safety_state if controller else ''
             ),
+            'body_clearance': body_clearance,
             'sea_safety_margin': (
                 controller.safety_margin if controller else 0.0
             ),
@@ -815,6 +989,13 @@ class InterceptEvaluatorNode(Node):
         return summary
 
     def _summary(self, result):
+        if (
+            self.terminal_approach_count == 1
+            and not self.first_terminal_approach_result
+        ):
+            self.first_terminal_approach_result = result.outcome
+        if result.reason == 'SEA_CONTACT':
+            self.safety_event_histogram['SEA_CONTACT'] += 1
         summary = {
             'outcome': result.outcome,
             'failure_reason': '' if result.success else result.reason,
@@ -822,6 +1003,22 @@ class InterceptEvaluatorNode(Node):
             'evaluation_capture_radius': self.evaluation_capture_radius,
             'planned_capture_radius': self.planned_capture_radius,
             'minimum_distance': result.minimum_distance,
+            'minimum_body_clearance': (
+                self.minimum_body_clearance
+                if math.isfinite(self.minimum_body_clearance) else 0.0
+            ),
+            'terminal_approach_count': self.terminal_approach_count,
+            'recovery_count': self.recovery_count,
+            'handover_jump_count': self.handover_jump_count,
+            'first_terminal_approach_result': (
+                self.first_terminal_approach_result
+            ),
+            'first_terminal_approach_hit': bool(
+                result.success
+                and self.terminal_approach_count == 1
+                and self.recovery_count == 0
+            ),
+            'safety_event_histogram': dict(self.safety_event_histogram),
             'horizontal_distance': result.horizontal_distance,
             'vertical_error': result.vertical_error,
             'relative_speed': result.relative_speed,
@@ -834,11 +1031,7 @@ class InterceptEvaluatorNode(Node):
             'max_vertical_acceleration': result.maximum_vertical_acceleration,
             'truth_topic': self.truth_topic,
             'truth_role': 'evaluation_only',
-            'prediction_errors': self._prediction_summary(),
             'controller_callback_p95': 0.0,
-            'runtime_performance_by_distance': (
-                self.runtime_performance.summary()
-            ),
         }
         if self.terminal_pause_result is not None:
             summary.update({
@@ -922,6 +1115,16 @@ class InterceptEvaluatorNode(Node):
                 attempts=0,
             )
         if self.writer is not None:
+            self.writer.append_detail_event(
+                'run_detail',
+                f'{self.evaluator.mission_id}:final',
+                {
+                    'prediction_errors': self._prediction_summary(),
+                    'runtime_performance_by_distance': (
+                        self.runtime_performance.summary()
+                    ),
+                },
+            )
             paths = self.writer.finalize(self._summary(result))
             self.get_logger().info(
                 f'{result.outcome}: {result.reason} | '

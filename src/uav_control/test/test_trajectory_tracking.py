@@ -84,6 +84,44 @@ def test_old_trajectory_continues_when_new_plan_is_stale():
     assert tracker.command(state(10.10), mission_id=4) is not None
 
 
+def test_replacement_rejects_acceleration_jump_at_same_absolute_time():
+    tracker = TrajectoryTrackerCore()
+    active = linear_trajectory()
+    assert tracker.accept(active, state(), mission_id=4) == (
+        TrajectoryRejectReason.NONE
+    )
+    discontinuous = linear_trajectory(generated_stamp=10.04)
+    object.__setattr__(discontinuous, 'plan_id', 8)
+    coefficients = list(discontinuous.segments[0].coefficients)
+    coefficients[2] = 2.0
+    object.__setattr__(
+        discontinuous,
+        'segments',
+        (PolynomialSegmentData(2.0, tuple(coefficients)),),
+    )
+
+    rejected = tracker.accept(discontinuous, state(), mission_id=4)
+
+    assert rejected == TrajectoryRejectReason.REFERENCE_ACCELERATION_MISMATCH
+    assert tracker.active_trajectory is active
+
+
+def test_equivalent_rolling_plan_is_acknowledged_without_replacement():
+    tracker = TrajectoryTrackerCore()
+    active = linear_trajectory()
+    assert tracker.accept(active, state(), mission_id=4) == (
+        TrajectoryRejectReason.NONE
+    )
+    equivalent = linear_trajectory(generated_stamp=10.04)
+    object.__setattr__(equivalent, 'plan_id', 8)
+
+    accepted = tracker.accept(equivalent, state(), mission_id=4)
+
+    assert accepted == TrajectoryRejectReason.NONE
+    assert tracker.active_trajectory is active
+    assert not tracker.last_replacement_performed
+
+
 def test_terminal_replacement_uses_stricter_position_error():
     tracker = TrajectoryTrackerCore(maximum_position_error=0.30)
     displaced = state(position=(0.25, 0.0, -0.99))

@@ -18,39 +18,17 @@ def test_csv_separates_prediction_and_trajectory_age():
     assert 'trajectory_age' in ExperimentArtifactWriter.CSV_FIELDS
 
 
-def test_csv_records_planner_failure_diagnostics():
+def test_daily_csv_keeps_decision_fields_and_moves_verbose_planner_detail():
     assert 'planner_failure_reason' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_failure_detail' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_reachability_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_generation_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_validation_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_candidate_diagnostics' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'attempted_plan_id' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_planning_cycle_id' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_rejection_stage' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_rejection_detail' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_contact_recovery_reason' in (
-        ExperimentArtifactWriter.CSV_FIELDS
-    )
-    assert 'planner_contact_delay' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_target_prediction_shift' in (
-        ExperimentArtifactWriter.CSV_FIELDS
-    )
-    assert 'planner_candidate_published' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_required_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_horizontal_min_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_vertical_min_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_sea_safe_min_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_search_min_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_search_max_time' in ExperimentArtifactWriter.CSV_FIELDS
-    assert (
-        'planner_available_prediction_duration'
-        in ExperimentArtifactWriter.CSV_FIELDS
-    )
-    assert (
-        'planner_locked_remaining_t_go'
-        in ExperimentArtifactWriter.CSV_FIELDS
-    )
+    assert 'planner_result' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_event_id' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'approach_phase' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'terminal_admission' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'terminal_admission_reason' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'body_clearance' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_candidate_diagnostics' not in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_rejection_detail' not in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_planning_cycle_id' not in ExperimentArtifactWriter.CSV_FIELDS
 
 
 def test_capture_is_detected_between_truth_samples():
@@ -348,6 +326,8 @@ def test_planner_statistics_are_unique_per_plan_event():
     assert summary['planner_failure_histogram'] == {
         'DEADLINE_EXCEEDED': 1,
     }
+    assert summary['planner_primary_failure_reason'] == 'DEADLINE_EXCEEDED'
+    assert summary['planner_success_rate'] == pytest.approx(0.5)
     assert summary['tracker_rejection_histogram'] == {
         'TARGET_ENDPOINT_MISMATCH': 1,
     }
@@ -364,9 +344,31 @@ def test_empty_event_rates_are_numeric_not_null():
     assert summary['hold_rate'] == 0.0
     assert summary['actual_completion_hz'] == 0.0
     assert summary['planner_failure_histogram'] == {}
+    assert summary['planner_primary_failure_reason'] == ''
+    assert summary['planner_success_rate'] == 0.0
     assert summary['tracker_rejection_histogram'] == {}
     assert summary['planner_source_age_at_publish_p95'] == 0.0
     assert summary['planner_publish_delay_p95'] == 0.0
+
+
+def test_preparation_admission_wait_is_not_counted_as_planner_failure():
+    metrics = PlannerEventAccumulator()
+    metrics.observe_planner(
+        mission_id=2,
+        plan_id=1,
+        success=False,
+        failure_reason='NONE',
+        compute_time=0.02,
+        generation_time=0.01,
+        completion_stamp=1.0,
+        admission_wait=True,
+    )
+
+    summary = metrics.summary(elapsed_time=1.0)
+
+    assert summary['planner_admission_wait'] == 1
+    assert summary['planner_failed'] == 0
+    assert summary['planner_failure_histogram'] == {}
 
 
 def test_runtime_performance_is_grouped_by_target_distance():
@@ -406,6 +408,28 @@ def test_artifact_writer_creates_csv_summary_and_config(tmp_path):
     summary = json.loads(paths.summary_path.read_text(encoding='utf-8'))
     assert summary['mission_id'] == 3
     assert summary['attempt_rate'] == 0.0
+
+
+def test_optional_detailed_diagnostics_are_event_based_jsonl(tmp_path):
+    writer = ExperimentArtifactWriter(
+        log_directory=tmp_path,
+        mission_id=4,
+        config={'detailed_diagnostics_enabled': True},
+        prefix='detail_test',
+        detailed_diagnostics_enabled=True,
+    )
+    writer.append_sample({'time': 0.0, 'distance': 1.2})
+    writer.append_detail_event('planner', '4:7', {'candidate_count': 3})
+    paths = writer.finalize({'outcome': 'FAILURE'})
+
+    assert paths.diagnostics_path is not None
+    lines = paths.diagnostics_path.read_text(encoding='utf-8').splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        'event_type': 'planner',
+        'event_id': '4:7',
+        'candidate_count': 3,
+    }
 
 
 def test_csv_records_camera_shadow_prediction_errors():

@@ -8,6 +8,7 @@ from uav_control.guidance.planner_pipeline import PlannerRequest
 from uav_control.guidance.planner_pipeline import PredictionSample
 from uav_control.guidance.planner_pipeline import PredictionSeries
 from uav_control.guidance.planner_pipeline import UavKinematicState
+from uav_control.guidance.planner_pipeline import evaluate_terminal_admission
 from uav_control.guidance.planner_pipeline import validate_input
 from uav_control.guidance.planner_pipeline import validate_plan_arrival
 from uav_control.guidance.planner_pipeline import validate_target_shift
@@ -369,3 +370,62 @@ def test_planner_marks_terminal_from_mission_or_remaining_time(
         terminal_time_threshold=1.0,
         terminal_state=7,
     )
+
+
+def test_terminal_admission_waits_until_horizontal_and_vertical_times_align():
+    waiting = evaluate_terminal_admission(
+        horizontal_min_time=3.0,
+        vertical_min_time=2.0,
+        selected_t_go=3.4,
+        planned_capture_margin=0.1,
+        current_z=-5.0,
+        current_vz=0.0,
+        planned_initial_vz=0.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.20,
+        response_delay=0.15,
+        braking_acceleration=2.5,
+        maximum_vertical_speed=4.0,
+        time_sync_tolerance=0.35,
+    )
+    admitted = evaluate_terminal_admission(
+        horizontal_min_time=2.2,
+        vertical_min_time=2.0,
+        selected_t_go=3.4,
+        planned_capture_margin=0.1,
+        current_z=-5.0,
+        current_vz=0.0,
+        planned_initial_vz=0.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.20,
+        response_delay=0.15,
+        braking_acceleration=2.5,
+        maximum_vertical_speed=4.0,
+        time_sync_tolerance=0.35,
+    )
+
+    assert not waiting.admitted
+    assert waiting.reason == 'HORIZONTAL_NOT_READY'
+    assert admitted.admitted
+    assert admitted.reason == 'ADMITTED'
+
+
+def test_terminal_admission_rejects_insufficient_sea_braking_margin():
+    decision = evaluate_terminal_admission(
+        horizontal_min_time=0.3,
+        vertical_min_time=0.3,
+        selected_t_go=0.8,
+        planned_capture_margin=0.1,
+        current_z=-0.24,
+        current_vz=1.0,
+        planned_initial_vz=1.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.20,
+        response_delay=0.15,
+        braking_acceleration=2.5,
+        maximum_vertical_speed=4.0,
+        time_sync_tolerance=0.35,
+    )
+
+    assert not decision.admitted
+    assert decision.reason == 'SEA_MARGIN_INSUFFICIENT'

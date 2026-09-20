@@ -113,6 +113,33 @@ def test_default_far_guidance_uses_six_point_two_mps_soft_limit():
     assert command.velocity[1] == pytest.approx(0.0)
 
 
+def test_far_guidance_builds_dynamic_preparation_point_from_descent_time():
+    high = FlightGuidanceCore(
+        flight_altitude=-5.0,
+        approach_contact_clearance=0.33,
+        approach_closing_speed=1.5,
+    )
+    low = FlightGuidanceCore(
+        flight_altitude=-5.0,
+        approach_contact_clearance=0.33,
+        approach_closing_speed=1.5,
+    )
+    target = state((20.0, 0.0, 0.0), (4.0, 0.0, 0.0))
+
+    high_target = high.approach_target(
+        state((0.0, 0.0, -5.0)),
+        target,
+    )
+    low_target = low.approach_target(
+        state((0.0, 0.0, -2.0)),
+        target,
+    )
+
+    assert high_target.vertical_time > low_target.vertical_time
+    assert high_target.standoff > low_target.standoff
+    assert high_target.position[0] < low_target.position[0] < target.position[0]
+
+
 def test_missing_target_uses_position_hold_not_fast_pursuit():
     guidance = FlightGuidanceCore(flight_altitude=-5.0)
 

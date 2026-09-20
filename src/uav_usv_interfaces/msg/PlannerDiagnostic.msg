@@ -59,3 +59,7 @@ uint32 candidate_count
 uint64 replaced_request_count
 uint64 completed_plan_count
 float64 actual_completion_frequency
+
+string approach_phase
+bool terminal_admission
+string terminal_admission_reason

@@ -268,6 +268,10 @@ intercept_planner_node:
     deadline_seconds: 0.08
     maximum_input_age: 0.125
     endpoint_tolerance: 0.5
+    # The first MINCO descent is published only after horizontal reachability
+    # has converged to the same time scale as the vertical descent.
+    approach_time_sync_tolerance: 0.35
+    approach_reserve_clearance: 0.20
     response_delay: 0.15
     effective_vertical_braking_acceleration: 2.5
     quadrature_intervals_per_piece: 6
@@ -291,6 +295,12 @@ trajectory_tracker_node:
     follow_distance: 5.0
     follow_position_gain: 0.8
     altitude_velocity_gain: 1.0
+    # FAR_GUIDANCE keeps flight_altitude while moving to a preparation point
+    # whose standoff is closing_speed * current vertical minimum time.
+    approach_contact_clearance: 0.33
+    approach_closing_speed: 1.5
+    approach_horizon: 4.0
+    approach_response_delay: 0.15
     maximum_plan_age: 0.125
     minimum_remaining_time: 0.20
     maximum_position_error: 0.30
@@ -377,6 +387,7 @@ intercept_evaluator_node:
     # gear submerged without raising SEA_CONTACT.
     body_lower_extent: 0.23
     maximum_duration: 30.0
+    detailed_diagnostics_enabled: false
     log_directory: data/experiments/current
     # Simulation truth is consumed only by this evaluator and by the explicitly
     # configured truth-control baseline predictor.

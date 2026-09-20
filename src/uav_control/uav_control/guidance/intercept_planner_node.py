@@ -28,6 +28,7 @@ from .planner_pipeline import ContactTimeSchedule
 from .planner_pipeline import PlanningRequestPolicy
 from .planner_pipeline import PredictionSample, PredictionSeries
 from .planner_pipeline import terminal_mode_for_plan
+from .planner_pipeline import evaluate_terminal_admission
 from .planner_pipeline import target_shift_distance
 from .planner_pipeline import UavKinematicState, validate_input
 from .planner_pipeline import validate_plan_arrival
@@ -254,6 +255,8 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('deadline_seconds', 0.08)
         self.declare_parameter('maximum_input_age', 0.125)
         self.declare_parameter('endpoint_tolerance', 0.5)
+        self.declare_parameter('approach_time_sync_tolerance', 0.35)
+        self.declare_parameter('approach_reserve_clearance', 0.20)
         self.declare_parameter('response_delay', 0.15)
         self.declare_parameter(
             'effective_vertical_braking_acceleration',
@@ -267,6 +270,12 @@ class InterceptPlannerNode(Node):
         )
         self.endpoint_tolerance = float(
             self.get_parameter('endpoint_tolerance').value
+        )
+        self.approach_time_sync_tolerance = float(
+            self.get_parameter('approach_time_sync_tolerance').value
+        )
+        self.approach_reserve_clearance = float(
+            self.get_parameter('approach_reserve_clearance').value
         )
         self.hard_deadline_seconds = float(
             self.get_parameter('deadline_seconds').value
@@ -829,6 +838,10 @@ class InterceptPlannerNode(Node):
             terminal_state=MissionState.TERMINAL_MINCO,
         )
         planned_capture_margin = 0.0
+        terminal_admission = outcome.plan is not None
+        terminal_admission_reason = (
+            'ADMITTED' if terminal_admission else outcome.failure.value
+        )
         if outcome.plan is not None:
             contact_stamp = candidate_contact_stamp
             remaining_t_go = max(
@@ -862,11 +875,48 @@ class InterceptPlannerNode(Node):
             except (TypeError, ValueError):
                 planned_capture_margin = -math.inf
 
+        if (
+            outcome.plan is not None
+            and self.mission_state == MissionState.FAR_GUIDANCE
+        ):
+            initial_reference = outcome.plan.sample(0.0)
+            admission = evaluate_terminal_admission(
+                horizontal_min_time=outcome.diagnostics.horizontal_min_time,
+                vertical_min_time=outcome.diagnostics.vertical_min_time,
+                selected_t_go=outcome.plan.duration,
+                planned_capture_margin=planned_capture_margin,
+                current_z=job.request.uav.position[2],
+                current_vz=job.request.uav.velocity[2],
+                planned_initial_vz=initial_reference.velocity[2],
+                sea_surface_z=self.planner.sea_surface_z,
+                reserve_clearance=getattr(
+                    self,
+                    'approach_reserve_clearance',
+                    0.20,
+                ),
+                response_delay=self.planner.response_delay,
+                braking_acceleration=(
+                    self.planner.effective_vertical_braking_acceleration
+                ),
+                maximum_vertical_speed=self.planner.maximum_vertical_speed,
+                time_sync_tolerance=getattr(
+                    self,
+                    'approach_time_sync_tolerance',
+                    0.35,
+                ),
+            )
+            terminal_admission = admission.admitted
+            terminal_admission_reason = admission.reason
+
+        trajectory_allowed = bool(
+            outcome.plan is not None and terminal_admission
+        )
+
         self.completed_plan_count += 1
         self.completion_times.append(time.monotonic())
         self.plan_id += 1
         candidate_published = False
-        if outcome.plan is not None:
+        if trajectory_allowed:
             candidate_published = self.contact_schedule.propose(
                 plan_id=self.plan_id,
                 contact_stamp=contact_stamp,
@@ -881,6 +931,7 @@ class InterceptPlannerNode(Node):
                     failure=FastPlanningFailure.PLAN_STALE_ON_ARRIVAL,
                     diagnostics=outcome.diagnostics,
                 )
+                trajectory_allowed = False
         diagnostics = outcome.diagnostics
         message = PlannerDiagnostic()
         message.mission_id = job.request.mission_id
@@ -895,11 +946,12 @@ class InterceptPlannerNode(Node):
         )
         message.generated_stamp = seconds_to_time(job.generated_stamp)
         message.published_stamp = seconds_to_time(publish_stamp)
-        message.result = (
-            PlannerDiagnostic.RESULT_SUCCESS
-            if outcome.plan is not None
-            else PlannerDiagnostic.RESULT_FAILURE
-        )
+        if outcome.plan is None:
+            message.result = PlannerDiagnostic.RESULT_FAILURE
+        elif trajectory_allowed:
+            message.result = PlannerDiagnostic.RESULT_SUCCESS
+        else:
+            message.result = PlannerDiagnostic.RESULT_IDLE
         message.failure_reason = FAILURE_CONSTANTS[outcome.failure]
         message.failure_detail = (
             rejection_detail or outcome.failure.value
@@ -979,9 +1031,18 @@ class InterceptPlannerNode(Node):
         )
         message.completed_plan_count = self.completed_plan_count
         message.actual_completion_frequency = self._completion_frequency()
+        message.approach_phase = (
+            'PREPARATION'
+            if self.mission_state == MissionState.FAR_GUIDANCE
+            else 'TERMINAL_APPROACH'
+        )
+        message.terminal_admission = bool(terminal_admission)
+        message.terminal_admission_reason = str(
+            terminal_admission_reason
+        )
         self.diagnostic_pub.publish(message)
 
-        if outcome.plan is not None:
+        if trajectory_allowed:
             trajectory = plan_to_message(
                 outcome.plan,
                 mission_id=job.request.mission_id,

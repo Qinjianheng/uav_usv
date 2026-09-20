@@ -109,11 +109,15 @@ def run_publish_test(
     latest_prediction,
     plan_duration=1.2,
     locked_contact_unreachable=False,
+    mission_state=0,
+    committed_contact=True,
+    diagnostics=None,
 ):
     """Run one completed planner job through the real publication gate."""
     prediction = make_publish_test_prediction(sequence_id=4)
     schedule = ContactTimeSchedule()
-    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+    if committed_contact:
+        schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
     request = PlannerRequest(
         mission_id=2,
         prediction=prediction,
@@ -124,7 +128,7 @@ def run_publish_test(
             acceleration=(0.0, 0.0, 0.0),
         ),
         trajectory_start_stamp=10.0,
-        contact_stamp=11.0,
+        contact_stamp=11.0 if committed_contact else None,
         terminal_mode=terminal_mode,
         minimum_duration=0.30 if terminal_mode else 1.0,
     )
@@ -136,7 +140,7 @@ def run_publish_test(
         endpoint_tolerance=0.5,
         latest_prediction=latest_prediction,
         contact_schedule=schedule,
-        mission_state=0,
+        mission_state=mission_state,
         terminal_time_threshold=1.0,
         planned_capture_radius=0.35,
         completed_plan_count=0,
@@ -147,13 +151,21 @@ def run_publish_test(
         diagnostic_pub=diagnostic_pub,
         trajectory_pub=trajectory_pub,
         frame_id='local_ned',
+        approach_time_sync_tolerance=0.35,
+        approach_reserve_clearance=0.20,
+        planner=SimpleNamespace(
+            sea_surface_z=0.0,
+            response_delay=0.15,
+            effective_vertical_braking_acceleration=2.5,
+            maximum_vertical_speed=4.0,
+        ),
     )
     job = PlannerJobResult(
         request=request,
         outcome=FastPlanningOutcome(
             plan=make_publish_test_plan(duration=plan_duration),
             failure=FastPlanningFailure.NONE,
-            diagnostics=PlannerDiagnostics(),
+            diagnostics=diagnostics or PlannerDiagnostics(),
         ),
         planning_started_stamp=10.01,
         generated_stamp=10.03,
@@ -168,6 +180,47 @@ def run_publish_test(
     planner_node_module.InterceptPlannerNode._publish_job(node, job)
 
     return node, schedule, trajectory_pub, diagnostic_pub
+
+
+def test_far_guidance_publishes_only_after_terminal_admission_is_ready():
+    waiting = PlannerDiagnostics(
+        horizontal_min_time=1.0,
+        vertical_min_time=0.5,
+    )
+    _, _, waiting_trajectories, waiting_diagnostics = run_publish_test(
+        terminal_mode=False,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+        mission_state=MissionState.FAR_GUIDANCE,
+        committed_contact=False,
+        diagnostics=waiting,
+    )
+
+    assert waiting_trajectories.messages == []
+    assert waiting_diagnostics.messages[-1].result == (
+        PlannerDiagnostic.RESULT_IDLE
+    )
+    assert not waiting_diagnostics.messages[-1].terminal_admission
+    assert waiting_diagnostics.messages[-1].terminal_admission_reason == (
+        'HORIZONTAL_NOT_READY'
+    )
+
+    ready = PlannerDiagnostics(
+        horizontal_min_time=0.7,
+        vertical_min_time=0.5,
+    )
+    _, _, ready_trajectories, ready_diagnostics = run_publish_test(
+        terminal_mode=False,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+        mission_state=MissionState.FAR_GUIDANCE,
+        committed_contact=False,
+        diagnostics=ready,
+    )
+
+    assert len(ready_trajectories.messages) == 1
+    assert ready_diagnostics.messages[-1].result == (
+        PlannerDiagnostic.RESULT_SUCCESS
+    )
+    assert ready_diagnostics.messages[-1].terminal_admission
 
 
 def test_recovery_to_far_guidance_starts_new_contact_cycle_same_mission():

@@ -27,3 +27,8 @@ float64 safety_margin
 geometry_msgs/Point reference_position
 geometry_msgs/Vector3 command_velocity
 geometry_msgs/Vector3 command_acceleration
+
+bool trajectory_replaced
+float64 handover_position_error
+float64 handover_velocity_error
+float64 handover_acceleration_error

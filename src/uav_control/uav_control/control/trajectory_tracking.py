@@ -22,6 +22,9 @@ class TrajectoryRejectReason(str, Enum):
     TARGET_ENDPOINT_MISMATCH = 'TARGET_ENDPOINT_MISMATCH'
     SAFETY_REJECTED = 'SAFETY_REJECTED'
     INVALID_TRAJECTORY = 'INVALID_TRAJECTORY'
+    REFERENCE_POSITION_MISMATCH = 'REFERENCE_POSITION_MISMATCH'
+    REFERENCE_VELOCITY_MISMATCH = 'REFERENCE_VELOCITY_MISMATCH'
+    REFERENCE_ACCELERATION_MISMATCH = 'REFERENCE_ACCELERATION_MISMATCH'
 
 
 @dataclass(frozen=True)
@@ -219,6 +222,10 @@ class TrajectoryTrackerCore:
         self.previous_command_stamp = None
         self.last_reference_position = None
         self.recovery_position = None
+        self.last_replacement_performed = False
+        self.last_handover_position_error = 0.0
+        self.last_handover_velocity_error = 0.0
+        self.last_handover_acceleration_error = 0.0
 
     @staticmethod
     def _norm(values):
@@ -235,6 +242,10 @@ class TrajectoryTrackerCore:
         self.previous_state_stamp = None
         self.previous_state_vertical_velocity = None
         self.measured_vertical_acceleration = None
+        self.last_replacement_performed = False
+        self.last_handover_position_error = 0.0
+        self.last_handover_velocity_error = 0.0
+        self.last_handover_acceleration_error = 0.0
 
     def _observe_state(self, state):
         """Track the measured vertical acceleration for the plant limiter."""
@@ -271,6 +282,7 @@ class TrajectoryTrackerCore:
         maximum_position_error=None,
     ):
         """Validate then atomically replace the active trajectory."""
+        self.last_replacement_performed = False
         if trajectory.mission_id != int(mission_id):
             return TrajectoryRejectReason.MISSION_MISMATCH
         if trajectory.frame_id != self.expected_frame_id:
@@ -316,6 +328,84 @@ class TrajectoryTrackerCore:
             ))
             if endpoint_error > self.target_endpoint_tolerance:
                 return TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
+        active = self.active_trajectory
+        if (
+            active is not None
+            and active.mission_id == int(mission_id)
+            and state.stamp < active.valid_until
+        ):
+            try:
+                old_reference = active.sample_at_ros_time(state.stamp)
+            except ValueError:
+                old_reference = None
+            if old_reference is not None:
+                self.last_handover_position_error = self._norm(tuple(
+                    new - old
+                    for new, old in zip(
+                        expected.position,
+                        old_reference.position,
+                    )
+                ))
+                self.last_handover_velocity_error = self._norm(tuple(
+                    new - old
+                    for new, old in zip(
+                        expected.velocity,
+                        old_reference.velocity,
+                    )
+                ))
+                acceleration_delta = tuple(
+                    new - old
+                    for new, old in zip(
+                        expected.acceleration,
+                        old_reference.acceleration,
+                    )
+                )
+                horizontal_acceleration_error = math.hypot(
+                    acceleration_delta[0],
+                    acceleration_delta[1],
+                )
+                vertical_acceleration_error = abs(acceleration_delta[2])
+                self.last_handover_acceleration_error = max(
+                    horizontal_acceleration_error,
+                    vertical_acceleration_error,
+                )
+                if self.last_handover_position_error > position_limit:
+                    return TrajectoryRejectReason.REFERENCE_POSITION_MISMATCH
+                if (
+                    self.last_handover_velocity_error
+                    > self.maximum_velocity_error
+                ):
+                    return TrajectoryRejectReason.REFERENCE_VELOCITY_MISMATCH
+                if (
+                    horizontal_acceleration_error
+                    > self.maximum_horizontal_acceleration
+                    or vertical_acceleration_error
+                    > self.maximum_vertical_acceleration
+                ):
+                    return (
+                        TrajectoryRejectReason
+                        .REFERENCE_ACCELERATION_MISMATCH
+                    )
+                same_contact = abs(
+                    float(trajectory.contact_stamp)
+                    - float(active.contact_stamp)
+                ) <= 1e-3
+                same_endpoint = self._norm(tuple(
+                    new - old
+                    for new, old in zip(
+                        trajectory.terminal_position,
+                        active.terminal_position,
+                    )
+                )) <= 1e-2
+                if (
+                    same_contact
+                    and same_endpoint
+                    and self.last_handover_position_error <= 1e-2
+                    and self.last_handover_velocity_error <= 5e-2
+                    and self.last_handover_acceleration_error <= 0.2
+                ):
+                    self.status = 'TRACKING'
+                    return TrajectoryRejectReason.NONE
         safety = apply_sea_safety_guard(
             current_z=state.position[2],
             current_vz=state.velocity[2],
@@ -332,6 +422,7 @@ class TrajectoryTrackerCore:
         if safety.unrecoverable or safety.response_margin <= 0.0:
             return TrajectoryRejectReason.SAFETY_REJECTED
         self.active_trajectory = trajectory
+        self.last_replacement_performed = True
         self.status = 'TRACKING'
         self.recovery_position = None
         return TrajectoryRejectReason.NONE

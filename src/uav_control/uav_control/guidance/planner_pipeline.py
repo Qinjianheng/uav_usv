@@ -4,6 +4,8 @@ import math
 import threading
 from dataclasses import dataclass
 
+from uav_control.common.sea_safety import apply_sea_safety_guard
+
 from .fast_minco_planner import FastPlanningFailure
 
 
@@ -146,6 +148,63 @@ class PlanningDecision:
     submit: bool
     terminal_mode: bool
     minimum_duration: float
+
+
+@dataclass(frozen=True)
+class TerminalAdmissionDecision:
+    """Explain whether one fully validated plan may start final approach."""
+
+    admitted: bool
+    reason: str
+
+
+def evaluate_terminal_admission(
+    horizontal_min_time,
+    vertical_min_time,
+    selected_t_go,
+    planned_capture_margin,
+    current_z,
+    current_vz,
+    planned_initial_vz,
+    sea_surface_z,
+    reserve_clearance,
+    response_delay,
+    braking_acceleration,
+    maximum_vertical_speed,
+    time_sync_tolerance,
+):
+    """Gate the first descent on synchronized reachability and sea margin."""
+    values = (
+        horizontal_min_time,
+        vertical_min_time,
+        selected_t_go,
+        planned_capture_margin,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        return TerminalAdmissionDecision(False, 'REACHABILITY_UNKNOWN')
+    if planned_capture_margin < 0.0:
+        return TerminalAdmissionDecision(False, 'CAPTURE_MARGIN_INSUFFICIENT')
+    if (
+        horizontal_min_time > selected_t_go + 1e-9
+        or vertical_min_time > selected_t_go + 1e-9
+    ):
+        return TerminalAdmissionDecision(False, 'CONTACT_TIME_UNREACHABLE')
+    if horizontal_min_time > vertical_min_time + time_sync_tolerance:
+        return TerminalAdmissionDecision(False, 'HORIZONTAL_NOT_READY')
+    safety = apply_sea_safety_guard(
+        current_z=current_z,
+        current_vz=current_vz,
+        proposed_vz=planned_initial_vz,
+        sea_surface_z=sea_surface_z,
+        reserve_clearance=reserve_clearance,
+        response_delay=response_delay,
+        effective_braking_acceleration=braking_acceleration,
+        control_dt=0.05,
+        maximum_vertical_speed=maximum_vertical_speed,
+    )
+    if safety.unrecoverable or safety.response_margin <= 0.0:
+        return TerminalAdmissionDecision(False, 'SEA_MARGIN_INSUFFICIENT')
+    return TerminalAdmissionDecision(True, 'ADMITTED')
 
 
 def terminal_mode_for_plan(

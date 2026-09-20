@@ -173,6 +173,7 @@ class PlannerEventAccumulator:
         validation_time=0.0,
         input_age_at_publish=0.0,
         completion_to_publish_delay=0.0,
+        admission_wait=False,
     ):
         """Store a completed event if its mission/plan identity is new."""
         key = int(mission_id), int(plan_id)
@@ -191,6 +192,7 @@ class PlannerEventAccumulator:
                 float(completion_to_publish_delay),
                 0.0,
             ),
+            'admission_wait': bool(admission_wait),
         }
         self._planner_events[key] = event
         self._completion_stamps.append(event['completion_stamp'])
@@ -228,17 +230,26 @@ class PlannerEventAccumulator:
         """Return numeric event rates even when no event has occurred."""
         events = list(self._planner_events.values())
         succeeded = sum(event['success'] for event in events)
-        failed = len(events) - succeeded
+        admission_waits = sum(event['admission_wait'] for event in events)
+        failed = len(events) - succeeded - admission_waits
         deadlines = sum(
             event['failure_reason'] == 'DEADLINE_EXCEEDED'
             for event in events
         )
         failure_histogram = {}
         for event in events:
-            if event['success']:
+            if event['success'] or event['admission_wait']:
                 continue
             reason = event['failure_reason']
             failure_histogram[reason] = failure_histogram.get(reason, 0) + 1
+        primary_failure = (
+            max(
+                failure_histogram,
+                key=lambda reason: (failure_histogram[reason], reason),
+            )
+            if failure_histogram else ''
+        )
+        completed_solver_events = succeeded + failed
         executed_successes = sum(
             key in self._executed_plan_ids and event['success']
             for key, event in self._planner_events.items()
@@ -254,10 +265,16 @@ class PlannerEventAccumulator:
             'planner_completed': len(events),
             'planner_succeeded': succeeded,
             'planner_failed': failed,
+            'planner_admission_wait': admission_waits,
             'planner_deadline': deadlines,
             'planner_failure_histogram': dict(sorted(
                 failure_histogram.items()
             )),
+            'planner_primary_failure_reason': primary_failure,
+            'planner_success_rate': (
+                succeeded / completed_solver_events
+                if completed_solver_events else 0.0
+            ),
             'attempt_rate': (
                 len(events) / elapsed_time if elapsed_time > 0.0 else 0.0
             ),
@@ -655,6 +672,7 @@ class ArtifactPaths:
     csv_path: Path
     summary_path: Path
     config_path: Path
+    diagnostics_path: Path = None
 
 
 class ExperimentArtifactWriter:
@@ -667,30 +685,17 @@ class ExperimentArtifactWriter:
         'target_vx', 'target_vy', 'target_vz',
         'distance', 'horizontal_distance', 'vertical_error',
         'relative_speed', 'closing_speed',
-        'controller_status', 'plan_id', 'attempted_plan_id',
+        'approach_phase', 'first_terminal_approach',
+        'controller_status', 'plan_id',
         'prediction_age', 'trajectory_age',
         'tracker_rejection_reason',
-        'plan_prediction_sequence_id', 'latest_prediction_sequence_id',
-        'planner_failure_reason', 'planner_failure_detail',
-        'planner_planning_cycle_id',
-        'planner_rejection_stage', 'planner_rejection_detail',
-        'planner_contact_recovery_reason',
-        'planner_contact_delay', 'planner_target_prediction_shift',
-        'planner_candidate_published',
-        'planner_required_time',
-        'planner_horizontal_min_time',
-        'planner_vertical_min_time',
-        'planner_sea_safe_min_time',
-        'planner_search_min_time', 'planner_search_max_time',
-        'planner_available_prediction_duration',
-        'planner_locked_remaining_t_go',
-        'planner_reachability_time', 'planner_generation_time',
-        'planner_validation_time', 'planner_candidate_diagnostics',
+        'planner_event_id', 'planner_result', 'planner_failure_reason',
         'planner_source_age_at_publish',
         'planner_completion_to_publish_delay',
+        'terminal_admission', 'terminal_admission_reason',
         'selected_t_go', 'contact_stamp', 'remaining_t_go',
         'terminal_mode', 'planned_capture_margin', 'target_yaw',
-        'sea_safety_state', 'sea_safety_margin',
+        'body_clearance', 'sea_safety_state', 'sea_safety_margin',
         'gazebo_real_time_factor',
         'front_rgb_hz', 'front_depth_hz',
         'down_rgb_hz', 'down_depth_hz',
@@ -713,6 +718,7 @@ class ExperimentArtifactWriter:
         mission_id,
         config,
         prefix=None,
+        detailed_diagnostics_enabled=False,
     ):
         directory = Path(log_directory).expanduser()
         directory.mkdir(parents=True, exist_ok=True)
@@ -725,6 +731,10 @@ class ExperimentArtifactWriter:
             csv_path=directory / f'{stem}.csv',
             summary_path=directory / f'{stem}_summary.json',
             config_path=directory / f'{stem}_config.yaml',
+            diagnostics_path=(
+                directory / f'{stem}_diagnostics.jsonl'
+                if detailed_diagnostics_enabled else None
+            ),
         )
         self.mission_id = int(mission_id)
         self._stream = self.paths.csv_path.open(
@@ -739,6 +749,10 @@ class ExperimentArtifactWriter:
             extrasaction='ignore',
         )
         self._writer.writeheader()
+        self._diagnostics_stream = (
+            self.paths.diagnostics_path.open('x', encoding='utf-8', buffering=1)
+            if self.paths.diagnostics_path is not None else None
+        )
         with self.paths.config_path.open('x', encoding='utf-8') as stream:
             json.dump(config, stream, ensure_ascii=False, indent=2)
             stream.write('\n')
@@ -750,6 +764,22 @@ class ExperimentArtifactWriter:
             raise RuntimeError('experiment artifacts are already finalized')
         self._writer.writerow(dict(sample))
 
+    def append_detail_event(self, event_type, event_id, values):
+        """Write one optional diagnostic event instead of repeating samples."""
+        if self._finalized:
+            raise RuntimeError('experiment artifacts are already finalized')
+        if self._diagnostics_stream is None:
+            return False
+        document = {
+            'event_type': str(event_type),
+            'event_id': str(event_id),
+            **dict(values),
+        }
+        self._diagnostics_stream.write(
+            json.dumps(document, ensure_ascii=False) + '\n'
+        )
+        return True
+
     def finalize(self, summary):
         """Write exactly one summary and close the line-buffered CSV."""
         if self._finalized:
@@ -760,5 +790,7 @@ class ExperimentArtifactWriter:
             json.dump(document, stream, ensure_ascii=False, indent=2)
             stream.write('\n')
         self._stream.close()
+        if self._diagnostics_stream is not None:
+            self._diagnostics_stream.close()
         self._finalized = True
         return self.paths

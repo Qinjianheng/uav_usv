@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from uav_control.common.sea_safety import apply_sea_safety_guard
+from uav_control.guidance.intercept_reachability import minimum_time_1d
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,15 @@ class FlightGuidanceCommand:
     far_guidance_available: bool
     safety_state: str
     safety_margin: float
+
+
+@dataclass(frozen=True)
+class ApproachTarget:
+    """Dynamic horizontal preparation point for a later terminal descent."""
+
+    position: tuple
+    vertical_time: float
+    standoff: float
 
 
 class FlightGuidanceCore:
@@ -52,6 +62,10 @@ class FlightGuidanceCore:
         reserve_clearance=0.07,
         safety_response_delay=0.15,
         vertical_braking_acceleration=2.5,
+        approach_contact_clearance=0.33,
+        approach_closing_speed=1.5,
+        approach_horizon=4.0,
+        approach_response_delay=0.15,
         control_dt=0.05,
     ):
         self.flight_altitude = float(flight_altitude)
@@ -90,6 +104,10 @@ class FlightGuidanceCore:
         self.vertical_braking_acceleration = float(
             vertical_braking_acceleration
         )
+        self.approach_contact_clearance = float(approach_contact_clearance)
+        self.approach_closing_speed = float(approach_closing_speed)
+        self.approach_horizon = float(approach_horizon)
+        self.approach_response_delay = float(approach_response_delay)
         self.control_dt = float(control_dt)
         self.ground_position = None
         self.previous_velocity = None
@@ -240,6 +258,62 @@ class FlightGuidanceCore:
             * (desired_position[1] - state.position[1]),
         )
 
+    def approach_target(self, state, target):
+        """Return a moving preparation point sized by vertical reachability."""
+        contact_z = self.sea_surface_z - self.approach_contact_clearance
+        vertical_time = minimum_time_1d(
+            displacement=contact_z - state.position[2],
+            initial_velocity=state.velocity[2],
+            final_velocity=target.velocity[2],
+            maximum_speed=self.maximum_vertical_speed,
+            maximum_acceleration=self.maximum_vertical_acceleration,
+            maximum_braking_acceleration=(
+                self.vertical_braking_acceleration
+            ),
+            response_delay=self.approach_response_delay,
+            search_limit=self.approach_horizon,
+        )
+        if not math.isfinite(vertical_time):
+            vertical_time = self.approach_horizon
+        vertical_time = min(max(vertical_time, 0.0), self.approach_horizon)
+        target_speed = math.hypot(target.velocity[0], target.velocity[1])
+        if target_speed > 1e-6:
+            direction = (
+                target.velocity[0] / target_speed,
+                target.velocity[1] / target_speed,
+            )
+        else:
+            offset = (
+                target.position[0] - state.position[0],
+                target.position[1] - state.position[1],
+            )
+            distance = math.hypot(offset[0], offset[1])
+            direction = (
+                (offset[0] / distance, offset[1] / distance)
+                if distance > 1e-6 else (1.0, 0.0)
+            )
+        standoff = self.approach_closing_speed * vertical_time
+        return ApproachTarget(
+            position=(
+                target.position[0] - standoff * direction[0],
+                target.position[1] - standoff * direction[1],
+                self.flight_altitude,
+            ),
+            vertical_time=vertical_time,
+            standoff=standoff,
+        )
+
+    def _approach_velocity(self, state, target):
+        approach = self.approach_target(state, target)
+        return (
+            target.velocity[0]
+            + self.follow_position_gain
+            * (approach.position[0] - state.position[0]),
+            target.velocity[1]
+            + self.follow_position_gain
+            * (approach.position[1] - state.position[1]),
+        )
+
     def _takeoff_horizontal_weight(self, state):
         clearance = max(self.ground_position[2] - state.position[2], 0.0)
         if clearance <= self.takeoff_horizontal_start_height:
@@ -305,7 +379,11 @@ class FlightGuidanceCore:
             self.settled_duration = 0.0
             if target is None:
                 return self._hold(state)
-            horizontal = self._follow_velocity(state, target)
+            horizontal = (
+                self._approach_velocity(state, target)
+                if phase == 'FAR_GUIDANCE'
+                else self._follow_velocity(state, target)
+            )
             desired = (
                 horizontal[0],
                 horizontal[1],

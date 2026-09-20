@@ -143,6 +143,27 @@ def test_terminal_planning_uses_fast_rate_and_short_freeze_window():
     assert planner['terminal_freeze_time'] == pytest.approx(0.30)
 
 
+def test_approach_preparation_uses_existing_horizon_and_safety_limits():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    planner = parameters(config, 'intercept_planner_node')
+    tracker = parameters(config, 'trajectory_tracker_node')
+    evaluator = parameters(config, 'intercept_evaluator_node')
+
+    assert tracker['approach_horizon'] == pytest.approx(
+        planner['maximum_duration']
+    )
+    assert tracker['approach_contact_clearance'] == pytest.approx(
+        planner['preferred_clearance']
+    )
+    assert tracker['approach_closing_speed'] == pytest.approx(
+        planner['preferred_closing_speed']
+    )
+    assert planner['approach_reserve_clearance'] == pytest.approx(
+        tracker['reserve_clearance']
+    )
+    assert evaluator['detailed_diagnostics_enabled'] is False
+
+
 def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     target = parameters(config, 'moving_target')

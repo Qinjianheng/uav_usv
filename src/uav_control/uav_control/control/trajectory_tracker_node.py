@@ -286,6 +286,10 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('follow_distance', 5.0)
         self.declare_parameter('follow_position_gain', 0.8)
         self.declare_parameter('altitude_velocity_gain', 1.0)
+        self.declare_parameter('approach_contact_clearance', 0.33)
+        self.declare_parameter('approach_closing_speed', 1.5)
+        self.declare_parameter('approach_horizon', 4.0)
+        self.declare_parameter('approach_response_delay', 0.15)
         self.declare_parameter('terminal_replacement_position_error', 0.15)
         self.declare_parameter('max_observation_yaw_rate', 1.0)
 
@@ -365,6 +369,16 @@ class TrajectoryTrackerNode(Node):
             ).value,
             vertical_braking_acceleration=self.get_parameter(
                 'vertical_braking_acceleration'
+            ).value,
+            approach_contact_clearance=self.get_parameter(
+                'approach_contact_clearance'
+            ).value,
+            approach_closing_speed=self.get_parameter(
+                'approach_closing_speed'
+            ).value,
+            approach_horizon=self.get_parameter('approach_horizon').value,
+            approach_response_delay=self.get_parameter(
+                'approach_response_delay'
             ).value,
             control_dt=1.0 / control_rate,
             recovery_clearance=self.get_parameter(
@@ -784,6 +798,18 @@ class TrajectoryTrackerNode(Node):
         )
         message.status = str(status)
         message.rejection_reason = self.last_rejection.value
+        message.trajectory_replaced = bool(
+            self.tracker.last_replacement_performed
+        )
+        message.handover_position_error = float(
+            self.tracker.last_handover_position_error
+        )
+        message.handover_velocity_error = float(
+            self.tracker.last_handover_velocity_error
+        )
+        message.handover_acceleration_error = float(
+            self.tracker.last_handover_acceleration_error
+        )
         message.callback_compute_time = float(callback_time)
         if command is not None:
             message.safety_state = command.safety_state
