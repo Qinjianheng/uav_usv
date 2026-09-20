@@ -234,7 +234,7 @@ intercept_planner_node:
     # reaches 0.23 m below the PX4 reference (see the evaluator's
     # body_lower_extent), so the contact altitude is chosen at
     # preferred_clearance above the sea and the aim radius has to cover
-    # clearance + target heave: 0.35 + 0.05 = 0.40 m, which stays inside the
+    # clearance + target heave: 0.29 + 0.05 = 0.34 m, which stays inside the
     # 0.50 m sphere the evaluator scores.  A smaller aim radius makes every
     # watered-off contact a CAPTURE_GEOMETRY rejection and a smaller clearance
     # puts the planned endpoint below the body-contact threshold, so the plan
@@ -242,11 +242,14 @@ intercept_planner_node:
     planned_capture_radius: 0.50
     sea_surface_z: 0.0
     # Hard floor and nominal terminal clearance above the sea surface.  The
-    # X500 airframe reaches 0.23 m below the PX4 reference and the vertical
-    # tracker overshoots the reference by about 0.09 m, so 0.35 m keeps the
-    # landing gear clear of the water for the whole approach.
-    contact_clearance: 0.33
-    preferred_clearance: 0.35
+    # budget is tight: the evaluator scores a 0.50 m sphere and the airframe
+    # already occupies 0.23 m of it, so clearance + horizontal closing error
+    # must fit in the remaining 0.27 m.  At 0.29 m the gear keeps 0.06 m of
+    # margin while the capture still tolerates sqrt(0.50^2 - 0.29^2) = 0.41 m
+    # of horizontal error; pushing the clearance higher trades capture rate
+    # away faster than it buys safety.
+    contact_clearance: 0.27
+    preferred_clearance: 0.29
     piece_count: 3
     target_curve_weight: 0.7
     # Leave 5 ms for message conversion and event diagnostics.
