@@ -266,6 +266,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('vertical_braking_acceleration', 2.5)
         self.declare_parameter('recovery_clearance', 0.5)
         self.declare_parameter('recovery_climb_speed', 1.0)
+        self.declare_parameter('maximum_command_dt', 0.1)
+        self.declare_parameter('maximum_actual_vertical_acceleration', 4.0)
         self.declare_parameter('maximum_state_age', 0.125)
         self.declare_parameter('use_velocity_control', True)
         self.declare_parameter('frame_id', 'local_ned')
@@ -370,6 +372,12 @@ class TrajectoryTrackerNode(Node):
             ).value,
             recovery_climb_speed=self.get_parameter(
                 'recovery_climb_speed'
+            ).value,
+            maximum_command_dt=self.get_parameter(
+                'maximum_command_dt'
+            ).value,
+            maximum_actual_vertical_acceleration=self.get_parameter(
+                'maximum_actual_vertical_acceleration'
             ).value,
         )
         self.flight_guidance = FlightGuidanceCore(

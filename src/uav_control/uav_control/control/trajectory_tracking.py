@@ -166,6 +166,8 @@ class TrajectoryTrackerCore:
         control_dt=0.05,
         recovery_clearance=0.5,
         recovery_climb_speed=1.0,
+        maximum_command_dt=0.1,
+        maximum_actual_vertical_acceleration=4.0,
     ):
         self.maximum_plan_age = float(maximum_plan_age)
         self.minimum_remaining_time = float(minimum_remaining_time)
@@ -189,6 +191,22 @@ class TrajectoryTrackerCore:
             vertical_braking_acceleration
         )
         self.control_dt = float(control_dt)
+        # Upper bound on the interval the command rate limiter may bank.  With
+        # only a lower bound, a long gap (mode switch, plan loss) authorised a
+        # command jump of acceleration_limit * gap, which PX4 answers with a
+        # real acceleration far above the configured limit.
+        self.maximum_command_dt = max(float(maximum_command_dt), self.control_dt)
+        # The configured acceleration limits bound the COMMAND.  PX4 answers a
+        # bounded command with its own loop acceleration on top, which measured
+        # 1.8-1.9x the commanded rate (3.0 m/s^2 commanded -> 5.3 m/s^2 actual),
+        # so the plant-side budget has to be enforced separately.
+        self.maximum_actual_vertical_acceleration = max(
+            float(maximum_actual_vertical_acceleration),
+            0.0,
+        )
+        self.previous_state_stamp = None
+        self.previous_state_vertical_velocity = None
+        self.measured_vertical_acceleration = None
         # A lost plan must not park the airframe in the water margin: the
         # recovery reference climbs back to this clearance above the sea with a
         # bounded vertical speed.  The X500 body reaches 0.23 m below the PX4
@@ -214,6 +232,34 @@ class TrajectoryTrackerCore:
         self.previous_command_stamp = None
         self.last_reference_position = None
         self.recovery_position = None
+        self.previous_state_stamp = None
+        self.previous_state_vertical_velocity = None
+        self.measured_vertical_acceleration = None
+
+    def _observe_state(self, state):
+        """Track the measured vertical acceleration for the plant limiter."""
+        stamp = float(state.stamp)
+        vertical = float(state.velocity[2])
+        if (
+            self.previous_state_stamp is not None
+            and self.previous_state_vertical_velocity is not None
+        ):
+            step = stamp - self.previous_state_stamp
+            if step > 1e-6:
+                measured = abs(
+                    (vertical - self.previous_state_vertical_velocity) / step
+                )
+                if self.measured_vertical_acceleration is None:
+                    self.measured_vertical_acceleration = measured
+                else:
+                    # First-order filter: a raw finite difference is far too
+                    # noisy to drive a limiter directly.
+                    self.measured_vertical_acceleration = (
+                        0.7 * self.measured_vertical_acceleration
+                        + 0.3 * measured
+                    )
+        self.previous_state_stamp = stamp
+        self.previous_state_vertical_velocity = vertical
 
     def accept(
         self,
@@ -311,7 +357,10 @@ class TrajectoryTrackerCore:
         )
         if self.previous_command_velocity is None:
             return limited
-        dt = max(float(stamp) - self.previous_command_stamp, self.control_dt)
+        dt = min(
+            max(float(stamp) - self.previous_command_stamp, self.control_dt),
+            self.maximum_command_dt,
+        )
         delta_xy = (
             limited[0] - self.previous_command_velocity[0],
             limited[1] - self.previous_command_velocity[1],
@@ -320,12 +369,25 @@ class TrajectoryTrackerCore:
             delta_xy,
             self.maximum_horizontal_acceleration * dt,
         )
+        allowed_vertical = self.maximum_vertical_acceleration * dt
+        measured = self.measured_vertical_acceleration
+        if (
+            measured is not None
+            and self.maximum_actual_vertical_acceleration > 0.0
+            and measured > self.maximum_actual_vertical_acceleration
+        ):
+            # The plant is already accelerating harder than its budget allows,
+            # so shrink this step's allowance until the measured value settles
+            # back inside the limit instead of asking for more.
+            allowed_vertical *= (
+                self.maximum_actual_vertical_acceleration / measured
+            )
         delta_z = max(
             min(
                 limited[2] - self.previous_command_velocity[2],
-                self.maximum_vertical_acceleration * dt,
+                allowed_vertical,
             ),
-            -self.maximum_vertical_acceleration * dt,
+            -allowed_vertical,
         )
         return (
             self.previous_command_velocity[0] + limited_delta_xy[0],
@@ -335,6 +397,7 @@ class TrajectoryTrackerCore:
 
     def command(self, state, mission_id):
         """Return one post-Safety-Guard command or no valid-plan status."""
+        self._observe_state(state)
         trajectory = self.active_trajectory
         if (
             trajectory is None
@@ -431,6 +494,7 @@ class TrajectoryTrackerCore:
         clearance, so a dropped terminal plan cannot park the airframe in the
         water margin.
         """
+        self._observe_state(state)
         if self.recovery_position is None:
             if self.last_reference_position is not None:
                 self.recovery_position = tuple(self.last_reference_position)
@@ -459,9 +523,12 @@ class TrajectoryTrackerCore:
         if self.previous_command_stamp is None:
             step = self.control_dt
         else:
-            step = max(
-                float(state.stamp) - float(self.previous_command_stamp),
-                self.control_dt,
+            step = min(
+                max(
+                    float(state.stamp) - float(self.previous_command_stamp),
+                    self.control_dt,
+                ),
+                self.maximum_command_dt,
             )
         position = tuple(
             current + 0.5 * (before + after) * step

@@ -323,6 +323,15 @@ trajectory_tracker_node:
     # to this clearance above the sea at a bounded vertical speed.
     recovery_clearance: 0.5
     recovery_climb_speed: 1.0
+    # The acceleration limits above bound the COMMAND.  PX4 answers a bounded
+    # command with its own loop acceleration on top: measured runs commanded
+    # 3.0 m/s^2 vertically and produced 4.7-8.9 m/s^2 actual, roughly 1.9x.
+    # maximum_command_dt caps the interval the rate limiter may bank, so a long
+    # gap can no longer authorise a command jump, and
+    # maximum_actual_vertical_acceleration derates the vertical allowance once
+    # the measured acceleration exceeds it.
+    maximum_command_dt: 0.1
+    maximum_actual_vertical_acceleration: 4.0
     maximum_state_age: 0.125
     # Drive MINCO tracking with the tracker's acceleration-limited velocity
     # command instead of a position reference.  In position mode the reference

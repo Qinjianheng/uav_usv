@@ -420,3 +420,67 @@ def test_recovery_clamps_the_reference_to_the_reserve_clearance():
 
     assert command.position[2] <= -0.07 + 1e-12
     assert command.velocity[2] < 0.0
+
+
+def test_command_rate_limiter_cannot_bank_a_long_gap():
+    """
+    Catch a mode-switch gap authorising a command jump.
+
+    The limiter only had a lower bound on its interval, so a one-second gap
+    allowed acceleration_limit * gap of command change in a single call, which
+    PX4 answers with a real acceleration far above the configured limit.
+    """
+    tracker = TrajectoryTrackerCore(
+        maximum_horizontal_acceleration=3.0,
+        maximum_vertical_acceleration=3.0,
+        maximum_command_dt=0.1,
+        control_dt=0.05,
+    )
+    tracker.previous_command_velocity = (4.0, 0.0, 0.0)
+    tracker.previous_command_stamp = 10.0
+
+    velocity = tracker._shape_velocity((7.0, 0.0, 3.0), 11.0)
+
+    assert velocity[0] == pytest.approx(4.0 + 3.0 * 0.1)
+    assert velocity[2] == pytest.approx(3.0 * 0.1)
+
+
+def test_measured_vertical_acceleration_derates_the_vertical_allowance():
+    """
+    The plant budget must bind even though the command budget is 3.0 m/s^2.
+
+    Measured runs commanded 3.0 m/s^2 and produced 4.7-8.9 m/s^2 actual, so the
+    allowance is scaled down once the measured value exceeds its own limit.
+    """
+    tracker = TrajectoryTrackerCore(
+        maximum_vertical_acceleration=3.0,
+        maximum_actual_vertical_acceleration=4.0,
+        maximum_command_dt=0.05,
+        control_dt=0.05,
+    )
+    tracker.previous_command_velocity = (0.0, 0.0, 0.0)
+    tracker.previous_command_stamp = 10.0
+    tracker.measured_vertical_acceleration = 8.0
+
+    velocity = tracker._shape_velocity((0.0, 0.0, 4.0), 10.05)
+
+    assert velocity[2] == pytest.approx(3.0 * 0.05 * (4.0 / 8.0))
+
+
+def test_measured_vertical_acceleration_is_filtered_from_the_state_history():
+    tracker = TrajectoryTrackerCore(control_dt=0.05)
+
+    tracker._observe_state(
+        TrackerKinematicState(1.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    )
+    assert tracker.measured_vertical_acceleration is None
+
+    tracker._observe_state(
+        TrackerKinematicState(1.05, (0.0, 0.0, 0.0), (0.0, 0.0, 0.5))
+    )
+    assert tracker.measured_vertical_acceleration == pytest.approx(10.0)
+
+    tracker._observe_state(
+        TrackerKinematicState(1.10, (0.0, 0.0, 0.0), (0.0, 0.0, 0.5))
+    )
+    assert tracker.measured_vertical_acceleration == pytest.approx(7.0)
