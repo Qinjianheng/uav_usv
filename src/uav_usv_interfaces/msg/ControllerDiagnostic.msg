@@ -2,6 +2,7 @@ builtin_interfaces/Time stamp
 
 uint64 mission_id
 uint64 plan_id
+uint64 attempted_plan_id
 uint64 prediction_sequence_id
 
 string status

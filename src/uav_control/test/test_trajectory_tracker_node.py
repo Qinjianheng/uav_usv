@@ -261,6 +261,42 @@ def test_invalid_message_is_rejected_before_reaching_tracker_core():
         trajectory_from_message(message)
 
 
+def test_rejected_candidate_reports_attempted_plan_without_replacing_active():
+    node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
+    node.mission_id = 3
+    node.mission_state = MissionState.MINCO_TRACKING
+    node.tracker = TrajectoryTrackerCore()
+    active_message = make_trajectory_message()
+    active_message.plan_id = 8
+    node.tracker.active_trajectory = trajectory_from_message(active_message)
+    node.latest_state = TrackerKinematicState(
+        stamp=100.5,
+        position=(0.0, 0.0, -1.0),
+        velocity=(0.0, 0.0, 0.0),
+    )
+    node.latest_prediction = None
+    node.latest_target_state = None
+    node.last_target_yaw = None
+    node.last_rejection = trajectory_tracker_node.TrajectoryRejectReason.NONE
+    node.terminal_mode_latched = False
+    node._ros_seconds = lambda: 100.5
+    published = []
+    node.diagnostic_pub = type(
+        'Publisher',
+        (),
+        {'publish': lambda _self, message: published.append(message)},
+    )()
+    candidate = make_trajectory_message()
+    candidate.plan_id = 9
+
+    node.trajectory_callback(candidate)
+
+    assert published[-1].status == 'PLAN_REJECTED'
+    assert published[-1].plan_id == 8
+    assert published[-1].attempted_plan_id == 9
+    assert node.tracker.active_trajectory.plan_id == 8
+
+
 def test_tracker_endpoint_query_uses_absolute_contact_stamp():
     message = make_prediction_message(
         source_stamp=10.2,

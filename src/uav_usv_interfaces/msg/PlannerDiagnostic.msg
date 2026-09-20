@@ -17,6 +17,7 @@ uint8 PLAN_STALE_ON_ARRIVAL=11
 
 uint64 mission_id
 uint64 plan_id
+uint64 planning_cycle_id
 uint64 prediction_sequence_id
 builtin_interfaces/Time source_stamp
 builtin_interfaces/Time planning_started_stamp
@@ -25,6 +26,9 @@ builtin_interfaces/Time published_stamp
 uint8 result
 uint8 failure_reason
 string failure_detail
+string rejection_stage
+string rejection_detail
+string contact_recovery_reason
 float64 compute_time
 float64 reachability_time
 float64 generation_time
@@ -35,6 +39,9 @@ float64 input_age_at_start
 float64 input_age_at_finish
 float64 input_age_at_publish
 float64 completion_to_publish_delay
+float64 contact_delay
+float64 target_prediction_shift
+bool candidate_published
 float64 selected_t_go
 builtin_interfaces/Time contact_stamp
 float64 remaining_t_go

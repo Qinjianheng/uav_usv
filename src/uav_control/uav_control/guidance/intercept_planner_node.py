@@ -12,7 +12,8 @@ from px4_msgs.msg import VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
-from uav_usv_interfaces.msg import InterceptTrajectory, MissionState
+from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptTrajectory
+from uav_usv_interfaces.msg import MissionState
 from uav_usv_interfaces.msg import PlannerDiagnostic, PolynomialSegment
 from uav_usv_interfaces.msg import TargetPrediction
 
@@ -27,8 +28,9 @@ from .planner_pipeline import ContactTimeSchedule
 from .planner_pipeline import PlanningRequestPolicy
 from .planner_pipeline import PredictionSample, PredictionSeries
 from .planner_pipeline import terminal_mode_for_plan
+from .planner_pipeline import target_shift_distance
 from .planner_pipeline import UavKinematicState, validate_input
-from .planner_pipeline import validate_plan_arrival, validate_target_shift
+from .planner_pipeline import validate_plan_arrival
 from .planner_pipeline import validate_total_deadline
 
 
@@ -41,6 +43,9 @@ class PlannerJobResult:
     planning_started_stamp: float
     generated_stamp: float
     compute_time: float
+    locked_contact_unreachable: bool = False
+    rejection_stage: str = ''
+    rejection_detail: str = ''
 
 
 def _stamp_seconds(stamp):
@@ -210,6 +215,17 @@ FAILURE_CONSTANTS = {
 class InterceptPlannerNode(Node):
     """Run Fast MINCO in its own process and retain only the latest request."""
 
+    PLANNING_STATES = {
+        MissionState.FAR_GUIDANCE,
+        MissionState.MINCO_READY,
+        MissionState.MINCO_TRACKING,
+        MissionState.TERMINAL_MINCO,
+    }
+    RECOVERY_STATES = {
+        MissionState.PLAN_RECOVERY,
+        MissionState.SAFE_WAIT,
+    }
+
     def __init__(self):
         super().__init__('intercept_planner_node')
         self.declare_parameter('planning_rate_hz', 5.0)
@@ -350,6 +366,12 @@ class InterceptPlannerNode(Node):
             self.mission_callback,
             output_qos,
         )
+        self.controller_diagnostic_sub = self.create_subscription(
+            ControllerDiagnostic,
+            '/control/diagnostic',
+            self.controller_diagnostic_callback,
+            output_qos,
+        )
         self.trajectory_pub = self.create_publisher(
             InterceptTrajectory,
             '/planning/intercept_trajectory',
@@ -398,6 +420,7 @@ class InterceptPlannerNode(Node):
         self.mission_id = 0
         self.intercept_requested = False
         self.mission_state = MissionState.INIT
+        self.planning_cycle_id = 0
         self.plan_id = 0
         self.completed_plan_count = 0
         self.completion_times = deque(maxlen=100)
@@ -440,15 +463,52 @@ class InterceptPlannerNode(Node):
         )
 
     def mission_callback(self, message):
-        if int(message.mission_id) != self.mission_id:
+        new_mission_id = int(message.mission_id)
+        new_state = int(message.state)
+        mission_changed = new_mission_id != self.mission_id
+        old_state = self.mission_state
+        if mission_changed:
+            self.planning_cycle_id += 1
             self.request_slot.take()
             self.last_submitted_key = None
             self.contact_schedule.reset()
-        self.mission_id = int(message.mission_id)
-        self.mission_state = int(message.state)
+        elif (
+            new_state in self.RECOVERY_STATES
+            and old_state not in self.RECOVERY_STATES
+        ):
+            self.planning_cycle_id += 1
+            self.request_slot.take()
+            self.last_submitted_key = None
+            self.contact_schedule.cancel_pending()
+        elif (
+            old_state in self.RECOVERY_STATES
+            and new_state == MissionState.FAR_GUIDANCE
+        ):
+            self.planning_cycle_id += 1
+            self.request_slot.take()
+            self.last_submitted_key = None
+            self.contact_schedule.reset()
+        self.mission_id = new_mission_id
+        self.mission_state = new_state
         self.intercept_requested = bool(
             message.intercept_requested and not message.completed
         )
+
+    def controller_diagnostic_callback(self, message):
+        """Commit or discard only the tracker response for our pending plan."""
+        if int(message.mission_id) != self.mission_id:
+            return
+        attempted_plan_id = int(message.attempted_plan_id)
+        if message.status == 'PLAN_ACCEPTED':
+            self.contact_schedule.confirm(
+                attempted_plan_id,
+                self.planning_cycle_id,
+            )
+        elif message.status == 'PLAN_REJECTED':
+            self.contact_schedule.reject(
+                attempted_plan_id,
+                self.planning_cycle_id,
+            )
 
     def _current_request(self, decision):
         if self.latest_prediction is None or self.latest_uav is None:
@@ -461,11 +521,15 @@ class InterceptPlannerNode(Node):
             contact_stamp=self.contact_schedule.contact_stamp,
             terminal_mode=decision.terminal_mode,
             minimum_duration=decision.minimum_duration,
+            planning_cycle_id=getattr(self, 'planning_cycle_id', 0),
         )
 
     def _run_request(self, request):
         planning_started_stamp = self._ros_seconds()
         monotonic_start = time.perf_counter()
+        rejection_stage = ''
+        rejection_detail = ''
+        locked_contact_unreachable = False
 
         failure = validate_input(
             request,
@@ -550,7 +614,19 @@ class InterceptPlannerNode(Node):
                     ),
                 )
 
+            if request.contact_stamp is not None:
+                locked_remaining = (
+                    request.contact_stamp - request.trajectory_start_stamp
+                )
+                required_time = outcome.diagnostics.required_time
+                locked_contact_unreachable = bool(
+                    math.isfinite(required_time)
+                    and required_time > locked_remaining + 1e-9
+                )
+
         else:
+            rejection_stage = 'INPUT_VALIDATION'
+            rejection_detail = failure.value
             outcome = FastPlanningOutcome(
                 plan=None,
                 failure=failure,
@@ -568,6 +644,8 @@ class InterceptPlannerNode(Node):
             outcome.plan is not None
             and deadline_failure != FastPlanningFailure.NONE
         ):
+            rejection_stage = 'TOTAL_DEADLINE'
+            rejection_detail = deadline_failure.value
             outcome = FastPlanningOutcome(
                 plan=None,
                 failure=deadline_failure,
@@ -584,6 +662,10 @@ class InterceptPlannerNode(Node):
             )
 
             if arrival_failure != FastPlanningFailure.NONE:
+                rejection_stage = 'INPUT_AGE_AT_FINISH'
+                rejection_detail = (
+                    f'age={generated_stamp - request.source_stamp:.6f}'
+                )
                 outcome = FastPlanningOutcome(
                     plan=None,
                     failure=arrival_failure,
@@ -596,6 +678,9 @@ class InterceptPlannerNode(Node):
             planning_started_stamp=planning_started_stamp,
             generated_stamp=generated_stamp,
             compute_time=time.perf_counter() - monotonic_start,
+            locked_contact_unreachable=locked_contact_unreachable,
+            rejection_stage=rejection_stage,
+            rejection_detail=rejection_detail,
         )
 
     def _completion_frequency(self):
@@ -611,6 +696,41 @@ class InterceptPlannerNode(Node):
         publish_stamp = self._ros_seconds()
         outcome = job.outcome
         candidate_contact_stamp = None
+        contact_delay = math.nan
+        target_prediction_shift = math.nan
+        contact_recovery_reason = ''
+        rejection_stage = job.rejection_stage
+        rejection_detail = job.rejection_detail
+        current_cycle = getattr(
+            self,
+            'planning_cycle_id',
+            job.request.planning_cycle_id,
+        )
+        request_invalidated = (
+            job.request.mission_id != getattr(
+                self,
+                'mission_id',
+                job.request.mission_id,
+            )
+            or job.request.planning_cycle_id != current_cycle
+        )
+        if hasattr(self, 'intercept_requested'):
+            request_invalidated = bool(
+                request_invalidated
+                or not self.intercept_requested
+                or self.mission_state not in self.PLANNING_STATES
+            )
+        if outcome.plan is not None and request_invalidated:
+            rejection_stage = 'MISSION_OR_REQUEST_INVALIDATED'
+            rejection_detail = (
+                f'request_cycle={job.request.planning_cycle_id},'
+                f'current_cycle={current_cycle}'
+            )
+            outcome = FastPlanningOutcome(
+                plan=None,
+                failure=FastPlanningFailure.PLAN_STALE_ON_ARRIVAL,
+                diagnostics=outcome.diagnostics,
+            )
         if outcome.plan is not None:
             arrival_failure = validate_plan_arrival(
                 job.request,
@@ -618,6 +738,10 @@ class InterceptPlannerNode(Node):
                 self.maximum_input_age,
             )
             if arrival_failure != FastPlanningFailure.NONE:
+                rejection_stage = 'INPUT_AGE_AT_PUBLISH'
+                rejection_detail = (
+                    f'age={publish_stamp - job.request.source_stamp:.6f}'
+                )
                 outcome = FastPlanningOutcome(
                     plan=None,
                     failure=arrival_failure,
@@ -637,8 +761,25 @@ class InterceptPlannerNode(Node):
                         job.request.terminal_mode
                         and contact_delay > 0.0
                     )
+                    or (
+                        not job.request.terminal_mode
+                        and contact_delay > 0.0
+                        and job.locked_contact_unreachable
+                    )
                 )
+                if contact_allowed and contact_delay > 1e-9:
+                    contact_recovery_reason = (
+                        'TERMINAL_CONTACT_RECOVERY'
+                        if job.request.terminal_mode
+                        else 'CONTACT_UNREACHABLE_RECOVERY'
+                    )
                 if not contact_allowed:
+                    rejection_stage = 'CONTACT_TIME_POLICY'
+                    rejection_detail = (
+                        f'delay={contact_delay:.6f},'
+                        'locked_contact_unreachable='
+                        f'{job.locked_contact_unreachable}'
+                    )
                     outcome = FastPlanningOutcome(
                         plan=None,
                         failure=(
@@ -647,13 +788,31 @@ class InterceptPlannerNode(Node):
                         diagnostics=outcome.diagnostics,
                     )
         if outcome.plan is not None:
-            shift_failure = validate_target_shift(
-                request=job.request,
-                latest_prediction=self.latest_prediction,
-                intercept_time=outcome.plan.duration,
-                contact_stamp=candidate_contact_stamp,
-                tolerance=self.endpoint_tolerance,
-            )
+            try:
+                target_prediction_shift = target_shift_distance(
+                    request=job.request,
+                    latest_prediction=self.latest_prediction,
+                    intercept_time=outcome.plan.duration,
+                    contact_stamp=candidate_contact_stamp,
+                )
+            except (TypeError, ValueError):
+                shift_failure = FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+                rejection_stage = 'PREDICTION_HORIZON_UNAVAILABLE'
+                rejection_detail = (
+                    'absolute contact is outside an available prediction'
+                )
+            else:
+                shift_failure = (
+                    FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+                    if target_prediction_shift > self.endpoint_tolerance
+                    else FastPlanningFailure.NONE
+                )
+                if shift_failure != FastPlanningFailure.NONE:
+                    rejection_stage = 'TARGET_PREDICTION_SHIFT'
+                    rejection_detail = (
+                        f'shift={target_prediction_shift:.6f},'
+                        f'tolerance={self.endpoint_tolerance:.6f}'
+                    )
             if shift_failure != FastPlanningFailure.NONE:
                 outcome = FastPlanningOutcome(
                     plan=None,
@@ -671,23 +830,7 @@ class InterceptPlannerNode(Node):
         )
         planned_capture_margin = 0.0
         if outcome.plan is not None:
-            preferred_duration = (
-                None
-                if job.request.contact_stamp is None
-                else (
-                    job.request.contact_stamp
-                    - job.request.trajectory_start_stamp
-                )
-            )
-            rescheduled = (
-                job.request.terminal_mode
-                and preferred_duration is not None
-            )
-            contact_stamp = self.contact_schedule.accept_plan(
-                job.request.trajectory_start_stamp,
-                outcome.plan.duration,
-                rescheduled=rescheduled,
-            )
+            contact_stamp = candidate_contact_stamp
             remaining_t_go = max(
                 contact_stamp - job.request.trajectory_start_stamp,
                 0.0,
@@ -722,10 +865,27 @@ class InterceptPlannerNode(Node):
         self.completed_plan_count += 1
         self.completion_times.append(time.monotonic())
         self.plan_id += 1
+        candidate_published = False
+        if outcome.plan is not None:
+            candidate_published = self.contact_schedule.propose(
+                plan_id=self.plan_id,
+                contact_stamp=contact_stamp,
+                planning_cycle_id=current_cycle,
+                proposed_at=publish_stamp,
+            )
+            if not candidate_published:
+                rejection_stage = 'CONTACT_PROPOSAL'
+                rejection_detail = 'invalid pending contact proposal'
+                outcome = FastPlanningOutcome(
+                    plan=None,
+                    failure=FastPlanningFailure.PLAN_STALE_ON_ARRIVAL,
+                    diagnostics=outcome.diagnostics,
+                )
         diagnostics = outcome.diagnostics
         message = PlannerDiagnostic()
         message.mission_id = job.request.mission_id
         message.plan_id = self.plan_id
+        message.planning_cycle_id = int(current_cycle)
         message.prediction_sequence_id = (
             job.request.prediction.sequence_id
         )
@@ -741,7 +901,12 @@ class InterceptPlannerNode(Node):
             else PlannerDiagnostic.RESULT_FAILURE
         )
         message.failure_reason = FAILURE_CONSTANTS[outcome.failure]
-        message.failure_detail = outcome.failure.value
+        message.failure_detail = (
+            rejection_detail or outcome.failure.value
+        )
+        message.rejection_stage = str(rejection_stage)
+        message.rejection_detail = str(rejection_detail)
+        message.contact_recovery_reason = str(contact_recovery_reason)
         message.compute_time = job.compute_time
         message.reachability_time = diagnostics.reachability_compute_time
         message.generation_time = diagnostics.generation_compute_time
@@ -765,6 +930,9 @@ class InterceptPlannerNode(Node):
             publish_stamp - job.generated_stamp,
             0.0,
         )
+        message.contact_delay = float(contact_delay)
+        message.target_prediction_shift = float(target_prediction_shift)
+        message.candidate_published = bool(candidate_published)
         if outcome.plan is not None:
             message.selected_t_go = float(outcome.plan.duration)
             message.contact_stamp = seconds_to_time(contact_stamp)
@@ -853,12 +1021,22 @@ class InterceptPlannerNode(Node):
         self._publish_job(job)
 
     def _planning_tick(self, terminal_tick):
-        if not self.intercept_requested:
+        if (
+            not self.intercept_requested
+            or self.mission_state not in self.PLANNING_STATES
+        ):
+            return
+        now = self._ros_seconds()
+        self.contact_schedule.expire(
+            now,
+            getattr(self, 'maximum_input_age', 0.125),
+        )
+        if self.contact_schedule.has_pending:
             return
         remaining = None
         if self.contact_schedule.contact_stamp is not None:
             remaining = self.contact_schedule.remaining_t_go(
-                self._ros_seconds()
+                now
             )
         decision = self.request_policy.decide(
             self.mission_state,
@@ -872,6 +1050,7 @@ class InterceptPlannerNode(Node):
         if current is not None:
             key = (
                 current.mission_id,
+                current.planning_cycle_id,
                 current.prediction.sequence_id,
                 current.uav.stamp,
             )

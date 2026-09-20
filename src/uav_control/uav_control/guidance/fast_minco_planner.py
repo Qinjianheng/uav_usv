@@ -52,6 +52,9 @@ class CandidateDiagnostic:
     maximum_vertical_acceleration: float = 0.0
     maximum_sea_clearance_violation: float = 0.0
     sea_clearance_violation_time: float = -1.0
+    maximum_constraint_violation: float = 0.0
+    maximum_violation_time: float = -1.0
+    maximum_violation_phase: str = 'NONE'
     failure: str = FastPlanningFailure.NONE.value
     violations: tuple = ()
 
@@ -355,6 +358,8 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
         maximum_vertical_acceleration = 0.0
         maximum_sea_violation = 0.0
         sea_violation_time = -1.0
+        maximum_constraint_violation = 0.0
+        maximum_violation_time = -1.0
         violations = set()
         for index in range(sample_count + 1):
             sample_time = candidate.duration * index / sample_count
@@ -383,6 +388,18 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
                 sample.position[2] - candidate.sea_clearance_ceiling_z,
                 0.0,
             )
+            sample_maximum_violation = max(
+                horizontal_speed - self.maximum_horizontal_speed,
+                vertical_speed - self.maximum_vertical_speed,
+                horizontal_acceleration
+                - self.maximum_horizontal_acceleration,
+                vertical_acceleration - self.maximum_vertical_acceleration,
+                sea_violation,
+                0.0,
+            )
+            if sample_maximum_violation > maximum_constraint_violation:
+                maximum_constraint_violation = sample_maximum_violation
+                maximum_violation_time = sample_time
             if sea_violation > max(maximum_sea_violation, 1e-6):
                 maximum_sea_violation = sea_violation
                 sea_violation_time = sample_time
@@ -409,6 +426,14 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
                 violations.add('SEA_CLEARANCE')
 
         validation_time = time.perf_counter() - validation_start
+        if maximum_violation_time < 0.0:
+            maximum_violation_phase = 'NONE'
+        elif maximum_violation_time <= 0.2 * candidate.duration:
+            maximum_violation_phase = 'START'
+        elif maximum_violation_time >= 0.8 * candidate.duration:
+            maximum_violation_phase = 'END'
+        else:
+            maximum_violation_phase = 'MIDDLE'
         failure = self._failure_from_violations(violations)
         if failure != FastPlanningFailure.NONE:
             self._candidate_failures.append(failure)
@@ -425,6 +450,11 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
                 maximum_vertical_acceleration=maximum_vertical_acceleration,
                 maximum_sea_clearance_violation=maximum_sea_violation,
                 sea_clearance_violation_time=sea_violation_time,
+                maximum_constraint_violation=(
+                    maximum_constraint_violation
+                ),
+                maximum_violation_time=maximum_violation_time,
+                maximum_violation_phase=maximum_violation_phase,
                 failure=failure.value,
                 violations=tuple(sorted(violations)),
             )

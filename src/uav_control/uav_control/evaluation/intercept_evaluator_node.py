@@ -605,6 +605,9 @@ class InterceptEvaluatorNode(Node):
                 else ''
             ),
             'plan_id': controller.plan_id if controller else 0,
+            'attempted_plan_id': (
+                controller.attempted_plan_id if controller else 0
+            ),
             'plan_prediction_sequence_id': (
                 controller.prediction_sequence_id if controller else 0
             ),
@@ -619,6 +622,34 @@ class InterceptEvaluatorNode(Node):
             'planner_failure_detail': (
                 self.latest_planner_diagnostic.failure_detail
                 if self.latest_planner_diagnostic else ''
+            ),
+            'planner_planning_cycle_id': (
+                self.latest_planner_diagnostic.planning_cycle_id
+                if self.latest_planner_diagnostic else 0
+            ),
+            'planner_rejection_stage': (
+                self.latest_planner_diagnostic.rejection_stage
+                if self.latest_planner_diagnostic else ''
+            ),
+            'planner_rejection_detail': (
+                self.latest_planner_diagnostic.rejection_detail
+                if self.latest_planner_diagnostic else ''
+            ),
+            'planner_contact_recovery_reason': (
+                self.latest_planner_diagnostic.contact_recovery_reason
+                if self.latest_planner_diagnostic else ''
+            ),
+            'planner_contact_delay': (
+                self.latest_planner_diagnostic.contact_delay
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_target_prediction_shift': (
+                self.latest_planner_diagnostic.target_prediction_shift
+                if self.latest_planner_diagnostic else math.nan
+            ),
+            'planner_candidate_published': (
+                self.latest_planner_diagnostic.candidate_published
+                if self.latest_planner_diagnostic else False
             ),
             'planner_required_time': (
                 self.latest_planner_diagnostic.required_time

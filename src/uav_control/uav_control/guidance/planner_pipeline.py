@@ -108,6 +108,7 @@ class PlannerRequest:
     contact_stamp: float = None
     terminal_mode: bool = False
     minimum_duration: float = None
+    planning_cycle_id: int = 0
 
     @property
     def source_stamp(self):
@@ -209,7 +210,7 @@ class PlanningRequestPolicy:
 
 
 class ContactTimeSchedule:
-    """Keep one absolute contact time across rolling prediction snapshots."""
+    """Keep committed and tracker-pending absolute contact times separate."""
 
     def __init__(
         self,
@@ -219,11 +220,89 @@ class ContactTimeSchedule:
         self.terminal_threshold = max(float(terminal_threshold), 0.0)
         self.freeze_time = max(float(freeze_time), 0.0)
         self.contact_stamp = None
+        self.committed_plan_id = 0
+        self.pending_plan_id = 0
+        self.pending_contact_stamp = None
+        self.pending_planning_cycle_id = 0
+        self.pending_since = None
 
     def reset(self):
         self.contact_stamp = None
+        self.committed_plan_id = 0
+        self._clear_pending()
+
+    def _clear_pending(self):
+        self.pending_plan_id = 0
+        self.pending_contact_stamp = None
+        self.pending_planning_cycle_id = 0
+        self.pending_since = None
+
+    def cancel_pending(self):
+        """Discard the pending proposal while preserving committed contact."""
+        had_pending = self.has_pending
+        self._clear_pending()
+        return had_pending
+
+    @property
+    def has_pending(self):
+        return self.pending_plan_id > 0
+
+    def propose(
+        self,
+        plan_id,
+        contact_stamp,
+        planning_cycle_id,
+        proposed_at,
+    ):
+        """Replace the pending proposal without committing its contact time."""
+        plan_id = int(plan_id)
+        contact_stamp = float(contact_stamp)
+        proposed_at = float(proposed_at)
+        if (
+            plan_id <= 0
+            or not math.isfinite(contact_stamp)
+            or not math.isfinite(proposed_at)
+        ):
+            return False
+        self.pending_plan_id = plan_id
+        self.pending_contact_stamp = contact_stamp
+        self.pending_planning_cycle_id = int(planning_cycle_id)
+        self.pending_since = proposed_at
+        return True
+
+    def confirm(self, plan_id, planning_cycle_id):
+        """Commit only the exact proposal accepted by the tracker."""
+        if (
+            int(plan_id) != self.pending_plan_id
+            or int(planning_cycle_id) != self.pending_planning_cycle_id
+        ):
+            return False
+        self.contact_stamp = self.pending_contact_stamp
+        self.committed_plan_id = self.pending_plan_id
+        self._clear_pending()
+        return True
+
+    def reject(self, plan_id, planning_cycle_id):
+        """Drop only the exact rejected proposal and keep the old contact."""
+        if (
+            int(plan_id) != self.pending_plan_id
+            or int(planning_cycle_id) != self.pending_planning_cycle_id
+        ):
+            return False
+        self._clear_pending()
+        return True
+
+    def expire(self, now, timeout):
+        """Expire an unacknowledged proposal without changing committed state."""
+        if not self.has_pending or self.pending_since is None:
+            return False
+        if float(now) - self.pending_since <= float(timeout):
+            return False
+        self._clear_pending()
+        return True
 
     def accept_plan(self, source_stamp, selected_t_go, rescheduled=False):
+        """Directly seed a committed contact for compatibility and startup."""
         candidate = float(source_stamp) + float(selected_t_go)
         if self.contact_stamp is None:
             self.contact_stamp = candidate
@@ -315,6 +394,33 @@ def validate_target_shift(
     if shift > float(tolerance):
         return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
     return FastPlanningFailure.NONE
+
+
+def target_shift_distance(
+    request,
+    latest_prediction,
+    intercept_time,
+    contact_stamp=None,
+):
+    """Measure endpoint movement at one shared absolute contact time."""
+    if latest_prediction is None:
+        raise ValueError('latest prediction is unavailable')
+    if latest_prediction.mission_id != request.mission_id:
+        raise ValueError('latest prediction mission does not match request')
+    if contact_stamp is None:
+        contact_stamp = (
+            request.trajectory_start_stamp + float(intercept_time)
+        )
+    planned_position = request.prediction.state_at_absolute_time(
+        float(contact_stamp)
+    )[0]
+    latest_position = latest_prediction.state_at_absolute_time(
+        float(contact_stamp)
+    )[0]
+    return math.sqrt(sum(
+        (latest - planned) ** 2
+        for latest, planned in zip(latest_position, planned_position)
+    ))
 
 
 def validate_total_deadline(elapsed, hard_deadline):

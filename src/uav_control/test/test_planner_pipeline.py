@@ -232,6 +232,51 @@ def test_contact_schedule_resets_between_missions():
     assert schedule.preferred_t_go(10.2) is None
 
 
+def test_candidate_contact_commits_only_after_matching_tracker_acceptance():
+    schedule = planner_pipeline.ContactTimeSchedule(terminal_threshold=1.0)
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+
+    assert schedule.propose(
+        plan_id=8,
+        contact_stamp=11.8,
+        planning_cycle_id=3,
+        proposed_at=10.05,
+    )
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert schedule.pending_contact_stamp == pytest.approx(11.8)
+    assert not schedule.confirm(plan_id=7, planning_cycle_id=3)
+    assert schedule.contact_stamp == pytest.approx(11.0)
+
+    assert schedule.confirm(plan_id=8, planning_cycle_id=3)
+    assert schedule.contact_stamp == pytest.approx(11.8)
+    assert schedule.committed_plan_id == 8
+    assert schedule.pending_plan_id == 0
+
+
+def test_rejected_or_timed_out_candidate_keeps_committed_contact():
+    schedule = planner_pipeline.ContactTimeSchedule(terminal_threshold=1.0)
+    schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
+    schedule.propose(8, 11.8, planning_cycle_id=3, proposed_at=10.05)
+
+    assert schedule.reject(plan_id=8, planning_cycle_id=3)
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    schedule.propose(9, 12.0, planning_cycle_id=3, proposed_at=10.10)
+    assert schedule.expire(now=10.30, timeout=0.125)
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert schedule.pending_plan_id == 0
+
+
+def test_late_or_out_of_order_confirmation_cannot_commit_contact():
+    schedule = planner_pipeline.ContactTimeSchedule(terminal_threshold=1.0)
+    schedule.propose(8, 11.8, planning_cycle_id=3, proposed_at=10.05)
+    schedule.propose(9, 12.0, planning_cycle_id=3, proposed_at=10.06)
+
+    assert not schedule.confirm(plan_id=8, planning_cycle_id=3)
+    assert not schedule.confirm(plan_id=9, planning_cycle_id=2)
+    assert schedule.confirm(plan_id=9, planning_cycle_id=3)
+    assert schedule.contact_stamp == pytest.approx(12.0)
+
+
 def test_terminal_contact_stamp_counts_down_without_drifting():
     """Catch terminal replans replacing the locked absolute contact time."""
     schedule = planner_pipeline.ContactTimeSchedule(

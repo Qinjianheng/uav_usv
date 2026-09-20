@@ -104,6 +104,9 @@ def test_candidate_diagnostics_preserve_all_constraint_violations():
     assert candidate.maximum_horizontal_acceleration >= 0.0
     assert candidate.maximum_vertical_acceleration >= 0.0
     assert candidate.maximum_sea_clearance_violation >= 0.0
+    assert candidate.maximum_constraint_violation > 0.0
+    assert 0.0 <= candidate.maximum_violation_time <= candidate.duration
+    assert candidate.maximum_violation_phase in ('START', 'MIDDLE', 'END')
     assert candidate.failure != FastPlanningFailure.NONE.value
     assert candidate.violations
 

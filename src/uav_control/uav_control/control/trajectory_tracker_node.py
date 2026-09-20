@@ -591,6 +591,7 @@ class TrajectoryTrackerNode(Node):
 
     def trajectory_callback(self, message):
         started = time.perf_counter()
+        attempted_plan_id = int(message.plan_id)
         rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         try:
             trajectory = trajectory_from_message(message)
@@ -646,6 +647,7 @@ class TrajectoryTrackerNode(Node):
                 else 'PLAN_REJECTED'
             ),
             self.last_callback_time,
+            attempted_plan_id=attempted_plan_id,
         )
 
     def _publish_offboard_mode(self, timestamp_us, velocity_control=False):
@@ -695,10 +697,18 @@ class TrajectoryTrackerNode(Node):
                 1.0,
             )
 
-    def _publish_diagnostic(self, now, command, status, callback_time):
+    def _publish_diagnostic(
+        self,
+        now,
+        command,
+        status,
+        callback_time,
+        attempted_plan_id=0,
+    ):
         message = ControllerDiagnostic()
         message.stamp = _seconds_to_time(now)
         message.mission_id = self.mission_id
+        message.attempted_plan_id = int(attempted_plan_id)
         active = self.tracker.active_trajectory
         if active is not None:
             message.plan_id = active.plan_id

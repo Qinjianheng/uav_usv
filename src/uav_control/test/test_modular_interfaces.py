@@ -163,12 +163,25 @@ def test_planner_diagnostic_carries_stage_and_candidate_diagnostics():
     message.candidate_diagnostics = (
         '[{"duration":1.4,"violations":["VERTICAL_SPEED"]}]'
     )
+    message.planning_cycle_id = 4
+    message.rejection_stage = 'CONTACT_TIME_POLICY'
+    message.rejection_detail = 'locked contact remains reachable'
+    message.contact_recovery_reason = 'CONTACT_UNREACHABLE_RECOVERY'
+    message.contact_delay = 0.2
+    message.target_prediction_shift = 0.1
+    message.candidate_published = False
 
     restored = round_trip(message, diagnostic)
 
     assert restored.reachability_time == pytest.approx(0.004)
     assert restored.validation_time == pytest.approx(0.012)
     assert 'VERTICAL_SPEED' in restored.candidate_diagnostics
+    assert restored.planning_cycle_id == 4
+    assert restored.rejection_stage == 'CONTACT_TIME_POLICY'
+    assert restored.contact_recovery_reason == 'CONTACT_UNREACHABLE_RECOVERY'
+    assert restored.contact_delay == pytest.approx(0.2)
+    assert restored.target_prediction_shift == pytest.approx(0.1)
+    assert not restored.candidate_published
 
 
 def test_mission_state_constants_are_machine_parseable():
@@ -184,6 +197,7 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
     message = controller_diagnostic()
     message.mission_id = 2
     message.plan_id = 9
+    message.attempted_plan_id = 10
     message.source_age = 0.08
     message.prediction_age = 0.03
     message.trajectory_age = 0.08
@@ -197,6 +211,7 @@ def test_controller_diagnostic_carries_plan_identity_and_timing():
 
     assert restored.mission_id == 2
     assert restored.plan_id == 9
+    assert restored.attempted_plan_id == 10
     assert restored.source_age == pytest.approx(0.08)
     assert restored.prediction_age == pytest.approx(0.03)
     assert restored.trajectory_age == pytest.approx(0.08)

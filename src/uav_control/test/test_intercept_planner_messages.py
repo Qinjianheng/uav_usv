@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from px4_msgs.msg import VehicleLocalPosition
+from uav_usv_interfaces.msg import ControllerDiagnostic, MissionState
 from uav_usv_interfaces.msg import PlannerDiagnostic
 from uav_usv_interfaces.msg import PredictedTargetPoint, TargetPrediction
 
@@ -21,10 +22,15 @@ from uav_control.guidance.intercept_planner_node import prediction_from_message
 from uav_control.guidance.intercept_planner_node import uav_state_from_message
 from uav_control.guidance.minco_trajectory import MincoS3Trajectory
 from uav_control.guidance.planner_pipeline import ContactTimeSchedule
+from uav_control.guidance.planner_pipeline import LatestRequestSlot
 from uav_control.guidance.planner_pipeline import PlannerRequest
 from uav_control.guidance.planner_pipeline import PredictionSample
 from uav_control.guidance.planner_pipeline import PredictionSeries
 from uav_control.guidance.planner_pipeline import UavKinematicState
+from uav_control.control.trajectory_tracker_node import trajectory_from_message
+from uav_control.control.trajectory_tracking import TrackerKinematicState
+from uav_control.control.trajectory_tracking import TrajectoryRejectReason
+from uav_control.control.trajectory_tracking import TrajectoryTrackerCore
 import uav_control.guidance.intercept_planner_node as planner_node_module
 
 
@@ -102,6 +108,7 @@ def run_publish_test(
     terminal_mode,
     latest_prediction,
     plan_duration=1.2,
+    locked_contact_unreachable=False,
 ):
     """Run one completed planner job through the real publication gate."""
     prediction = make_publish_test_prediction(sequence_id=4)
@@ -152,10 +159,257 @@ def run_publish_test(
         generated_stamp=10.03,
         compute_time=0.02,
     )
+    object.__setattr__(
+        job,
+        'locked_contact_unreachable',
+        bool(locked_contact_unreachable),
+    )
 
     planner_node_module.InterceptPlannerNode._publish_job(node, job)
 
     return node, schedule, trajectory_pub, diagnostic_pub
+
+
+def test_recovery_to_far_guidance_starts_new_contact_cycle_same_mission():
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.mission_id = 2
+    node.mission_state = MissionState.TERMINAL_MINCO
+    node.intercept_requested = True
+    node.planning_cycle_id = 4
+    node.request_slot = LatestRequestSlot()
+    node.last_submitted_key = ('old',)
+    node.contact_schedule = ContactTimeSchedule()
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node.request_policy = planner_node_module.PlanningRequestPolicy(
+        terminal_state=MissionState.TERMINAL_MINCO,
+    )
+    node.latest_prediction = make_publish_test_prediction(sequence_id=6)
+    node.latest_uav = UavKinematicState(
+        stamp=10.5,
+        position=(0.0, 0.0, -1.0),
+        velocity=(0.0, 0.0, 0.0),
+        acceleration=(0.0, 0.0, 0.0),
+    )
+    node.request_slot.submit(SimpleNamespace(planning_cycle_id=4))
+
+    def transition(state, completed=False):
+        message = MissionState()
+        message.mission_id = 2
+        message.state = state
+        message.state_name = str(state)
+        message.intercept_requested = True
+        message.completed = completed
+        node.mission_callback(message)
+
+    transition(MissionState.PLAN_RECOVERY)
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)
+    recovery_cycle = node.planning_cycle_id
+    transition(MissionState.SAFE_WAIT)
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)
+    transition(MissionState.FAR_GUIDANCE)
+
+    assert node.planning_cycle_id > recovery_cycle
+    assert node.contact_schedule.contact_stamp is None
+    assert node.request_slot.take() is None
+    assert node.last_submitted_key is None
+    decision = node.request_policy.decide(
+        MissionState.FAR_GUIDANCE,
+        remaining_t_go=None,
+    )
+    assert decision.submit and not decision.terminal_mode
+    request = node._current_request(decision)
+    assert request.contact_stamp is None
+    assert not request.terminal_mode
+    assert request.planning_cycle_id == node.planning_cycle_id
+
+
+def test_tracker_ack_commits_only_matching_pending_candidate():
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.mission_id = 2
+    node.planning_cycle_id = 5
+    node.contact_schedule = ContactTimeSchedule()
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node.contact_schedule.propose(8, 11.8, 5, 10.05)
+
+    stale = ControllerDiagnostic()
+    stale.mission_id = 2
+    stale.attempted_plan_id = 7
+    stale.status = 'PLAN_ACCEPTED'
+    node.controller_diagnostic_callback(stale)
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)
+
+    accepted = ControllerDiagnostic()
+    accepted.mission_id = 2
+    accepted.attempted_plan_id = 8
+    accepted.status = 'PLAN_ACCEPTED'
+    node.controller_diagnostic_callback(accepted)
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.8)
+    assert node.contact_schedule.committed_plan_id == 8
+
+
+def test_candidate_reject_then_accept_commits_only_real_tracker_acceptance():
+    schedule = ContactTimeSchedule()
+    schedule.accept_plan(10.0, 1.0)
+    planner_node = object.__new__(planner_node_module.InterceptPlannerNode)
+    planner_node.mission_id = 2
+    planner_node.planning_cycle_id = 5
+    planner_node.contact_schedule = schedule
+    tracker = TrajectoryTrackerCore()
+
+    def candidate(plan_id):
+        return trajectory_from_message(plan_to_message(
+            make_publish_test_plan(duration=1.2),
+            mission_id=2,
+            plan_id=plan_id,
+            prediction_sequence_id=4,
+            trajectory_start_stamp=10.0,
+            planning_started_stamp=10.01,
+            generated_stamp=10.03,
+            target_state_source='simulation_truth',
+            contact_stamp=11.2,
+            remaining_t_go=1.2,
+        ))
+
+    schedule.propose(8, 11.2, 5, 10.03)
+    rejected = tracker.accept(
+        candidate(8),
+        TrackerKinematicState(
+            stamp=10.05,
+            position=(10.0, 0.0, -1.0),
+            velocity=(0.0, 0.0, 0.0),
+        ),
+        mission_id=2,
+        target_endpoint=(1.2, 0.0, -0.1),
+    )
+    assert rejected == TrajectoryRejectReason.STATE_POSITION_MISMATCH
+    rejection = ControllerDiagnostic()
+    rejection.mission_id = 2
+    rejection.attempted_plan_id = 8
+    rejection.status = 'PLAN_REJECTED'
+    planner_node.controller_diagnostic_callback(rejection)
+    assert schedule.contact_stamp == pytest.approx(11.0)
+
+    accepted_candidate = candidate(9)
+    sample = accepted_candidate.sample_at_ros_time(10.05)
+    schedule.propose(9, 11.2, 5, 10.04)
+    accepted = tracker.accept(
+        accepted_candidate,
+        TrackerKinematicState(
+            stamp=10.05,
+            position=sample.position,
+            velocity=sample.velocity,
+        ),
+        mission_id=2,
+        target_endpoint=(1.2, 0.0, -0.1),
+    )
+    assert accepted == TrajectoryRejectReason.NONE
+    confirmation = ControllerDiagnostic()
+    confirmation.mission_id = 2
+    confirmation.attempted_plan_id = 9
+    confirmation.status = 'PLAN_ACCEPTED'
+    planner_node.controller_diagnostic_callback(confirmation)
+    assert schedule.contact_stamp == pytest.approx(11.2)
+    assert schedule.committed_plan_id == 9
+
+
+def test_old_async_cycle_result_cannot_publish_after_recovery():
+    node, schedule, trajectory_pub, diagnostic_pub = run_publish_test(
+        terminal_mode=True,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+    )
+    # Re-run one equivalent worker result after a recovery cycle invalidation.
+    request = PlannerRequest(
+        mission_id=2,
+        prediction=make_publish_test_prediction(sequence_id=4),
+        uav=UavKinematicState(
+            stamp=10.0,
+            position=(0.0, 0.0, -1.0),
+            velocity=(0.0, 0.0, 0.0),
+            acceleration=(0.0, 0.0, 0.0),
+        ),
+        trajectory_start_stamp=10.0,
+        contact_stamp=11.0,
+        terminal_mode=True,
+        minimum_duration=0.30,
+        planning_cycle_id=4,
+    )
+    node.planning_cycle_id = 5
+    node.mission_id = 2
+    node.intercept_requested = True
+    node.mission_state = MissionState.FAR_GUIDANCE
+    before = len(trajectory_pub.messages)
+    job = PlannerJobResult(
+        request=request,
+        outcome=FastPlanningOutcome(
+            plan=make_publish_test_plan(duration=1.2),
+            failure=FastPlanningFailure.NONE,
+            diagnostics=PlannerDiagnostics(),
+        ),
+        planning_started_stamp=10.01,
+        generated_stamp=10.03,
+        compute_time=0.02,
+    )
+
+    planner_node_module.InterceptPlannerNode._publish_job(node, job)
+
+    assert len(trajectory_pub.messages) == before
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert diagnostic_pub.messages[-1].rejection_stage == (
+        'MISSION_OR_REQUEST_INVALIDATED'
+    )
+
+
+def test_terminal_freeze_is_not_unlocked_before_recovery_to_far_guidance():
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.mission_id = 2
+    node.mission_state = MissionState.TERMINAL_MINCO
+    node.intercept_requested = True
+    node.planning_cycle_id = 4
+    node.request_slot = LatestRequestSlot()
+    node.last_submitted_key = None
+    node.contact_schedule = ContactTimeSchedule(freeze_time=0.30)
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node._ros_seconds = lambda: 10.75
+    node.request_policy = planner_node_module.PlanningRequestPolicy(
+        terminal_freeze_time=0.30,
+        terminal_state=MissionState.TERMINAL_MINCO,
+    )
+
+    message = MissionState()
+    message.mission_id = 2
+    message.state = MissionState.TERMINAL_MINCO
+    message.intercept_requested = True
+    message.completed = False
+    node.mission_callback(message)
+
+    decision = node.request_policy.decide(
+        node.mission_state,
+        node.contact_schedule.remaining_t_go(node._ros_seconds()),
+    )
+    assert not decision.submit
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)
+
+
+@pytest.mark.parametrize(
+    'state',
+    (
+        MissionState.PLAN_RECOVERY,
+        MissionState.SAFE_WAIT,
+        MissionState.CAPTURE,
+        MissionState.FAILURE,
+        MissionState.ABORTED,
+    ),
+)
+def test_recovery_and_terminal_states_never_submit_planning(state):
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.intercept_requested = True
+    node.mission_state = state
+    node._current_request = lambda _decision: pytest.fail(
+        'planning request must not be generated in this state'
+    )
+
+    node._planning_tick(terminal_tick=False)
+    node._planning_tick(terminal_tick=True)
 
 
 def test_planner_node_does_not_shadow_rclpy_executor_property():
@@ -466,7 +720,8 @@ def test_terminal_reschedule_beyond_old_point_three_limit_can_publish():
     )
 
     assert len(trajectory_pub.messages) == 1
-    assert schedule.contact_stamp == pytest.approx(11.8)
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert schedule.pending_contact_stamp == pytest.approx(11.8)
     assert diagnostic_pub.messages[-1].result == (
         PlannerDiagnostic.RESULT_SUCCESS
     )
@@ -488,6 +743,10 @@ def test_terminal_reschedule_validates_shift_at_candidate_contact():
     assert diagnostic_pub.messages[-1].result == (
         PlannerDiagnostic.RESULT_FAILURE
     )
+    assert diagnostic_pub.messages[-1].rejection_stage == (
+        'TARGET_PREDICTION_SHIFT'
+    )
+    assert diagnostic_pub.messages[-1].target_prediction_shift > 0.5
     assert node.plan_id == 1
 
 
@@ -503,6 +762,25 @@ def test_normal_plan_cannot_publish_endpoint_after_locked_contact():
     assert diagnostic_pub.messages[-1].result == (
         PlannerDiagnostic.RESULT_FAILURE
     )
+
+
+def test_nonterminal_unreachable_contact_can_publish_forward_candidate():
+    """Reachability proof opens one pending recovery, not contact drift."""
+    node, schedule, trajectory_pub, diagnostic_pub = run_publish_test(
+        terminal_mode=False,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+        locked_contact_unreachable=True,
+    )
+
+    assert len(trajectory_pub.messages) == 1
+    assert schedule.contact_stamp == pytest.approx(11.0)
+    assert schedule.pending_contact_stamp == pytest.approx(11.2)
+    assert diagnostic_pub.messages[-1].candidate_published
+    assert diagnostic_pub.messages[-1].contact_delay == pytest.approx(0.2)
+    assert diagnostic_pub.messages[-1].contact_recovery_reason == (
+        'CONTACT_UNREACHABLE_RECOVERY'
+    )
+    assert node.plan_id == 1
 
 
 def test_minco_plan_message_contains_reconstructable_coefficients():

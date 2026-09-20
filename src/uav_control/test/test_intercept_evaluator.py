@@ -25,6 +25,18 @@ def test_csv_records_planner_failure_diagnostics():
     assert 'planner_generation_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_validation_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_candidate_diagnostics' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'attempted_plan_id' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_planning_cycle_id' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_rejection_stage' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_rejection_detail' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_contact_recovery_reason' in (
+        ExperimentArtifactWriter.CSV_FIELDS
+    )
+    assert 'planner_contact_delay' in ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_target_prediction_shift' in (
+        ExperimentArtifactWriter.CSV_FIELDS
+    )
+    assert 'planner_candidate_published' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_required_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_horizontal_min_time' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'planner_vertical_min_time' in ExperimentArtifactWriter.CSV_FIELDS
