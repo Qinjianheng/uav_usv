@@ -251,7 +251,17 @@ intercept_planner_node:
     contact_clearance: 0.27
     preferred_clearance: 0.29
     piece_count: 3
-    target_curve_weight: 0.7
+    # Blending the intermediate MINCO waypoints toward the target's curved
+    # path costs lateral acceleration, and the figure-eight target turns hard
+    # enough that 0.7 demanded 4-8 m/s^2 against the 3.0 m/s^2 planning limit.
+    # Every terminal plan was then rejected with DYNAMIC_LIMIT_HORIZONTAL while
+    # the vehicle hovered near the sea, which is exactly the slow jittering
+    # first descent seen on 2026-09-20 (the second, straighter approach
+    # captured by luck before the locked contact expired).  The terminal
+    # velocity boundary already places the contact at the moving capture
+    # point, so the curve weight adds no intercept accuracy; 0.0 keeps the
+    # mid-path inside budget.
+    target_curve_weight: 0.0
     # Leave 5 ms for message conversion and event diagnostics.
     solver_deadline_seconds: 0.075
     deadline_seconds: 0.08

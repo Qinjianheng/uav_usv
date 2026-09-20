@@ -78,6 +78,18 @@ def test_planned_contact_point_stays_above_the_body_contact_threshold():
     )
 
 
+def test_curve_weight_stays_inside_the_lateral_acceleration_budget():
+    """Guard the 2026-09-20 jittering first-descent regression."""
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    planner = parameters(config, 'intercept_planner_node')
+
+    # The figure-eight target turns hard enough that blending the MINCO
+    # waypoints toward its curved path breaks the 3.0 m/s^2 planning limit
+    # from about 0.2 upward, which rejected every terminal plan while the
+    # vehicle hovered near the sea.
+    assert planner['target_curve_weight'] <= 0.1
+
+
 def test_shadow_perception_rates_are_below_control_rate():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     tracker = parameters(config, 'trajectory_tracker_node')

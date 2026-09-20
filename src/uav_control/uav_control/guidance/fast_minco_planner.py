@@ -198,14 +198,29 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             failure in dynamic_failures
             for failure in self._candidate_failures
         ):
-            adaptive = min(minimum + self.duration_margin, maximum)
+            # A dynamic-limit rejection means the profile is too aggressive and
+            # only more time can cure it, so walk the rest of the horizon at
+            # quarter-span steps.  The previous form advanced by a single
+            # duration_margin step and then gave up, which left the whole
+            # long-duration end -- exactly where the acceleration becomes
+            # feasible -- unexplored, so a fixable terminal plan was rejected
+            # on every tick until its locked contact time expired.
+            span = maximum - minimum
+            for fraction in (0.25, 0.5, 0.75, 1.0):
+                value = minimum + fraction * span
+                if available(value):
+                    attempted.append(value)
+                    yield value
         else:
-            adaptive = minimum + 0.5 * (maximum - minimum)
-        fallbacks = (adaptive, maximum, minimum)
-        for value in fallbacks:
-            if available(value):
-                yield value
-                return
+            for value in (
+                minimum + 0.5 * (maximum - minimum),
+                maximum,
+                minimum,
+            ):
+                if available(value):
+                    attempted.append(value)
+                    yield value
+                    return
 
     def _closing_speed_candidates(self):
         return tuple(self._unique((
