@@ -329,3 +329,94 @@ def test_unrecoverable_sea_margin_rejects_new_plan():
     )
 
     assert rejected == TrajectoryRejectReason.SAFETY_REJECTED
+
+
+def test_recovery_reference_continues_from_the_last_tracking_reference():
+    """Catch the plan-loss hold snapping the setpoint back to the measured state."""
+    tracker = TrajectoryTrackerCore(control_dt=0.05)
+    assert tracker.accept(linear_trajectory(), state(), mission_id=4) == (
+        TrajectoryRejectReason.NONE
+    )
+    tracked = tracker.command(state(10.5), mission_id=4)
+    assert tracked.position == pytest.approx((0.5, 0.0, -0.9))
+
+    # The vehicle has drifted far from the reference the moment the plan drops.
+    measured = state(
+        stamp=10.55,
+        position=(1.6, 0.4, -0.45),
+        velocity=(1.0, 0.0, 0.2),
+    )
+    recovery = tracker.recovery_command(measured)
+
+    distance_from_reference = sum(
+        (current - reference) ** 2
+        for current, reference in zip(
+            recovery.position,
+            tracked.position,
+        )
+    ) ** 0.5
+    distance_from_measured = sum(
+        (current - actual) ** 2
+        for current, actual in zip(
+            recovery.position,
+            measured.position,
+        )
+    ) ** 0.5
+
+    assert distance_from_reference < 0.2
+    assert distance_from_measured > 1.0
+    assert tracker.status == 'RECOVERY'
+
+
+def test_recovery_is_velocity_limited_and_never_commands_descent():
+    tracker = TrajectoryTrackerCore(
+        maximum_vertical_speed=1.0,
+        maximum_vertical_acceleration=1.0,
+        maximum_horizontal_speed=2.0,
+        maximum_horizontal_acceleration=1.0,
+        recovery_clearance=0.5,
+        recovery_climb_speed=1.0,
+        control_dt=0.05,
+    )
+    tracker.recovery_position = (0.0, 0.0, -0.2)
+    tracker.last_reference_position = (0.0, 0.0, -0.2)
+    tracker.previous_command_velocity = (1.5, 0.0, 0.0)
+    tracker.previous_command_stamp = 20.0
+
+    stamp = 20.0
+    previous_velocity = tracker.previous_command_velocity
+    for _ in range(60):
+        command = tracker.recovery_command(
+            TrackerKinematicState(
+                stamp,
+                tracker.recovery_position,
+                tracker.previous_command_velocity,
+            )
+        )
+        delta_z = command.velocity[2] - previous_velocity[2]
+        assert abs(delta_z) <= 0.05 + 1e-9
+        assert command.velocity[2] <= 1e-12
+        assert abs(command.velocity[2]) <= 1.0 + 1e-9
+        previous_velocity = command.velocity
+        stamp += 0.05
+
+    assert tracker.recovery_position[2] == pytest.approx(-0.5, abs=0.05)
+
+
+def test_recovery_clamps_the_reference_to_the_reserve_clearance():
+    """A backstop for a reference that is already inside the water margin."""
+    tracker = TrajectoryTrackerCore(
+        reserve_clearance=0.07,
+        recovery_clearance=0.5,
+        recovery_climb_speed=1.0,
+        maximum_vertical_speed=1.0,
+        maximum_vertical_acceleration=1.0,
+    )
+    tracker.last_reference_position = (0.0, 0.0, -0.02)
+
+    command = tracker.recovery_command(
+        TrackerKinematicState(30.0, (0.0, 0.0, -0.02), (0.0, 0.0, 0.0))
+    )
+
+    assert command.position[2] <= -0.07 + 1e-12
+    assert command.velocity[2] < 0.0

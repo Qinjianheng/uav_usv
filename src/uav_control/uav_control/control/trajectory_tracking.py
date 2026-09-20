@@ -164,6 +164,8 @@ class TrajectoryTrackerCore:
         safety_response_delay=0.15,
         vertical_braking_acceleration=2.5,
         control_dt=0.05,
+        recovery_clearance=0.5,
+        recovery_climb_speed=1.0,
     ):
         self.maximum_plan_age = float(maximum_plan_age)
         self.minimum_remaining_time = float(minimum_remaining_time)
@@ -187,10 +189,18 @@ class TrajectoryTrackerCore:
             vertical_braking_acceleration
         )
         self.control_dt = float(control_dt)
+        # A lost plan must not park the airframe in the water margin: the
+        # recovery reference climbs back to this clearance above the sea with a
+        # bounded vertical speed.  The X500 body reaches 0.23 m below the PX4
+        # reference, so 0.5 m keeps the gear roughly 0.27 m clear.
+        self.recovery_clearance = max(float(recovery_clearance), 0.0)
+        self.recovery_climb_speed = max(float(recovery_climb_speed), 0.0)
         self.active_trajectory = None
         self.status = 'NO_VALID_PLAN'
         self.previous_command_velocity = None
         self.previous_command_stamp = None
+        self.last_reference_position = None
+        self.recovery_position = None
 
     @staticmethod
     def _norm(values):
@@ -202,6 +212,8 @@ class TrajectoryTrackerCore:
         self.status = 'NO_VALID_PLAN'
         self.previous_command_velocity = None
         self.previous_command_stamp = None
+        self.last_reference_position = None
+        self.recovery_position = None
 
     def accept(
         self,
@@ -275,6 +287,7 @@ class TrajectoryTrackerCore:
             return TrajectoryRejectReason.SAFETY_REJECTED
         self.active_trajectory = trajectory
         self.status = 'TRACKING'
+        self.recovery_position = None
         return TrajectoryRejectReason.NONE
 
     @staticmethod
@@ -332,6 +345,10 @@ class TrajectoryTrackerCore:
             self.status = 'NO_VALID_PLAN'
             return None
         desired = trajectory.sample_at_ros_time(state.stamp)
+        # Remember the reference the vehicle was just asked to follow so a
+        # later plan loss can continue from it instead of snapping away.
+        self.last_reference_position = desired.position
+        self.recovery_position = None
         feedback_velocity = tuple(
             velocity + self.position_gain * (reference - current)
             for velocity, reference, current in zip(
@@ -397,6 +414,92 @@ class TrajectoryTrackerCore:
             velocity=velocity,
             acceleration=acceleration,
             plan_id=trajectory.plan_id,
+            safety_state=safety.state.value,
+            safety_margin=safety.response_margin,
+        )
+
+    def recovery_command(self, state):
+        """
+        Return a continuous, bounded command after the active plan is lost.
+
+        The PX4 position setpoint is advanced from the last commanded
+        reference with the same acceleration-limited velocity shaping used
+        while tracking, so losing a plan no longer steps the reference back to
+        the measured position with zero feed-forward.  While the reference is
+        inside ``recovery_clearance`` of the sea the vertical target becomes a
+        bounded climb, and the reference is never integrated past the reserve
+        clearance, so a dropped terminal plan cannot park the airframe in the
+        water margin.
+        """
+        if self.recovery_position is None:
+            if self.last_reference_position is not None:
+                self.recovery_position = tuple(self.last_reference_position)
+            else:
+                self.recovery_position = tuple(state.position)
+        previous_velocity = self.previous_command_velocity
+        if previous_velocity is None:
+            previous_velocity = (0.0, 0.0, 0.0)
+        clearance = self.sea_surface_z - self.recovery_position[2]
+        vertical_target = 0.0
+        if clearance < self.recovery_clearance:
+            # Brake-to-target climb: never command more upward speed than the
+            # vertical acceleration limit can arrest before reaching the
+            # recovery clearance, so the hold settles instead of overshooting.
+            remaining = self.recovery_clearance - clearance
+            vertical_target = -min(
+                self.recovery_climb_speed,
+                math.sqrt(
+                    2.0 * self.maximum_vertical_acceleration * remaining
+                ),
+            )
+        velocity = self._shape_velocity(
+            (0.0, 0.0, vertical_target),
+            state.stamp,
+        )
+        if self.previous_command_stamp is None:
+            step = self.control_dt
+        else:
+            step = max(
+                float(state.stamp) - float(self.previous_command_stamp),
+                self.control_dt,
+            )
+        position = tuple(
+            current + 0.5 * (before + after) * step
+            for current, before, after in zip(
+                self.recovery_position,
+                previous_velocity,
+                velocity,
+            )
+        )
+        ceiling = self.sea_surface_z - self.reserve_clearance
+        if position[2] > ceiling:
+            position = (position[0], position[1], ceiling)
+        safety = apply_sea_safety_guard(
+            current_z=state.position[2],
+            current_vz=state.velocity[2],
+            proposed_vz=velocity[2],
+            sea_surface_z=self.sea_surface_z,
+            reserve_clearance=self.reserve_clearance,
+            response_delay=self.safety_response_delay,
+            effective_braking_acceleration=(
+                self.vertical_braking_acceleration
+            ),
+            control_dt=self.control_dt,
+            maximum_vertical_speed=self.maximum_vertical_speed,
+        )
+        velocity = (velocity[0], velocity[1], safety.command_vz)
+        self.recovery_position = position
+        self.previous_command_velocity = velocity
+        self.previous_command_stamp = state.stamp
+        self.status = 'RECOVERY'
+        return TrackingCommand(
+            position=position,
+            velocity=velocity,
+            acceleration=tuple(
+                (after - before) / step
+                for after, before in zip(velocity, previous_velocity)
+            ),
+            plan_id=0,
             safety_state=safety.state.value,
             safety_margin=safety.response_margin,
         )

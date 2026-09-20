@@ -252,6 +252,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('reserve_clearance', 0.07)
         self.declare_parameter('safety_response_delay', 0.15)
         self.declare_parameter('vertical_braking_acceleration', 2.5)
+        self.declare_parameter('recovery_clearance', 0.5)
+        self.declare_parameter('recovery_climb_speed', 1.0)
         self.declare_parameter('maximum_state_age', 0.125)
         self.declare_parameter('frame_id', 'local_ned')
         self.declare_parameter('target_state_topic', '/target/state')
@@ -342,6 +344,12 @@ class TrajectoryTrackerNode(Node):
                 'vertical_braking_acceleration'
             ).value,
             control_dt=1.0 / control_rate,
+            recovery_clearance=self.get_parameter(
+                'recovery_clearance'
+            ).value,
+            recovery_climb_speed=self.get_parameter(
+                'recovery_climb_speed'
+            ).value,
         )
         self.flight_guidance = FlightGuidanceCore(
             flight_altitude=self.get_parameter('flight_altitude').value,
@@ -905,8 +913,12 @@ class TrajectoryTrackerNode(Node):
             self._request_flight_mode()
             command = self.tracker.command(current, self.mission_id)
             if command is None:
-                setpoint = hold_setpoint(
-                    current,
+                # Keep the recovery reference continuous instead of snapping
+                # the position setpoint to the measured state, and climb out of
+                # the sea margin while no plan is valid.
+                command = self.tracker.recovery_command(current)
+                setpoint = command_to_setpoint(
+                    command,
                     timestamp_us,
                     yaw=target_yaw,
                 )

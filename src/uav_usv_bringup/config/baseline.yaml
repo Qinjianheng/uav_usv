@@ -276,6 +276,12 @@ trajectory_tracker_node:
     reserve_clearance: 0.07
     safety_response_delay: 0.15
     vertical_braking_acceleration: 2.5
+    # A lost plan must not hold the measured position inside the water margin.
+    # The recovery reference keeps advancing from the last commanded reference
+    # with the same acceleration limiting used while tracking, and climbs back
+    # to this clearance above the sea at a bounded vertical speed.
+    recovery_clearance: 0.5
+    recovery_climb_speed: 1.0
     maximum_state_age: 0.125
     frame_id: local_ned
 
