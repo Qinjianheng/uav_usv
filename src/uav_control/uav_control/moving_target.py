@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Bool, String
 from uav_control.figure_eight_trajectory import FigureEightTrajectory
-from uav_usv_interfaces.msg import InterceptResult, TargetState
+from uav_usv_interfaces.msg import InterceptResult, MissionState, TargetState
 
 
 def measured_motion_step(previous_time_ns, current_time_ns, nominal_step):
@@ -103,6 +103,12 @@ class MovingTarget(Node):
             String,
             '/simulation/impact/command',
             self.command_callback,
+            10,
+        )
+        self.mission_state_sub = self.create_subscription(
+            MissionState,
+            '/mission/state',
+            self.mission_state_callback,
             10,
         )
         self.flight_ready_sub = self.create_subscription(
@@ -282,6 +288,18 @@ class MovingTarget(Node):
                 f'Y=[{y_min:.1f}, {y_max:.1f}] m'
             )
 
+    def _start_motion(self, message):
+        if self.started:
+            return
+        self.started = True
+        get_clock = getattr(self, 'get_clock', None)
+        self.last_motion_update_time_ns = (
+            get_clock().now().nanoseconds
+            if get_clock is not None
+            else None
+        )
+        self.get_logger().info(message)
+
     def command_callback(self, msg):
         if msg.data.strip().upper() == 'X' and not self.started:
             if not self.flight_ready:
@@ -289,15 +307,16 @@ class MovingTarget(Node):
                     'X ignored: UAV flight preparation is not ready.'
                 )
                 return
-            self.started = True
-            get_clock = getattr(self, 'get_clock', None)
-            self.last_motion_update_time_ns = (
-                get_clock().now().nanoseconds
-                if get_clock is not None
-                else None
+            MovingTarget._start_motion(
+                self,
+                'X received. Moving target motion started.',
             )
-            self.get_logger().info(
-                'X received. Moving target motion started.'
+
+    def mission_state_callback(self, msg):
+        if int(msg.state) == MissionState.TAKEOFF and not self.started:
+            MovingTarget._start_motion(
+                self,
+                'Mission TAKEOFF accepted. Moving target motion started.',
             )
 
     def flight_ready_callback(self, msg):

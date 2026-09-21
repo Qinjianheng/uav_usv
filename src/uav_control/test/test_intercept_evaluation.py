@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from px4_msgs.msg import VehicleCommand
+from uav_usv_interfaces.msg import MissionState
 
 from uav_control.moving_target import MovingTarget
 from uav_control.trajectory_impact_sim import TrajectoryImpactSim
@@ -1143,6 +1144,41 @@ def test_moving_target_rejects_x_until_flight_is_ready():
     target.flight_ready = True
     MovingTarget.command_callback(target, SimpleNamespace(data='X'))
     assert target.started is True
+
+
+def test_moving_target_starts_when_mission_accepts_x_before_command_callback():
+    messages = []
+    target = SimpleNamespace(
+        started=False,
+        flight_ready=False,
+        last_motion_update_time_ns=None,
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=123_000_000)
+        ),
+        get_logger=lambda: SimpleNamespace(info=messages.append),
+    )
+
+    MovingTarget.mission_state_callback(
+        target,
+        SimpleNamespace(state=MissionState.TAKEOFF),
+    )
+
+    assert target.started is True
+    assert target.last_motion_update_time_ns == 123_000_000
+    assert messages == [
+        'Mission TAKEOFF accepted. Moving target motion started.'
+    ]
+
+
+def test_moving_target_does_not_start_from_ground_hold_state():
+    target = SimpleNamespace(started=False)
+
+    MovingTarget.mission_state_callback(
+        target,
+        SimpleNamespace(state=MissionState.GROUND_HOLD),
+    )
+
+    assert target.started is False
 
 
 def test_x_requests_arming_only_after_operator_command():
