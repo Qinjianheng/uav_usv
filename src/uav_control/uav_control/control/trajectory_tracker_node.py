@@ -73,10 +73,12 @@ def trajectory_from_message(message):
         target_state_source=str(message.target_state_source),
         frame_id=str(message.frame_id),
         contact_stamp=_stamp_seconds(message.contact_stamp),
+        capture_entry_stamp=_stamp_seconds(message.capture_entry_stamp),
         selected_t_go=float(message.selected_t_go),
         remaining_t_go=float(message.remaining_t_go),
         terminal_mode=bool(message.terminal_mode),
         planned_capture_margin=float(message.planned_capture_margin),
+        capture_execution_margin=float(message.capture_execution_margin),
     )
 
 
@@ -101,7 +103,7 @@ def tracker_state_from_message(message, received_stamp):
 
 
 def flight_target_from_message(message):
-    """Convert the launch-selected current target source for flight guidance."""
+    """Convert the launch-selected target source for flight guidance."""
     values = (
         float(message.position.x),
         float(message.position.y),
@@ -138,7 +140,12 @@ def rate_limited_target_yaw(previous_yaw, desired_yaw, maximum_rate, dt):
     return _wrap_angle(float(previous_yaw) + delta)
 
 
-def command_to_setpoint(command, timestamp_us, yaw=math.nan, velocity_mode=False):
+def command_to_setpoint(
+    command,
+    timestamp_us,
+    yaw=math.nan,
+    velocity_mode=False,
+):
     """
     Map the post-guard command to a PX4 setpoint.
 
@@ -632,7 +639,8 @@ class TrajectoryTrackerNode(Node):
             if self.latest_state is not None:
                 safe_z = min(
                     self.latest_state.position[2],
-                    self.tracker.sea_surface_z - self.tracker.reserve_clearance,
+                    self.tracker.sea_surface_z
+                    - self.tracker.reserve_clearance,
                 )
                 self.terminal_hold_position = (
                     self.latest_state.position[0],
@@ -678,7 +686,8 @@ class TrajectoryTrackerNode(Node):
                         target_endpoint=endpoint,
                         maximum_position_error=(
                             self.terminal_replacement_position_error
-                            if self.mission_state == MissionState.TERMINAL_MINCO
+                            if self.mission_state
+                            == MissionState.TERMINAL_MINCO
                             else None
                         ),
                     )
@@ -780,7 +789,10 @@ class TrajectoryTrackerNode(Node):
         message.terminal_mode = bool(
             message.terminal_mode or self.terminal_mode_latched
         )
-        if self.latest_target_state is not None and self.latest_state is not None:
+        if (
+            self.latest_target_state is not None
+            and self.latest_state is not None
+        ):
             relative = tuple(
                 target - current
                 for target, current in zip(
@@ -915,7 +927,11 @@ class TrajectoryTrackerNode(Node):
                 and now - self.vehicle_status_stamp
                 <= self.vehicle_status_timeout
             )
-            ready = self.offboard_active and not self.vehicle_armed and status_fresh
+            ready = (
+                self.offboard_active
+                and not self.vehicle_armed
+                and status_fresh
+            )
             self._publish_bool(self.flight_ready_pub, ready)
             if ready and not self.flight_ready:
                 self.get_logger().info(

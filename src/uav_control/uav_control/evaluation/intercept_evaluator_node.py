@@ -2,6 +2,7 @@
 
 import math
 import statistics
+from collections import deque
 
 from builtin_interfaces.msg import Time
 import rclpy
@@ -13,14 +14,18 @@ from std_msgs.msg import Bool, Float32
 from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptResult
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
 from uav_usv_interfaces.msg import TargetPrediction, TargetState
+from uav_usv_interfaces.msg import TargetObservation
 
-from uav_control.tracking.prediction_error_tracker import PredictionErrorTracker
+from uav_control.tracking.prediction_error_tracker import (
+    PredictionErrorTracker,
+)
 
 from .intercept_evaluator import ExperimentArtifactWriter
 from .intercept_evaluator import InterceptEvaluatorCore, KinematicState
 from .intercept_evaluator import PlannerEventAccumulator
 from .intercept_evaluator import RuntimePerformanceAccumulator
 from .intercept_evaluator import TimestampedStateHistory
+from .intercept_evaluator import VisionMetricAccumulator
 from .intercept_evaluator import synchronize_histories
 from .gazebo_terminal import GazeboTerminalPauser, GazeboWorldPauseClient
 from uav_control.common.runtime_performance import RateMeter
@@ -75,8 +80,12 @@ def truth_from_message(message):
 def uav_from_message(message):
     """Convert PX4 local state in unchanged NED coordinates."""
     return KinematicState(
-        position=_finite_tuple((message.x, message.y, message.z), 'UAV position'),
-        velocity=_finite_tuple((message.vx, message.vy, message.vz), 'UAV velocity'),
+        position=_finite_tuple(
+            (message.x, message.y, message.z), 'UAV position'
+        ),
+        velocity=_finite_tuple(
+            (message.vx, message.vy, message.vz), 'UAV velocity'
+        ),
     )
 
 
@@ -147,6 +156,11 @@ class InterceptEvaluatorNode(Node):
         self.declare_parameter('body_lower_extent', 0.23)
         self.declare_parameter('maximum_duration', 30.0)
         self.declare_parameter('detailed_diagnostics_enabled', False)
+        self.declare_parameter('visual_evaluation_enabled', True)
+        self.declare_parameter(
+            'visual_observation_topic',
+            '/perception/front/target_observation',
+        )
         self.declare_parameter(
             'log_directory',
             'data/experiments/current',
@@ -183,6 +197,12 @@ class InterceptEvaluatorNode(Node):
         )
         self.detailed_diagnostics_enabled = bool(
             self.get_parameter('detailed_diagnostics_enabled').value
+        )
+        self.visual_evaluation_enabled = bool(
+            self.get_parameter('visual_evaluation_enabled').value
+        )
+        self.visual_observation_topic = str(
+            self.get_parameter('visual_observation_topic').value
         )
         self.truth_topic = str(self.get_parameter('truth_topic').value)
         self.shadow_prediction_topic = str(
@@ -244,6 +264,12 @@ class InterceptEvaluatorNode(Node):
             TargetState,
             '/tracking/target_state',
             self.filtered_target_callback,
+            sensor_qos,
+        )
+        self.visual_observation_sub = self.create_subscription(
+            TargetObservation,
+            self.visual_observation_topic,
+            self.visual_observation_callback,
             sensor_qos,
         )
         self.prediction_sub = self.create_subscription(
@@ -328,6 +354,8 @@ class InterceptEvaluatorNode(Node):
         self.latest_tracker_rejection_reason = ''
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker = PredictionErrorTracker(PREDICTION_HORIZONS)
+        self.vision_metrics = VisionMetricAccumulator()
+        self.pending_visual_observations = deque(maxlen=100)
         self.prediction_sequences = set()
         self.shadow_prediction_sequences = set()
         self.prediction_errors = {
@@ -352,6 +380,9 @@ class InterceptEvaluatorNode(Node):
         self.handover_jump_count = 0
         self.first_terminal_approach_result = ''
         self.minimum_body_clearance = math.inf
+        self.truth_motion_regime = 'UNKNOWN'
+        self.last_truth_heading = None
+        self.last_truth_heading_stamp = None
         self.safety_event_histogram = {
             name: 0
             for name in ('WARNING', 'BRAKE', 'UNRECOVERABLE', 'SEA_CONTACT')
@@ -384,6 +415,30 @@ class InterceptEvaluatorNode(Node):
             return
         truth_stamp = _stamp_seconds(message.stamp) or self._now()
         self.truth_history.add(truth_stamp, self.latest_truth)
+        horizontal_speed = math.hypot(*self.latest_truth.velocity[:2])
+        if horizontal_speed > 0.2:
+            heading = math.atan2(
+                self.latest_truth.velocity[1],
+                self.latest_truth.velocity[0],
+            )
+            if (
+                self.last_truth_heading is not None
+                and self.last_truth_heading_stamp is not None
+                and truth_stamp > self.last_truth_heading_stamp + 1e-6
+            ):
+                delta = math.atan2(
+                    math.sin(heading - self.last_truth_heading),
+                    math.cos(heading - self.last_truth_heading),
+                )
+                yaw_rate = delta / (
+                    truth_stamp - self.last_truth_heading_stamp
+                )
+                self.truth_motion_regime = (
+                    'TURNING' if abs(yaw_rate) > 0.1 else 'STRAIGHT'
+                )
+            self.last_truth_heading = heading
+            self.last_truth_heading_stamp = truth_stamp
+        self._drain_visual_observations()
         for model in (
             'guidance',
             'kf',
@@ -421,6 +476,20 @@ class InterceptEvaluatorNode(Node):
             ), 'filtered target velocity')
         except ValueError:
             return
+        truth = self.truth_history.state_at(stamp)
+        if truth is not None:
+            self.vision_metrics.observe_kf(
+                stamp=stamp,
+                position=position,
+                velocity=velocity,
+                truth_position=truth.position,
+                truth_velocity=truth.velocity,
+                source_stamp=(
+                    _stamp_seconds(message.source_stamp)
+                    if _stamp_seconds(message.source_stamp) > 0.0
+                    else None
+                ),
+            )
         predictions = {
             horizon: tuple(
                 value + rate * horizon
@@ -429,6 +498,105 @@ class InterceptEvaluatorNode(Node):
             for horizon in PREDICTION_HORIZONS
         }
         self.prediction_tracker.add('kf', stamp, predictions)
+
+    def visual_observation_callback(self, message):
+        """Queue one event for truth alignment without feeding control."""
+        if not self.visual_evaluation_enabled or self.writer is None:
+            return
+        self.pending_visual_observations.append((message, self._now()))
+        self._drain_visual_observations()
+
+    def _drain_visual_observations(self):
+        if self.writer is None:
+            return
+        pending = deque(maxlen=self.pending_visual_observations.maxlen)
+        while self.pending_visual_observations:
+            message, callback_receipt = (
+                self.pending_visual_observations.popleft()
+            )
+            measurement_stamp = _stamp_seconds(message.stamp)
+            receipt_stamp = (
+                _stamp_seconds(message.received_stamp) or callback_receipt
+            )
+            truth = (
+                self.truth_history.state_at(measurement_stamp)
+                if measurement_stamp > 0.0 else None
+            )
+            if message.valid and truth is None:
+                latest_truth_stamp = self.truth_history.latest_stamp
+                if (
+                    latest_truth_stamp is None
+                    or measurement_stamp >= latest_truth_stamp - 0.5
+                ):
+                    pending.append((message, callback_receipt))
+                continue
+            estimate = (
+                float(message.position.x),
+                float(message.position.y),
+                float(message.position.z),
+            )
+            truth_position = (
+                truth.position if truth is not None else (math.nan,) * 3
+            )
+            target_range = float(message.target_range)
+            distance_bin = (
+                'UNKNOWN'
+                if not math.isfinite(target_range) or target_range < 0.0
+                else 'NEAR'
+                if target_range < 5.0
+                else 'MID'
+                if target_range < 10.0
+                else 'FAR'
+            )
+            self.vision_metrics.observe_raw(
+                source=message.source,
+                measurement_stamp=measurement_stamp,
+                receipt_stamp=receipt_stamp,
+                estimate=estimate,
+                truth=truth_position,
+                valid=bool(message.valid and truth is not None),
+                distance_bin=distance_bin,
+                motion_regime=self.truth_motion_regime,
+                approach_phase=self.approach_phase,
+            )
+            error = tuple(
+                estimate[index] - truth_position[index]
+                for index in range(3)
+            )
+            covariance = list(message.covariance)
+            self.writer.append_visual_event({
+                'measurement_stamp': measurement_stamp,
+                'receipt_stamp': receipt_stamp,
+                'processed_stamp': _stamp_seconds(message.processed_stamp),
+                'published_stamp': _stamp_seconds(message.published_stamp),
+                'source': str(message.source),
+                'valid': bool(message.valid and truth is not None),
+                'rejection_reason': str(message.rejection_reason),
+                'approach_phase': self.approach_phase,
+                'distance_bin': distance_bin,
+                'motion_regime': self.truth_motion_regime,
+                'confidence': float(message.confidence),
+                'red_pixel_count': int(message.red_pixel_count),
+                'valid_depth_ratio': float(message.valid_depth_ratio),
+                'target_range': target_range,
+                'view_angle': float(message.view_angle),
+                'position_x': estimate[0],
+                'position_y': estimate[1],
+                'position_z': estimate[2],
+                'covariance_xx': covariance[0],
+                'covariance_yy': covariance[4],
+                'covariance_zz': covariance[8],
+                'truth_x': truth_position[0],
+                'truth_y': truth_position[1],
+                'truth_z': truth_position[2],
+                'error_x': error[0],
+                'error_y': error[1],
+                'error_z': error[2],
+                'horizontal_error': math.hypot(error[0], error[1]),
+                'position_3d_error': math.sqrt(sum(v * v for v in error)),
+                'observation_age': receipt_stamp - measurement_stamp,
+            })
+        self.pending_visual_observations = pending
 
     def _queue_prediction(
         self,
@@ -493,7 +661,10 @@ class InterceptEvaluatorNode(Node):
             for name, value in PlannerDiagnostic.__dict__.items()
             if name.isupper() and isinstance(value, int)
         }
-        return names.get(int(message.failure_reason), str(message.failure_reason))
+        return names.get(
+            int(message.failure_reason),
+            str(message.failure_reason),
+        )
 
     def planner_callback(self, message):
         self.latest_planner_diagnostic = message
@@ -652,12 +823,16 @@ class InterceptEvaluatorNode(Node):
             'detailed_diagnostics_enabled': (
                 self.detailed_diagnostics_enabled
             ),
+            'visual_evaluation_enabled': self.visual_evaluation_enabled,
+            'visual_observation_topic': self.visual_observation_topic,
         }
 
     def _start_mission(self, mission_id, now):
         self.evaluator.begin(mission_id, now)
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker.reset()
+        self.vision_metrics = VisionMetricAccumulator()
+        self.pending_visual_observations.clear()
         self.prediction_sequences.clear()
         self.shadow_prediction_sequences.clear()
         for values in self.prediction_errors.values():
@@ -678,6 +853,9 @@ class InterceptEvaluatorNode(Node):
         self.handover_jump_count = 0
         self.first_terminal_approach_result = ''
         self.minimum_body_clearance = math.inf
+        self.truth_motion_regime = 'UNKNOWN'
+        self.last_truth_heading = None
+        self.last_truth_heading_stamp = None
         self.safety_event_histogram = {
             name: 0
             for name in ('WARNING', 'BRAKE', 'UNRECOVERABLE', 'SEA_CONTACT')
@@ -690,6 +868,7 @@ class InterceptEvaluatorNode(Node):
             detailed_diagnostics_enabled=(
                 self.detailed_diagnostics_enabled
             ),
+            visual_evaluation_enabled=self.visual_evaluation_enabled,
         )
         self.result_published = False
 
@@ -981,7 +1160,9 @@ class InterceptEvaluatorNode(Node):
             summary[key] = {
                 'count': len(values),
                 'rmse': (
-                    math.sqrt(sum(value * value for value in values) / len(values))
+                    math.sqrt(
+                        sum(value * value for value in values) / len(values)
+                    )
                     if values else 0.0
                 ),
                 'p95': ordered[p95_index] if ordered else 0.0,
@@ -1055,6 +1236,7 @@ class InterceptEvaluatorNode(Node):
             summary['controller_callback_p50'] = 0.0
             summary['controller_callback_max'] = 0.0
         summary.update(self.event_metrics.summary(result.elapsed_time))
+        summary['vision'] = self.vision_metrics.summary()
         return summary
 
     def timer_callback(self):
@@ -1105,7 +1287,9 @@ class InterceptEvaluatorNode(Node):
         hit.data = bool(result.success)
         self.hit_pub.publish(hit)
         if self.gazebo_pauser is not None:
-            self.terminal_pause_result = self.gazebo_pauser.pause(result.reason)
+            self.terminal_pause_result = self.gazebo_pauser.pause(
+                result.reason
+            )
         else:
             from .gazebo_terminal import GazeboPauseResult
             self.terminal_pause_result = GazeboPauseResult(

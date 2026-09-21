@@ -29,6 +29,9 @@ from .planner_pipeline import PlanningRequestPolicy
 from .planner_pipeline import PredictionSample, PredictionSeries
 from .planner_pipeline import terminal_mode_for_plan
 from .planner_pipeline import evaluate_terminal_admission
+from .planner_pipeline import approach_preparation_errors
+from .planner_pipeline import planned_capture_window
+from .planner_pipeline import select_planning_start_state
 from .planner_pipeline import target_shift_distance
 from .planner_pipeline import UavKinematicState, validate_input
 from .planner_pipeline import validate_plan_arrival
@@ -47,6 +50,21 @@ class PlannerJobResult:
     locked_contact_unreachable: bool = False
     rejection_stage: str = ''
     rejection_detail: str = ''
+
+
+@dataclass(frozen=True)
+class ActivePlanReference:
+    """Planner-owned copy of a trajectory confirmed active by the tracker."""
+
+    plan: object
+    source_stamp: float
+
+    @property
+    def valid_until(self):
+        return self.source_stamp + float(self.plan.duration)
+
+    def sample_at_ros_time(self, stamp):
+        return self.plan.sample(float(stamp) - self.source_stamp)
 
 
 def _stamp_seconds(stamp):
@@ -111,6 +129,8 @@ def plan_to_message(
     remaining_t_go=None,
     terminal_mode=False,
     planned_capture_margin=0.0,
+    capture_entry_stamp=None,
+    capture_execution_margin=0.0,
 ):
     """Serialize a MINCO polynomial using its true execution start time."""
     message = InterceptTrajectory()
@@ -130,6 +150,9 @@ def plan_to_message(
     if remaining_t_go is None:
         remaining_t_go = plan.duration
     message.contact_stamp = seconds_to_time(contact_stamp)
+    if capture_entry_stamp is None:
+        capture_entry_stamp = contact_stamp
+    message.capture_entry_stamp = seconds_to_time(capture_entry_stamp)
     message.target_state_source = str(target_state_source)
     message.frame_id = str(frame_id)
     message.planner_type = str(plan.planner_type)
@@ -139,6 +162,7 @@ def plan_to_message(
     message.remaining_t_go = max(float(remaining_t_go), 0.0)
     message.terminal_mode = bool(terminal_mode)
     message.planned_capture_margin = float(planned_capture_margin)
+    message.capture_execution_margin = float(capture_execution_margin)
 
     segments = []
     coefficients = plan.minco_trajectory.coefficients
@@ -257,6 +281,18 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('endpoint_tolerance', 0.5)
         self.declare_parameter('approach_time_sync_tolerance', 0.35)
         self.declare_parameter('approach_reserve_clearance', 0.20)
+        self.declare_parameter(
+            'approach_preparation_standoff_speed',
+            1.5,
+        )
+        self.declare_parameter(
+            'approach_preparation_position_tolerance',
+            0.75,
+        )
+        self.declare_parameter(
+            'approach_preparation_velocity_tolerance',
+            0.75,
+        )
         self.declare_parameter('response_delay', 0.15)
         self.declare_parameter(
             'effective_vertical_braking_acceleration',
@@ -276,6 +312,21 @@ class InterceptPlannerNode(Node):
         )
         self.approach_reserve_clearance = float(
             self.get_parameter('approach_reserve_clearance').value
+        )
+        self.approach_preparation_standoff_speed = float(
+            self.get_parameter(
+                'approach_preparation_standoff_speed'
+            ).value
+        )
+        self.approach_preparation_position_tolerance = float(
+            self.get_parameter(
+                'approach_preparation_position_tolerance'
+            ).value
+        )
+        self.approach_preparation_velocity_tolerance = float(
+            self.get_parameter(
+                'approach_preparation_velocity_tolerance'
+            ).value
         )
         self.hard_deadline_seconds = float(
             self.get_parameter('deadline_seconds').value
@@ -423,6 +474,7 @@ class InterceptPlannerNode(Node):
             1.0 / completion_poll_rate_hz,
             self.completion_timer_callback,
         )
+        self.completion_poll_period = 1.0 / completion_poll_rate_hz
 
         self.latest_prediction = None
         self.latest_uav = None
@@ -433,13 +485,17 @@ class InterceptPlannerNode(Node):
         self.plan_id = 0
         self.completed_plan_count = 0
         self.completion_times = deque(maxlen=100)
+        self.solver_compute_times = deque(maxlen=30)
         self.request_slot = LatestRequestSlot()
         self.worker_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix='fast_minco',
         )
         self.future = None
+        self.ready_job = None
         self.last_submitted_key = None
+        self.active_plan_reference = None
+        self.published_plan_references = {}
         self.contact_schedule = ContactTimeSchedule(
             terminal_threshold=self.terminal_time_threshold,
             freeze_time=self.terminal_freeze_time,
@@ -481,6 +537,8 @@ class InterceptPlannerNode(Node):
             self.request_slot.take()
             self.last_submitted_key = None
             self.contact_schedule.reset()
+            self.active_plan_reference = None
+            self.published_plan_references.clear()
         elif (
             new_state in self.RECOVERY_STATES
             and old_state not in self.RECOVERY_STATES
@@ -489,6 +547,7 @@ class InterceptPlannerNode(Node):
             self.request_slot.take()
             self.last_submitted_key = None
             self.contact_schedule.cancel_pending()
+            self.active_plan_reference = None
         elif (
             old_state in self.RECOVERY_STATES
             and new_state == MissionState.FAR_GUIDANCE
@@ -497,6 +556,7 @@ class InterceptPlannerNode(Node):
             self.request_slot.take()
             self.last_submitted_key = None
             self.contact_schedule.reset()
+            self.active_plan_reference = None
         self.mission_id = new_mission_id
         self.mission_state = new_state
         self.intercept_requested = bool(
@@ -509,28 +569,62 @@ class InterceptPlannerNode(Node):
             return
         attempted_plan_id = int(message.attempted_plan_id)
         if message.status == 'PLAN_ACCEPTED':
-            self.contact_schedule.confirm(
+            confirmed = self.contact_schedule.confirm(
                 attempted_plan_id,
                 self.planning_cycle_id,
             )
+            references = getattr(self, 'published_plan_references', {})
+            reference = references.pop(
+                attempted_plan_id,
+                None,
+            )
+            if confirmed and reference is not None:
+                self.active_plan_reference = reference
         elif message.status == 'PLAN_REJECTED':
             self.contact_schedule.reject(
                 attempted_plan_id,
                 self.planning_cycle_id,
             )
+            getattr(self, 'published_plan_references', {}).pop(
+                attempted_plan_id,
+                None,
+            )
+
+    def _expected_handover_lead(self):
+        if self.solver_compute_times:
+            ordered = sorted(self.solver_compute_times)
+            index = max(math.ceil(0.90 * len(ordered)) - 1, 0)
+            compute = ordered[index]
+        else:
+            compute = min(self.planner.deadline_seconds, 0.05)
+        return min(
+            compute + self.completion_poll_period,
+            self.hard_deadline_seconds,
+        )
 
     def _current_request(self, decision):
         if self.latest_prediction is None or self.latest_uav is None:
             return None
+        boundary = self.latest_uav
+        active_reference = getattr(self, 'active_plan_reference', None)
+        if active_reference is not None:
+            boundary = select_planning_start_state(
+                measured_state=self.latest_uav,
+                active_trajectory=active_reference,
+                expected_handover_stamp=(
+                    self._ros_seconds() + self._expected_handover_lead()
+                ),
+            )
         return PlannerRequest(
             mission_id=self.mission_id,
             prediction=self.latest_prediction,
-            uav=self.latest_uav,
-            trajectory_start_stamp=self.latest_uav.stamp,
+            uav=boundary,
+            trajectory_start_stamp=boundary.stamp,
             contact_stamp=self.contact_schedule.contact_stamp,
             terminal_mode=decision.terminal_mode,
             minimum_duration=decision.minimum_duration,
             planning_cycle_id=getattr(self, 'planning_cycle_id', 0),
+            uav_source_stamp=self.latest_uav.stamp,
         )
 
     def _run_request(self, request):
@@ -707,6 +801,10 @@ class InterceptPlannerNode(Node):
         candidate_contact_stamp = None
         contact_delay = math.nan
         target_prediction_shift = math.nan
+        capture_entry_stamp = math.nan
+        capture_execution_margin = -math.inf
+        preparation_position_error = math.inf
+        preparation_velocity_error = math.inf
         contact_recovery_reason = ''
         rejection_stage = job.rejection_stage
         rejection_detail = job.rejection_detail
@@ -856,9 +954,11 @@ class InterceptPlannerNode(Node):
                 terminal_state=MissionState.TERMINAL_MINCO,
             )
             try:
-                target_position = job.request.prediction.state_at_absolute_time(
-                    contact_stamp
-                )[0]
+                target_position = (
+                    job.request.prediction.state_at_absolute_time(
+                        contact_stamp
+                    )[0]
+                )
                 terminal_position = outcome.plan.sample(
                     outcome.plan.duration
                 ).position
@@ -874,6 +974,39 @@ class InterceptPlannerNode(Node):
                 )
             except (TypeError, ValueError):
                 planned_capture_margin = -math.inf
+            try:
+                capture_window = planned_capture_window(
+                    outcome.plan,
+                    job.request.prediction,
+                    job.request.trajectory_start_stamp,
+                    self.planned_capture_radius,
+                    sample_step=self.planner.sample_step,
+                )
+                capture_entry_stamp = (
+                    job.request.trajectory_start_stamp
+                    + capture_window.first_entry_t_go
+                )
+                capture_execution_margin = (
+                    capture_window.execution_margin
+                )
+                target_start = (
+                    job.request.prediction.state_at_absolute_time(
+                        job.request.trajectory_start_stamp
+                    )
+                )
+                (
+                    preparation_position_error,
+                    preparation_velocity_error,
+                ) = approach_preparation_errors(
+                    uav_position=job.request.uav.position,
+                    uav_velocity=job.request.uav.velocity,
+                    target_position=target_start[0],
+                    target_velocity=target_start[1],
+                    vertical_time=outcome.diagnostics.vertical_min_time,
+                    standoff_speed=self.approach_preparation_standoff_speed,
+                )
+            except (TypeError, ValueError):
+                capture_execution_margin = -math.inf
 
         if (
             outcome.plan is not None
@@ -904,6 +1037,15 @@ class InterceptPlannerNode(Node):
                     'approach_time_sync_tolerance',
                     0.35,
                 ),
+                preparation_position_error=preparation_position_error,
+                preparation_velocity_error=preparation_velocity_error,
+                preparation_position_tolerance=(
+                    self.approach_preparation_position_tolerance
+                ),
+                preparation_velocity_tolerance=(
+                    self.approach_preparation_velocity_tolerance
+                ),
+                capture_execution_margin=capture_execution_margin,
             )
             terminal_admission = admission.admitted
             terminal_admission_reason = admission.reason
@@ -913,6 +1055,7 @@ class InterceptPlannerNode(Node):
         )
 
         self.completed_plan_count += 1
+        self.solver_compute_times.append(job.compute_time)
         self.completion_times.append(time.monotonic())
         self.plan_id += 1
         candidate_published = False
@@ -988,10 +1131,23 @@ class InterceptPlannerNode(Node):
         if outcome.plan is not None:
             message.selected_t_go = float(outcome.plan.duration)
             message.contact_stamp = seconds_to_time(contact_stamp)
+            if math.isfinite(capture_entry_stamp):
+                message.capture_entry_stamp = seconds_to_time(
+                    capture_entry_stamp
+                )
             message.remaining_t_go = float(remaining_t_go)
             message.terminal_mode = bool(terminal_mode)
             message.planned_capture_margin = float(
                 planned_capture_margin
+            )
+            message.capture_execution_margin = float(
+                capture_execution_margin
+            )
+            message.preparation_position_error = float(
+                preparation_position_error
+            )
+            message.preparation_velocity_error = float(
+                preparation_velocity_error
             )
 
         message.required_time = float(
@@ -1059,11 +1215,31 @@ class InterceptPlannerNode(Node):
                 remaining_t_go=remaining_t_go,
                 terminal_mode=terminal_mode,
                 planned_capture_margin=planned_capture_margin,
+                capture_entry_stamp=capture_entry_stamp,
+                capture_execution_margin=capture_execution_margin,
             )
             trajectory.published_stamp = seconds_to_time(publish_stamp)
+            self.published_plan_references[self.plan_id] = (
+                ActivePlanReference(
+                    plan=outcome.plan,
+                    source_stamp=job.request.trajectory_start_stamp,
+                )
+            )
+            while len(self.published_plan_references) > 4:
+                oldest = min(self.published_plan_references)
+                self.published_plan_references.pop(oldest, None)
             self.trajectory_pub.publish(trajectory)
 
     def completion_timer_callback(self):
+        if self.ready_job is not None:
+            if self._ros_seconds() + 1e-9 < (
+                self.ready_job.request.trajectory_start_stamp
+            ):
+                return
+            job = self.ready_job
+            self.ready_job = None
+            self._publish_job(job)
+            return
         if self.future is None or not self.future.done():
             return
 
@@ -1079,6 +1255,13 @@ class InterceptPlannerNode(Node):
             )
             return
 
+        if (
+            job.outcome.plan is not None
+            and self._ros_seconds() + 1e-9
+            < job.request.trajectory_start_stamp
+        ):
+            self.ready_job = job
+            return
         self._publish_job(job)
 
     def _planning_tick(self, terminal_tick):
@@ -1118,7 +1301,7 @@ class InterceptPlannerNode(Node):
             if key != self.last_submitted_key:
                 self.request_slot.submit(current)
                 self.last_submitted_key = key
-        if self.future is None:
+        if self.future is None and getattr(self, 'ready_job', None) is None:
             request = self.request_slot.take()
             if request is not None:
                 self.future = self.worker_executor.submit(

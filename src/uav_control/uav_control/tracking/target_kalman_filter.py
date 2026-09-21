@@ -281,6 +281,9 @@ class TargetKalmanFilterNode(Node):
 
         state_message = TargetState()
         state_message.stamp = now.to_msg()
+        state_message.source_stamp = Time(
+            nanoseconds=self.last_measurement_time_ns
+        ).to_msg()
         state_message.frame_id = self.frame_id
 
         state_message.position.x = float(

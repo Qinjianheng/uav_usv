@@ -143,6 +143,183 @@ def _percentile(values, fraction):
     return ordered[index]
 
 
+def _error_summary(values):
+    values = [float(value) for value in values]
+    return {
+        'count': len(values),
+        'p50': _percentile(values, 0.50),
+        'p95': _percentile(values, 0.95),
+        'rmse': (
+            math.sqrt(sum(value * value for value in values) / len(values))
+            if values else 0.0
+        ),
+    }
+
+
+class VisionMetricAccumulator:
+    """Keep event-based raw RGB-D and current KF errors separate."""
+
+    def __init__(self):
+        self._camera = {}
+        self._strata = {}
+        self._kf_position = []
+        self._kf_velocity = []
+        self._kf_ages = []
+
+    @staticmethod
+    def _camera_name(source):
+        source = str(source).lower()
+        if source.startswith('down') or '/down' in source:
+            return 'down'
+        return 'front'
+
+    def observe_raw(
+        self,
+        source,
+        measurement_stamp,
+        receipt_stamp,
+        estimate,
+        truth,
+        valid,
+        distance_bin='UNKNOWN',
+        motion_regime='UNKNOWN',
+        approach_phase='UNKNOWN',
+    ):
+        camera = self._camera_name(source)
+        values = self._camera.setdefault(camera, {
+            'total': 0,
+            'valid': 0,
+            'axis_x': [],
+            'axis_y': [],
+            'axis_z': [],
+            'horizontal': [],
+            'position_3d': [],
+            'ages': [],
+            'loss_started_at': None,
+            'longest_loss': 0.0,
+        })
+        values['total'] += 1
+        stratum_key = (
+            camera,
+            str(distance_bin),
+            str(motion_regime),
+            str(approach_phase),
+        )
+        stratum = self._strata.setdefault(stratum_key, {
+            'total': 0,
+            'valid': 0,
+            'position_3d': [],
+            'ages': [],
+        })
+        stratum['total'] += 1
+        if not valid:
+            stamp = float(measurement_stamp)
+            if not math.isfinite(stamp) or stamp <= 0.0:
+                stamp = float(receipt_stamp)
+            if math.isfinite(stamp) and stamp > 0.0:
+                if values['loss_started_at'] is None:
+                    values['loss_started_at'] = stamp
+            return
+        error = tuple(
+            float(left) - float(right)
+            for left, right in zip(estimate, truth)
+        )
+        if len(error) != 3 or not all(map(math.isfinite, error)):
+            return
+        age = float(receipt_stamp) - float(measurement_stamp)
+        if not math.isfinite(age) or age < 0.0:
+            return
+        values['valid'] += 1
+        stratum['valid'] += 1
+        if values['loss_started_at'] is not None:
+            values['longest_loss'] = max(
+                values['longest_loss'],
+                float(receipt_stamp) - values['loss_started_at'],
+            )
+            values['loss_started_at'] = None
+        values['axis_x'].append(abs(error[0]))
+        values['axis_y'].append(abs(error[1]))
+        values['axis_z'].append(abs(error[2]))
+        values['horizontal'].append(math.hypot(error[0], error[1]))
+        values['position_3d'].append(_norm(error))
+        values['ages'].append(age)
+        stratum['position_3d'].append(_norm(error))
+        stratum['ages'].append(age)
+
+    def observe_kf(
+        self,
+        stamp,
+        position,
+        velocity,
+        truth_position,
+        truth_velocity,
+        source_stamp=None,
+    ):
+        position_error = tuple(
+            float(left) - float(right)
+            for left, right in zip(position, truth_position)
+        )
+        velocity_error = tuple(
+            float(left) - float(right)
+            for left, right in zip(velocity, truth_velocity)
+        )
+        if (
+            len(position_error) == 3
+            and all(map(math.isfinite, position_error))
+        ):
+            self._kf_position.append(_norm(position_error))
+        if (
+            len(velocity_error) == 3
+            and all(map(math.isfinite, velocity_error))
+        ):
+            self._kf_velocity.append(_norm(velocity_error))
+        if source_stamp is not None:
+            age = float(stamp) - float(source_stamp)
+            if math.isfinite(age) and age >= 0.0:
+                self._kf_ages.append(age)
+
+    def summary(self):
+        summary = {}
+        for camera, values in sorted(self._camera.items()):
+            summary[camera] = {
+                'observation_count': values['total'],
+                'valid_observation_count': values['valid'],
+                'valid_observation_rate': (
+                    values['valid'] / values['total']
+                    if values['total'] else 0.0
+                ),
+                'raw_position_x': _error_summary(values['axis_x']),
+                'raw_position_y': _error_summary(values['axis_y']),
+                'raw_position_z': _error_summary(values['axis_z']),
+                'raw_position_horizontal': _error_summary(
+                    values['horizontal']
+                ),
+                'raw_position_3d': _error_summary(values['position_3d']),
+                'observation_age': _error_summary(values['ages']),
+                'longest_continuous_loss': values['longest_loss'],
+            }
+        summary['kf_position_3d'] = _error_summary(self._kf_position)
+        summary['kf_velocity_3d'] = _error_summary(self._kf_velocity)
+        summary['kf_state_age'] = _error_summary(self._kf_ages)
+        summary['strata'] = [
+            {
+                'camera': key[0],
+                'distance_bin': key[1],
+                'motion_regime': key[2],
+                'approach_phase': key[3],
+                'observation_count': values['total'],
+                'valid_observation_rate': (
+                    values['valid'] / values['total']
+                    if values['total'] else 0.0
+                ),
+                'raw_position_3d': _error_summary(values['position_3d']),
+                'observation_age': _error_summary(values['ages']),
+            }
+            for key, values in sorted(self._strata.items())
+        ]
+        return summary
+
+
 class PlannerEventAccumulator:
     """Count each planner event once rather than once per control sample."""
 
@@ -589,7 +766,7 @@ class InterceptEvaluatorCore:
         return self.result
 
     def update(self, now, uav, target):
-        """Consume one synchronized truth sample and return a terminal event."""
+        """Consume synchronized truth and return a terminal event."""
         if self.started_at is None or self.result is not None:
             return self.result
         now = float(now)
@@ -673,6 +850,7 @@ class ArtifactPaths:
     summary_path: Path
     config_path: Path
     diagnostics_path: Path = None
+    visual_path: Path = None
 
 
 class ExperimentArtifactWriter:
@@ -711,6 +889,18 @@ class ExperimentArtifactWriter:
         'shadow_bctra_prediction_1p0_error',
         'shadow_bctra_prediction_2p0_error',
     )
+    VISUAL_FIELDS = (
+        'measurement_stamp', 'receipt_stamp', 'processed_stamp',
+        'published_stamp', 'source', 'valid', 'rejection_reason',
+        'approach_phase', 'distance_bin', 'motion_regime',
+        'confidence', 'red_pixel_count', 'valid_depth_ratio',
+        'target_range', 'view_angle',
+        'position_x', 'position_y', 'position_z',
+        'covariance_xx', 'covariance_yy', 'covariance_zz',
+        'truth_x', 'truth_y', 'truth_z',
+        'error_x', 'error_y', 'error_z',
+        'horizontal_error', 'position_3d_error', 'observation_age',
+    )
 
     def __init__(
         self,
@@ -719,6 +909,7 @@ class ExperimentArtifactWriter:
         config,
         prefix=None,
         detailed_diagnostics_enabled=False,
+        visual_evaluation_enabled=False,
     ):
         directory = Path(log_directory).expanduser()
         directory.mkdir(parents=True, exist_ok=True)
@@ -735,6 +926,10 @@ class ExperimentArtifactWriter:
                 directory / f'{stem}_diagnostics.jsonl'
                 if detailed_diagnostics_enabled else None
             ),
+            visual_path=(
+                directory / f'{stem}_vision.csv'
+                if visual_evaluation_enabled else None
+            ),
         )
         self.mission_id = int(mission_id)
         self._stream = self.paths.csv_path.open(
@@ -750,9 +945,27 @@ class ExperimentArtifactWriter:
         )
         self._writer.writeheader()
         self._diagnostics_stream = (
-            self.paths.diagnostics_path.open('x', encoding='utf-8', buffering=1)
+            self.paths.diagnostics_path.open(
+                'x', encoding='utf-8', buffering=1
+            )
             if self.paths.diagnostics_path is not None else None
         )
+        self._visual_stream = (
+            self.paths.visual_path.open(
+                'x', newline='', encoding='utf-8', buffering=1
+            )
+            if self.paths.visual_path is not None else None
+        )
+        self._visual_writer = (
+            csv.DictWriter(
+                self._visual_stream,
+                fieldnames=self.VISUAL_FIELDS,
+                extrasaction='ignore',
+            )
+            if self._visual_stream is not None else None
+        )
+        if self._visual_writer is not None:
+            self._visual_writer.writeheader()
         with self.paths.config_path.open('x', encoding='utf-8') as stream:
             json.dump(config, stream, ensure_ascii=False, indent=2)
             stream.write('\n')
@@ -780,6 +993,15 @@ class ExperimentArtifactWriter:
         )
         return True
 
+    def append_visual_event(self, values):
+        """Write one RGB-D observation event, never one copy per sample."""
+        if self._finalized:
+            raise RuntimeError('experiment artifacts are already finalized')
+        if self._visual_writer is None:
+            return False
+        self._visual_writer.writerow(dict(values))
+        return True
+
     def finalize(self, summary):
         """Write exactly one summary and close the line-buffered CSV."""
         if self._finalized:
@@ -792,5 +1014,7 @@ class ExperimentArtifactWriter:
         self._stream.close()
         if self._diagnostics_stream is not None:
             self._diagnostics_stream.close()
+        if self._visual_stream is not None:
+            self._visual_stream.close()
         self._finalized = True
         return self.paths

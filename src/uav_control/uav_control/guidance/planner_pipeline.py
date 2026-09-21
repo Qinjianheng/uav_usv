@@ -111,11 +111,26 @@ class PlannerRequest:
     terminal_mode: bool = False
     minimum_duration: float = None
     planning_cycle_id: int = 0
+    uav_source_stamp: float = None
 
     @property
     def source_stamp(self):
-        """Return the oldest input stamp so newer data cannot hide staleness."""
-        return min(self.prediction.source_stamp, self.uav.stamp)
+        """Return the oldest input stamp without hiding staleness."""
+        state_stamp = (
+            self.uav.stamp
+            if self.uav_source_stamp is None
+            else float(self.uav_source_stamp)
+        )
+        return min(self.prediction.source_stamp, state_stamp)
+
+    @property
+    def state_source_stamp(self):
+        """Return measurement time even when the boundary is future-dated."""
+        return (
+            self.uav.stamp
+            if self.uav_source_stamp is None
+            else float(self.uav_source_stamp)
+        )
 
 
 class LatestRequestSlot:
@@ -158,6 +173,15 @@ class TerminalAdmissionDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class PlannedCaptureWindow:
+    """Planned first capture entry and remaining executable trajectory time."""
+
+    first_entry_t_go: float
+    trajectory_end_t_go: float
+    execution_margin: float
+
+
 def evaluate_terminal_admission(
     horizontal_min_time,
     vertical_min_time,
@@ -172,6 +196,11 @@ def evaluate_terminal_admission(
     braking_acceleration,
     maximum_vertical_speed,
     time_sync_tolerance,
+    preparation_position_error=0.0,
+    preparation_velocity_error=0.0,
+    preparation_position_tolerance=math.inf,
+    preparation_velocity_tolerance=math.inf,
+    capture_execution_margin=math.inf,
 ):
     """Gate the first descent on synchronized reachability and sea margin."""
     values = (
@@ -191,6 +220,18 @@ def evaluate_terminal_admission(
         return TerminalAdmissionDecision(False, 'CONTACT_TIME_UNREACHABLE')
     if horizontal_min_time > vertical_min_time + time_sync_tolerance:
         return TerminalAdmissionDecision(False, 'HORIZONTAL_NOT_READY')
+    if (
+        float(preparation_position_error)
+        > float(preparation_position_tolerance)
+        or float(preparation_velocity_error)
+        > float(preparation_velocity_tolerance)
+    ):
+        return TerminalAdmissionDecision(
+            False,
+            'HORIZONTAL_PREPARATION_NOT_READY',
+        )
+    if float(capture_execution_margin) + 1e-9 < float(response_delay):
+        return TerminalAdmissionDecision(False, 'CAPTURE_WINDOW_INSUFFICIENT')
     safety = apply_sea_safety_guard(
         current_z=current_z,
         current_vz=current_vz,
@@ -205,6 +246,130 @@ def evaluate_terminal_admission(
     if safety.unrecoverable or safety.response_margin <= 0.0:
         return TerminalAdmissionDecision(False, 'SEA_MARGIN_INSUFFICIENT')
     return TerminalAdmissionDecision(True, 'ADMITTED')
+
+
+def planned_capture_window(
+    plan,
+    prediction,
+    trajectory_start_stamp,
+    capture_radius,
+    sample_step=0.02,
+):
+    """Find first predicted capture entry without extending trajectory life."""
+    duration = float(plan.duration)
+    radius = float(capture_radius)
+    step = max(float(sample_step), 1e-3)
+    if duration <= 0.0 or radius <= 0.0:
+        raise ValueError('capture window inputs must be positive')
+
+    def distance_at(relative_time):
+        planned = plan.sample(relative_time).position
+        target = prediction.state_at_absolute_time(
+            float(trajectory_start_stamp) + float(relative_time)
+        )[0]
+        return math.sqrt(sum(
+            (float(left) - float(right)) ** 2
+            for left, right in zip(planned, target)
+        ))
+
+    sample_count = max(int(math.ceil(duration / step)), 1)
+    previous_time = 0.0
+    previous_distance = distance_at(previous_time)
+    first_entry = 0.0 if previous_distance <= radius else None
+    for index in range(1, sample_count + 1):
+        current_time = duration * index / sample_count
+        current_distance = distance_at(current_time)
+        if first_entry is None and current_distance <= radius:
+            left = previous_time
+            right = current_time
+            for _ in range(24):
+                middle = 0.5 * (left + right)
+                if distance_at(middle) <= radius:
+                    right = middle
+                else:
+                    left = middle
+            first_entry = right
+            break
+        previous_time = current_time
+        previous_distance = current_distance
+
+    if first_entry is None:
+        first_entry = math.inf
+        margin = -math.inf
+    else:
+        margin = duration - first_entry
+    return PlannedCaptureWindow(
+        first_entry_t_go=first_entry,
+        trajectory_end_t_go=duration,
+        execution_margin=margin,
+    )
+
+
+def approach_preparation_errors(
+    uav_position,
+    uav_velocity,
+    target_position,
+    target_velocity,
+    vertical_time,
+    standoff_speed,
+):
+    """Measure error to the moving, reachability-sized preparation state."""
+    target_speed = math.hypot(target_velocity[0], target_velocity[1])
+    if target_speed > 1e-6:
+        direction = (
+            target_velocity[0] / target_speed,
+            target_velocity[1] / target_speed,
+        )
+    else:
+        delta = (
+            target_position[0] - uav_position[0],
+            target_position[1] - uav_position[1],
+        )
+        distance = math.hypot(*delta)
+        direction = (
+            (delta[0] / distance, delta[1] / distance)
+            if distance > 1e-6 else (1.0, 0.0)
+        )
+    standoff = max(float(vertical_time), 0.0) * max(
+        float(standoff_speed), 0.0
+    )
+    preparation = (
+        target_position[0] - standoff * direction[0],
+        target_position[1] - standoff * direction[1],
+    )
+    position_error = math.hypot(
+        uav_position[0] - preparation[0],
+        uav_position[1] - preparation[1],
+    )
+    velocity_error = math.hypot(
+        uav_velocity[0] - target_velocity[0],
+        uav_velocity[1] - target_velocity[1],
+    )
+    return position_error, velocity_error
+
+
+def select_planning_start_state(
+    measured_state,
+    active_trajectory,
+    expected_handover_stamp,
+):
+    """Use the old trajectory reference at handover, else measured state."""
+    stamp = float(expected_handover_stamp)
+    if (
+        active_trajectory is None
+        or stamp >= float(active_trajectory.valid_until)
+    ):
+        return measured_state
+    try:
+        reference = active_trajectory.sample_at_ros_time(stamp)
+    except (TypeError, ValueError):
+        return measured_state
+    return UavKinematicState(
+        stamp=stamp,
+        position=tuple(reference.position),
+        velocity=tuple(reference.velocity),
+        acceleration=tuple(reference.acceleration),
+    )
 
 
 def terminal_mode_for_plan(
@@ -352,7 +517,7 @@ class ContactTimeSchedule:
         return True
 
     def expire(self, now, timeout):
-        """Expire an unacknowledged proposal without changing committed state."""
+        """Expire an unacknowledged proposal without changing the contact."""
         if not self.has_pending or self.pending_since is None:
             return False
         if float(now) - self.pending_since <= float(timeout):
@@ -401,7 +566,7 @@ def validate_input(request, now, maximum_age):
     now = float(now)
     maximum_age = float(maximum_age)
     prediction_age = now - request.prediction.source_stamp
-    state_age = now - request.uav.stamp
+    state_age = now - request.state_source_stamp
     if prediction_age < 0.0 or prediction_age > maximum_age:
         return FastPlanningFailure.PREDICTION_STALE
     if state_age < 0.0 or state_age > maximum_age:

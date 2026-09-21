@@ -272,6 +272,12 @@ intercept_planner_node:
     # has converged to the same time scale as the vertical descent.
     approach_time_sync_tolerance: 0.35
     approach_reserve_clearance: 0.20
+    # FAR_GUIDANCE must converge on the moving, vertical-time-sized standoff
+    # before the first descent can be admitted.  These are joint position and
+    # relative-velocity checks inside the existing full MINCO/safety gate.
+    approach_preparation_standoff_speed: 1.5
+    approach_preparation_position_tolerance: 0.75
+    approach_preparation_velocity_tolerance: 0.75
     response_delay: 0.15
     effective_vertical_braking_acceleration: 2.5
     quadrature_intervals_per_piece: 6
@@ -388,6 +394,8 @@ intercept_evaluator_node:
     body_lower_extent: 0.23
     maximum_duration: 30.0
     detailed_diagnostics_enabled: false
+    visual_evaluation_enabled: true
+    visual_observation_topic: /perception/front/target_observation
     log_directory: data/experiments/current
     # Simulation truth is consumed only by this evaluator and by the explicitly
     # configured truth-control baseline predictor.
@@ -426,6 +434,8 @@ rgbd_target_localizer:
     minimum_depth_ratio: 0.5
     maximum_rgb_depth_skew: 0.1
     data_timeout: 0.5
+    state_history_duration: 1.0
+    maximum_clock_offset_jump: 0.05
     localization_rate_hz: 10.0
     camera_pitch_down: 0.20944
     camera_translation_x: 0.35

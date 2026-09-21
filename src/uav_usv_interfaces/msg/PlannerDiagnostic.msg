@@ -44,9 +44,13 @@ float64 target_prediction_shift
 bool candidate_published
 float64 selected_t_go
 builtin_interfaces/Time contact_stamp
+builtin_interfaces/Time capture_entry_stamp
 float64 remaining_t_go
 bool terminal_mode
 float64 planned_capture_margin
+float64 capture_execution_margin
+float64 preparation_position_error
+float64 preparation_velocity_error
 float64 required_time
 float64 horizontal_min_time
 float64 vertical_min_time

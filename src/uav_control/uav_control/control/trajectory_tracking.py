@@ -99,10 +99,12 @@ class PolynomialTrajectory:
     target_state_source: str
     frame_id: str = 'local_ned'
     contact_stamp: float = 0.0
+    capture_entry_stamp: float = 0.0
     selected_t_go: float = 0.0
     remaining_t_go: float = 0.0
     terminal_mode: bool = False
     planned_capture_margin: float = 0.0
+    capture_execution_margin: float = 0.0
 
     @property
     def duration(self):
@@ -115,7 +117,10 @@ class PolynomialTrajectory:
             raise ValueError('trajectory must contain at least one segment')
         remaining = min(max(float(elapsed), 0.0), self.duration)
         for index, segment in enumerate(self.segments):
-            if remaining <= segment.duration or index == len(self.segments) - 1:
+            if (
+                remaining <= segment.duration
+                or index == len(self.segments) - 1
+            ):
                 return segment.sample(remaining)
             remaining -= segment.duration
         raise RuntimeError('trajectory sampling failed')
@@ -198,10 +203,14 @@ class TrajectoryTrackerCore:
         # only a lower bound, a long gap (mode switch, plan loss) authorised a
         # command jump of acceleration_limit * gap, which PX4 answers with a
         # real acceleration far above the configured limit.
-        self.maximum_command_dt = max(float(maximum_command_dt), self.control_dt)
+        self.maximum_command_dt = max(
+            float(maximum_command_dt),
+            self.control_dt,
+        )
         # The configured acceleration limits bound the COMMAND.  PX4 answers a
-        # bounded command with its own loop acceleration on top, which measured
-        # 1.8-1.9x the commanded rate (3.0 m/s^2 commanded -> 5.3 m/s^2 actual),
+        # bounded command with its own loop acceleration on top, which
+        # measured 1.8-1.9x the commanded rate (3.0 m/s^2 commanded ->
+        # 5.3 m/s^2 actual),
         # so the plant-side budget has to be enforced separately.
         self.maximum_actual_vertical_acceleration = max(
             float(maximum_actual_vertical_acceleration),

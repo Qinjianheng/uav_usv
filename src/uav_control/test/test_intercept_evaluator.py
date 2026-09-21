@@ -1,4 +1,5 @@
 import json
+import math
 
 import pytest
 
@@ -7,6 +8,7 @@ from uav_control.evaluation.intercept_evaluator import ExperimentArtifactWriter
 from uav_control.evaluation.intercept_evaluator import InterceptEvaluatorCore
 from uav_control.evaluation.intercept_evaluator import KinematicState
 from uav_control.evaluation.intercept_evaluator import PlannerEventAccumulator
+from uav_control.evaluation.intercept_evaluator import VisionMetricAccumulator
 
 
 def state(position, velocity=(0.0, 0.0, 0.0)):
@@ -26,9 +28,89 @@ def test_daily_csv_keeps_decision_fields_and_moves_verbose_planner_detail():
     assert 'terminal_admission' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'terminal_admission_reason' in ExperimentArtifactWriter.CSV_FIELDS
     assert 'body_clearance' in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_candidate_diagnostics' not in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_rejection_detail' not in ExperimentArtifactWriter.CSV_FIELDS
-    assert 'planner_planning_cycle_id' not in ExperimentArtifactWriter.CSV_FIELDS
+    fields = ExperimentArtifactWriter.CSV_FIELDS
+    assert 'planner_candidate_diagnostics' not in fields
+    assert 'planner_rejection_detail' not in fields
+    assert 'planner_planning_cycle_id' not in fields
+
+
+def test_visual_metrics_keep_raw_and_kf_errors_separate():
+    metrics = VisionMetricAccumulator()
+    metrics.observe_raw(
+        source='front_rgbd_red_sphere',
+        measurement_stamp=10.0,
+        receipt_stamp=10.04,
+        estimate=(1.2, 1.8, 0.1),
+        truth=(1.0, 2.0, 0.0),
+        valid=True,
+        distance_bin='MID',
+        motion_regime='TURNING',
+        approach_phase='PREPARATION',
+    )
+    metrics.observe_kf(
+        stamp=10.0,
+        position=(1.1, 2.0, 0.0),
+        velocity=(3.5, 0.0, 0.0),
+        truth_position=(1.0, 2.0, 0.0),
+        truth_velocity=(4.0, 0.0, 0.0),
+    )
+
+    summary = metrics.summary()
+
+    assert summary['front']['valid_observation_rate'] == pytest.approx(1.0)
+    assert summary['front']['raw_position_3d']['count'] == 1
+    assert summary['front']['raw_position_horizontal']['count'] == 1
+    assert summary['front']['observation_age']['p50'] == pytest.approx(0.04)
+    assert summary['strata'][0]['camera'] == 'front'
+    assert summary['strata'][0]['distance_bin'] == 'MID'
+    assert summary['strata'][0]['motion_regime'] == 'TURNING'
+    assert summary['strata'][0]['approach_phase'] == 'PREPARATION'
+    assert summary['strata'][0]['raw_position_3d']['count'] == 1
+    assert summary['kf_position_3d']['count'] == 1
+    assert summary['kf_velocity_3d']['rmse'] == pytest.approx(0.5)
+
+
+def test_visual_loss_duration_counts_explicit_invalid_interval_only():
+    metrics = VisionMetricAccumulator()
+    metrics.observe_raw(
+        source='front', measurement_stamp=10.0, receipt_stamp=10.0,
+        estimate=(0.0, 0.0, 0.0), truth=(0.0, 0.0, 0.0), valid=True,
+    )
+    metrics.observe_raw(
+        source='front', measurement_stamp=0.0, receipt_stamp=10.5,
+        estimate=(math.nan,) * 3, truth=(math.nan,) * 3, valid=False,
+    )
+    metrics.observe_raw(
+        source='front', measurement_stamp=11.0, receipt_stamp=11.1,
+        estimate=(0.0, 0.0, 0.0), truth=(0.0, 0.0, 0.0), valid=True,
+    )
+
+    assert metrics.summary()['front']['longest_continuous_loss'] == (
+        pytest.approx(0.6)
+    )
+
+
+def test_optional_visual_event_file_is_event_based(tmp_path):
+    writer = ExperimentArtifactWriter(
+        tmp_path,
+        mission_id=3,
+        config={},
+        prefix='vision',
+        visual_evaluation_enabled=True,
+    )
+
+    assert writer.append_visual_event({
+        'measurement_stamp': 10.0,
+        'receipt_stamp': 10.04,
+        'source': 'front_rgbd_red_sphere',
+        'valid': True,
+    })
+    paths = writer.finalize({'outcome': 'TEST'})
+
+    lines = paths.visual_path.read_text(encoding='utf-8').splitlines()
+    assert len(lines) == 2
+    assert 'measurement_stamp' in lines[0]
+    assert 'front_rgbd_red_sphere' in lines[1]
 
 
 def test_capture_is_detected_between_truth_samples():
@@ -58,7 +140,7 @@ def test_capture_is_detected_between_truth_samples():
 
 
 def test_async_truth_histories_are_interpolated_before_capture_evaluation():
-    """Catch false misses caused by pairing latest samples from different times."""
+    """Catch misses from pairing latest samples at different times."""
     uav_history = intercept_evaluator.TimestampedStateHistory(0.25)
     target_history = intercept_evaluator.TimestampedStateHistory(0.25)
     # Same isolation as above: this test is about history interpolation.

@@ -8,9 +8,11 @@ USV detector replaces the color mask.
 
 import math
 import time
+from collections import deque
 
 import numpy as np
 import rclpy
+from builtin_interfaces.msg import Time
 from geometry_msgs.msg import Point
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from rclpy.node import Node
@@ -29,6 +31,136 @@ from .front_tof_monitor import (
     decode_float32_depth,
     red_pixel_mask,
 )
+
+
+def validated_sensor_stamp(measurement_stamp, receipt_stamp, maximum_age):
+    """Accept only acquisition stamps demonstrably in the ROS clock domain."""
+    measurement_stamp = float(measurement_stamp)
+    receipt_stamp = float(receipt_stamp)
+    maximum_age = max(float(maximum_age), 0.0)
+    if (
+        not math.isfinite(measurement_stamp)
+        or not math.isfinite(receipt_stamp)
+        or measurement_stamp <= 0.0
+    ):
+        return None
+    age = receipt_stamp - measurement_stamp
+    if age < -1e-9 or age > maximum_age + 1e-9:
+        return None
+    return measurement_stamp
+
+
+def synchronized_measurement_time(color_stamp, depth_stamp, maximum_skew):
+    """Return the midpoint acquisition time for a valid RGB/depth pair."""
+    color_stamp = float(color_stamp)
+    depth_stamp = float(depth_stamp)
+    if (
+        not math.isfinite(color_stamp)
+        or not math.isfinite(depth_stamp)
+        or abs(color_stamp - depth_stamp) > float(maximum_skew) + 1e-9
+    ):
+        return None
+    return 0.5 * (color_stamp + depth_stamp)
+
+
+def due_data_timeout(now, latest_receipt, last_report, timeout):
+    """Report a missing image only after timeout and at a bounded rate."""
+    timeout = max(float(timeout), 1e-3)
+    return (
+        float(now) - float(latest_receipt) > timeout
+        and float(now) - float(last_report) >= timeout
+    )
+
+
+class TimestampedVectorHistory:
+    """Interpolate a bounded monotonic history without extrapolation."""
+
+    def __init__(self, maximum_age=1.0):
+        self.maximum_age = max(float(maximum_age), 1e-3)
+        self._samples = deque()
+
+    @property
+    def latest_value(self):
+        return self._samples[-1][1] if self._samples else None
+
+    def add(self, stamp, value):
+        stamp = float(stamp)
+        value = tuple(float(component) for component in value)
+        if not math.isfinite(stamp) or not all(map(math.isfinite, value)):
+            return False
+        if self._samples and stamp < self._samples[-1][0] - 1e-9:
+            return False
+        if self._samples and abs(stamp - self._samples[-1][0]) <= 1e-9:
+            self._samples[-1] = stamp, value
+        else:
+            self._samples.append((stamp, value))
+        cutoff = stamp - self.maximum_age
+        while len(self._samples) > 2 and self._samples[1][0] < cutoff:
+            self._samples.popleft()
+        return True
+
+    def value_at(self, stamp):
+        stamp = float(stamp)
+        if not self._samples:
+            return None
+        if (
+            stamp < self._samples[0][0] - 1e-9
+            or stamp > self._samples[-1][0] + 1e-9
+        ):
+            return None
+        for index, (sample_stamp, value) in enumerate(self._samples):
+            if abs(stamp - sample_stamp) <= 1e-9:
+                return value
+            if sample_stamp > stamp and index > 0:
+                previous_stamp, previous = self._samples[index - 1]
+                fraction = (
+                    (stamp - previous_stamp)
+                    / max(sample_stamp - previous_stamp, 1e-9)
+                )
+                return tuple(
+                    left + fraction * (right - left)
+                    for left, right in zip(previous, value)
+                )
+        return self._samples[-1][1]
+
+
+class Px4RosClockMapper:
+    """Map PX4 boot-time samples into ROS time after a stable offset check."""
+
+    def __init__(self, maximum_offset_jump=0.05):
+        self.maximum_offset_jump = max(float(maximum_offset_jump), 1e-6)
+        self.offset = None
+
+    def to_ros_time(self, source_time, receipt_ros_time):
+        source_time = float(source_time)
+        receipt_ros_time = float(receipt_ros_time)
+        if (
+            not math.isfinite(source_time)
+            or source_time <= 0.0
+            or not math.isfinite(receipt_ros_time)
+        ):
+            return None
+        observed_offset = receipt_ros_time - source_time
+        if self.offset is None:
+            self.offset = observed_offset
+        elif abs(observed_offset - self.offset) > self.maximum_offset_jump:
+            return None
+        return source_time + self.offset
+
+
+def _stamp_seconds(stamp):
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def _seconds_to_time(value):
+    if value is None or not math.isfinite(float(value)) or value <= 0.0:
+        return Time()
+    seconds = int(value)
+    nanoseconds = int(round((float(value) - seconds) * 1e9))
+    if nanoseconds >= 1_000_000_000:
+        seconds += 1
+        nanoseconds -= 1_000_000_000
+    return Time(sec=seconds, nanosec=nanoseconds)
 
 
 def body_frd_to_ned_rotation(quaternion):
@@ -164,6 +296,8 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('minimum_depth_ratio', 0.5)
         self.declare_parameter('maximum_rgb_depth_skew', 0.1)
         self.declare_parameter('data_timeout', 0.5)
+        self.declare_parameter('state_history_duration', 1.0)
+        self.declare_parameter('maximum_clock_offset_jump', 0.05)
         self.declare_parameter('localization_rate_hz', 20.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
         self.declare_parameter('camera_translation_x', 0.35)
@@ -200,6 +334,14 @@ class RgbdTargetLocalizer(Node):
         self.data_timeout = max(
             float(self.get_parameter('data_timeout').value),
             0.05,
+        )
+        self.state_history_duration = max(
+            float(self.get_parameter('state_history_duration').value),
+            self.data_timeout,
+        )
+        self.maximum_clock_offset_jump = max(
+            float(self.get_parameter('maximum_clock_offset_jump').value),
+            1e-3,
         )
         self.camera_pitch_down = float(
             self.get_parameter('camera_pitch_down').value
@@ -283,13 +425,28 @@ class RgbdTargetLocalizer(Node):
         self.latest_depth_message = None
         self.color_mask = None
         self.color_time = -math.inf
+        self.color_measurement_time = None
         self.depth = None
         self.depth_time = -math.inf
+        self.depth_measurement_time = None
         self.uav_position = None
         self.uav_position_time = -math.inf
         self.uav_attitude = None
         self.uav_attitude_time = -math.inf
         self.processed_color_time = -math.inf
+        self.last_image_timeout_report = -math.inf
+        self.position_history = TimestampedVectorHistory(
+            self.state_history_duration
+        )
+        self.attitude_history = TimestampedVectorHistory(
+            self.state_history_duration
+        )
+        self.image_clock_mapper = Px4RosClockMapper(
+            self.maximum_clock_offset_jump
+        )
+        self.px4_clock_mapper = Px4RosClockMapper(
+            self.maximum_clock_offset_jump
+        )
         localization_rate_hz = max(
             float(self.get_parameter('localization_rate_hz').value),
             1.0,
@@ -306,32 +463,100 @@ class RgbdTargetLocalizer(Node):
 
     def color_callback(self, message):
         """Replace the pending RGB frame without doing image work in DDS."""
+        receipt = self._ros_seconds()
+        source = _stamp_seconds(message.header.stamp)
+        mapped = self.image_clock_mapper.to_ros_time(source, receipt)
+        measurement = (
+            validated_sensor_stamp(mapped, receipt, self.data_timeout)
+            if mapped is not None else None
+        )
+        if (
+            measurement is not None
+            and self.color_measurement_time is not None
+            and measurement <= self.color_measurement_time + 1e-9
+        ):
+            return
         self.latest_color_message = message
-        self.color_time = time.monotonic()
+        self.color_time = receipt
+        self.color_measurement_time = measurement
 
     def depth_callback(self, message):
         """Replace the pending depth frame without decoding it in DDS."""
+        receipt = self._ros_seconds()
+        source = _stamp_seconds(message.header.stamp)
+        mapped = self.image_clock_mapper.to_ros_time(source, receipt)
+        measurement = (
+            validated_sensor_stamp(mapped, receipt, self.data_timeout)
+            if mapped is not None else None
+        )
+        if (
+            measurement is not None
+            and self.depth_measurement_time is not None
+            and measurement <= self.depth_measurement_time + 1e-9
+        ):
+            return
         self.latest_depth_message = message
-        self.depth_time = time.monotonic()
+        self.depth_time = receipt
+        self.depth_measurement_time = measurement
 
     def position_callback(self, message):
         """Store the latest finite UAV local-NED position."""
         values = (message.x, message.y, message.z)
         if all(math.isfinite(value) for value in values):
-            self.uav_position = tuple(float(value) for value in values)
-            self.uav_position_time = time.monotonic()
+            receipt = self._ros_seconds()
+            source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            stamp = self.px4_clock_mapper.to_ros_time(
+                source_stamp,
+                receipt,
+            )
+            if stamp is None:
+                return
+            position = tuple(float(value) for value in values)
+            if self.position_history.add(stamp, position):
+                self.uav_position = position
+                self.uav_position_time = stamp
 
     def attitude_callback(self, message):
         """Store the latest finite PX4 body-to-NED quaternion."""
         quaternion = tuple(float(value) for value in message.q)
         if all(math.isfinite(value) for value in quaternion):
-            self.uav_attitude = quaternion
-            self.uav_attitude_time = time.monotonic()
+            receipt = self._ros_seconds()
+            source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            stamp = self.px4_clock_mapper.to_ros_time(
+                source_stamp,
+                receipt,
+            )
+            if stamp is None:
+                return
+            previous = self.attitude_history.latest_value
+            if (
+                previous is not None
+                and sum(left * right for left, right in zip(
+                    previous,
+                    quaternion,
+                )) < 0.0
+            ):
+                quaternion = tuple(-value for value in quaternion)
+            if self.attitude_history.add(stamp, quaternion):
+                self.uav_attitude = quaternion
+                self.uav_attitude_time = stamp
 
-    def publish_invalid_observation(self):
+    def _ros_seconds(self):
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def publish_invalid_observation(
+        self,
+        reason='INVALID_OBSERVATION',
+        measurement_stamp=None,
+        received_stamp=None,
+    ):
         """Publish an explicit invalid observation without updating the KF."""
         message = TargetObservation()
-        message.stamp = self.get_clock().now().to_msg()
+        published = self._ros_seconds()
+        message.stamp = _seconds_to_time(measurement_stamp)
+        message.received_stamp = _seconds_to_time(received_stamp)
+        message.processed_stamp = _seconds_to_time(published)
+        message.published_stamp = _seconds_to_time(published)
         message.frame_id = self.frame_id
         message.position.x = math.nan
         message.position.y = math.nan
@@ -339,6 +564,11 @@ class RgbdTargetLocalizer(Node):
         message.covariance = [math.nan] * 9
         message.confidence = 0.0
         message.source = 'front_rgbd_red_sphere'
+        message.rejection_reason = str(reason)
+        message.red_pixel_count = 0
+        message.valid_depth_ratio = 0.0
+        message.target_range = math.nan
+        message.view_angle = math.nan
         message.valid = False
         self.observation_pub.publish(message)
 
@@ -354,14 +584,40 @@ class RgbdTargetLocalizer(Node):
 
     def localize(self):
         """Publish one synchronized RGB-D target observation when valid."""
-        now = time.monotonic()
+        now = self._ros_seconds()
         if self.color_time <= self.processed_color_time:
+            if due_data_timeout(
+                now,
+                max(self.color_time, self.depth_time),
+                self.last_image_timeout_report,
+                self.data_timeout,
+            ):
+                self.publish_invalid_observation(
+                    'IMAGE_TIMEOUT',
+                    received_stamp=now,
+                )
+                self.last_image_timeout_report = now
             return
         self.processed_color_time = self.color_time
         color_message = self.latest_color_message
         depth_message = self.latest_depth_message
         if color_message is None or depth_message is None:
-            self.publish_invalid_observation()
+            self.publish_invalid_observation('IMAGE_MISSING')
+            return
+        measurement_stamp = synchronized_measurement_time(
+            self.color_measurement_time,
+            self.depth_measurement_time,
+            self.maximum_rgb_depth_skew,
+        ) if (
+            self.color_measurement_time is not None
+            and self.depth_measurement_time is not None
+        ) else None
+        received_stamp = max(self.color_time, self.depth_time)
+        if measurement_stamp is None:
+            self.publish_invalid_observation(
+                'RGB_DEPTH_TIME_MISMATCH',
+                received_stamp=received_stamp,
+            )
             return
         self.color_mask = red_pixel_mask(
             color_message.data,
@@ -379,19 +635,21 @@ class RgbdTargetLocalizer(Node):
                 depth_message.height,
                 depth_message.step,
             )
-        state_fresh = (
-            self.uav_position is not None
-            and self.uav_attitude is not None
-            and now - self.uav_position_time <= self.data_timeout
-            and now - self.uav_attitude_time <= self.data_timeout
-        )
+        uav_position = self.position_history.value_at(measurement_stamp)
+        uav_attitude = self.attitude_history.value_at(measurement_stamp)
+        if uav_attitude is not None:
+            norm = math.sqrt(sum(value * value for value in uav_attitude))
+            uav_attitude = (
+                tuple(value / norm for value in uav_attitude)
+                if norm > 1e-9 else None
+            )
+        state_fresh = uav_position is not None and uav_attitude is not None
         images_fresh = (
             self.color_mask is not None
             and self.depth is not None
             and now - self.color_time <= self.data_timeout
             and now - self.depth_time <= self.data_timeout
-            and abs(self.color_time - self.depth_time)
-            <= self.maximum_rgb_depth_skew
+            and now - measurement_stamp <= self.data_timeout
         )
         red_pixels = (
             0
@@ -401,7 +659,11 @@ class RgbdTargetLocalizer(Node):
         if not state_fresh or not images_fresh or (
             red_pixels < self.minimum_red_pixels
         ):
-            self.publish_invalid_observation()
+            self.publish_invalid_observation(
+                'POSE_UNAVAILABLE' if not state_fresh else 'IMAGE_INVALID',
+                measurement_stamp,
+                received_stamp,
+            )
             return
 
         valid_depth = (
@@ -412,7 +674,9 @@ class RgbdTargetLocalizer(Node):
         )
         depth_ratio = float(np.count_nonzero(valid_depth)) / red_pixels
         if depth_ratio < self.minimum_depth_ratio:
-            self.publish_invalid_observation()
+            self.publish_invalid_observation(
+                'DEPTH_RATIO_LOW', measurement_stamp, received_stamp
+            )
             return
         camera_vector = target_vector_from_rgbd(
             self.color_mask,
@@ -423,19 +687,23 @@ class RgbdTargetLocalizer(Node):
             self.target_radius,
         )
         if camera_vector is None:
-            self.publish_invalid_observation()
+            self.publish_invalid_observation(
+                'TARGET_VECTOR_INVALID', measurement_stamp, received_stamp
+            )
             return
         try:
             target_position = camera_target_to_local_ned(
                 camera_vector,
-                self.uav_position,
-                self.uav_attitude,
+                uav_position,
+                uav_attitude,
                 self.camera_translation_flu,
                 self.camera_pitch_down,
                 self.target_reference_z_offset,
             )
         except ValueError:
-            self.publish_invalid_observation()
+            self.publish_invalid_observation(
+                'TRANSFORM_INVALID', measurement_stamp, received_stamp
+            )
             return
 
         target_range = float(np.linalg.norm(camera_vector))
@@ -454,7 +722,13 @@ class RgbdTargetLocalizer(Node):
             1.0,
         )
         observation = TargetObservation()
-        observation.stamp = self.get_clock().now().to_msg()
+        processed_stamp = self._ros_seconds()
+        observation.stamp = _seconds_to_time(measurement_stamp)
+        observation.received_stamp = _seconds_to_time(received_stamp)
+        observation.processed_stamp = _seconds_to_time(processed_stamp)
+        observation.published_stamp = _seconds_to_time(
+            self._ros_seconds()
+        )
         observation.frame_id = self.frame_id
         observation.position.x = float(target_position[0])
         observation.position.y = float(target_position[1])
@@ -462,6 +736,14 @@ class RgbdTargetLocalizer(Node):
         observation.covariance = covariance
         observation.confidence = float(confidence)
         observation.source = 'front_rgbd_red_sphere'
+        observation.rejection_reason = ''
+        observation.red_pixel_count = red_pixels
+        observation.valid_depth_ratio = float(depth_ratio)
+        observation.target_range = float(target_range)
+        observation.view_angle = float(math.atan2(
+            math.hypot(camera_vector[1], camera_vector[2]),
+            max(camera_vector[0], 1e-9),
+        ))
         observation.valid = True
         self.observation_pub.publish(observation)
 

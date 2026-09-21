@@ -15,7 +15,9 @@ from uav_control.guidance.fast_minco_planner import FastMincoPlanner
 from uav_control.guidance.fast_minco_planner import FastPlanningFailure
 from uav_control.guidance.fast_minco_planner import FastPlanningOutcome
 from uav_control.guidance.finite_horizon_intercept_planner import InterceptPlan
-from uav_control.guidance.finite_horizon_intercept_planner import PlannerDiagnostics
+from uav_control.guidance.finite_horizon_intercept_planner import (
+    PlannerDiagnostics,
+)
 from uav_control.guidance.intercept_planner_node import PlannerJobResult
 from uav_control.guidance.intercept_planner_node import plan_to_message
 from uav_control.guidance.intercept_planner_node import prediction_from_message
@@ -112,6 +114,7 @@ def run_publish_test(
     mission_state=0,
     committed_contact=True,
     diagnostics=None,
+    uav_position=(0.0, 0.0, -1.0),
 ):
     """Run one completed planner job through the real publication gate."""
     prediction = make_publish_test_prediction(sequence_id=4)
@@ -123,8 +126,8 @@ def run_publish_test(
         prediction=prediction,
         uav=UavKinematicState(
             stamp=10.0,
-            position=(0.0, 0.0, -1.0),
-            velocity=(0.0, 0.0, 0.0),
+            position=tuple(uav_position),
+            velocity=(1.0, 0.0, 0.0),
             acceleration=(0.0, 0.0, 0.0),
         ),
         trajectory_start_stamp=10.0,
@@ -142,7 +145,7 @@ def run_publish_test(
         contact_schedule=schedule,
         mission_state=mission_state,
         terminal_time_threshold=1.0,
-        planned_capture_radius=0.35,
+        planned_capture_radius=0.50,
         completed_plan_count=0,
         completion_times=deque(maxlen=100),
         _completion_frequency=lambda: 0.0,
@@ -153,11 +156,17 @@ def run_publish_test(
         frame_id='local_ned',
         approach_time_sync_tolerance=0.35,
         approach_reserve_clearance=0.20,
+        approach_preparation_standoff_speed=1.5,
+        approach_preparation_position_tolerance=0.75,
+        approach_preparation_velocity_tolerance=0.75,
+        solver_compute_times=deque(maxlen=30),
+        published_plan_references={},
         planner=SimpleNamespace(
             sea_surface_z=0.0,
             response_delay=0.15,
             effective_vertical_braking_acceleration=2.5,
             maximum_vertical_speed=4.0,
+            sample_step=0.05,
         ),
     )
     job = PlannerJobResult(
@@ -221,6 +230,32 @@ def test_far_guidance_publishes_only_after_terminal_admission_is_ready():
         PlannerDiagnostic.RESULT_SUCCESS
     )
     assert ready_diagnostics.messages[-1].terminal_admission
+    trajectory = ready_trajectories.messages[-1]
+    assert (
+        planner_node_module._stamp_seconds(trajectory.capture_entry_stamp)
+        < planner_node_module._stamp_seconds(trajectory.valid_until)
+    )
+    assert trajectory.capture_execution_margin >= 0.15
+
+
+def test_far_guidance_does_not_bypass_dynamic_preparation_point():
+    diagnostics = PlannerDiagnostics(
+        horizontal_min_time=0.7,
+        vertical_min_time=0.5,
+    )
+    _, _, trajectories, planner_diagnostics = run_publish_test(
+        terminal_mode=False,
+        latest_prediction=make_publish_test_prediction(sequence_id=5),
+        mission_state=MissionState.FAR_GUIDANCE,
+        committed_contact=False,
+        diagnostics=diagnostics,
+        uav_position=(-3.0, 0.0, -1.0),
+    )
+
+    assert trajectories.messages == []
+    assert planner_diagnostics.messages[-1].terminal_admission_reason == (
+        'HORIZONTAL_PREPARATION_NOT_READY'
+    )
 
 
 def test_recovery_to_far_guidance_starts_new_contact_cycle_same_mission():
@@ -466,7 +501,9 @@ def test_recovery_and_terminal_states_never_submit_planning(state):
 
 
 def test_planner_node_does_not_shadow_rclpy_executor_property():
-    tree = ast.parse(inspect.getsource(planner_node_module.InterceptPlannerNode))
+    tree = ast.parse(inspect.getsource(
+        planner_node_module.InterceptPlannerNode
+    ))
     assignments = [
         target.attr
         for node in ast.walk(tree)
@@ -483,7 +520,9 @@ def test_planner_node_does_not_shadow_rclpy_executor_property():
 
 
 def test_planner_submission_and_completion_use_independent_timers():
-    tree = ast.parse(inspect.getsource(planner_node_module.InterceptPlannerNode))
+    tree = ast.parse(inspect.getsource(
+        planner_node_module.InterceptPlannerNode
+    ))
     timer_callbacks = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -621,6 +660,41 @@ def test_planner_request_uses_latest_uav_stamp_as_minco_start():
     assert request.trajectory_start_stamp == pytest.approx(10.10)
 
 
+def test_rolling_request_uses_active_reference_at_expected_handover():
+    prediction = make_publish_test_prediction(sequence_id=4)
+    measured = UavKinematicState(
+        stamp=10.0,
+        position=(-0.2, 0.0, -1.0),
+        velocity=(0.8, 0.0, 0.0),
+        acceleration=(0.0, 0.0, 0.0),
+    )
+    active = planner_node_module.ActivePlanReference(
+        plan=make_publish_test_plan(duration=1.2),
+        source_stamp=10.0,
+    )
+    node = SimpleNamespace(
+        mission_id=2,
+        latest_prediction=prediction,
+        latest_uav=measured,
+        active_plan_reference=active,
+        contact_schedule=SimpleNamespace(contact_stamp=11.2),
+        _ros_seconds=lambda: 10.02,
+        _expected_handover_lead=lambda: 0.06,
+    )
+    decision = SimpleNamespace(terminal_mode=True, minimum_duration=0.30)
+
+    request = planner_node_module.InterceptPlannerNode._current_request(
+        node,
+        decision,
+    )
+    expected = active.sample_at_ros_time(10.08)
+
+    assert request.trajectory_start_stamp == pytest.approx(10.08)
+    assert request.uav.position == pytest.approx(expected.position)
+    assert request.uav.velocity == pytest.approx(expected.velocity)
+    assert request.uav_source_stamp == pytest.approx(10.0)
+
+
 def test_planner_queries_prediction_at_absolute_minco_contact_time():
     class CapturingPlanner:
         minimum_duration = 0.10
@@ -687,7 +761,7 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
     assert planner.target_at_quarter_second[0] == pytest.approx(
         (10.35, 0.0, -0.1)
     )
-    # Prediction ends at 11.0, so only 0.9 s remains from trajectory start 10.1.
+    # Prediction ends at 11.0: 0.9 s remains from trajectory start 10.1.
     assert planner.maximum_duration_override == pytest.approx(0.9)
 
 

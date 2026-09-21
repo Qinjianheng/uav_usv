@@ -1,8 +1,15 @@
 builtin_interfaces/Time stamp
+builtin_interfaces/Time received_stamp
+builtin_interfaces/Time processed_stamp
+builtin_interfaces/Time published_stamp
 string frame_id
 geometry_msgs/Point position
 float64[9] covariance
 float32 confidence
 string source
+string rejection_reason
+uint32 red_pixel_count
+float32 valid_depth_ratio
+float32 target_range
+float32 view_angle
 bool valid
-

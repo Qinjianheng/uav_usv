@@ -9,6 +9,8 @@ from uav_control.guidance.planner_pipeline import PredictionSample
 from uav_control.guidance.planner_pipeline import PredictionSeries
 from uav_control.guidance.planner_pipeline import UavKinematicState
 from uav_control.guidance.planner_pipeline import evaluate_terminal_admission
+from uav_control.guidance.planner_pipeline import planned_capture_window
+from uav_control.guidance.planner_pipeline import select_planning_start_state
 from uav_control.guidance.planner_pipeline import validate_input
 from uav_control.guidance.planner_pipeline import validate_plan_arrival
 from uav_control.guidance.planner_pipeline import validate_target_shift
@@ -429,3 +431,123 @@ def test_terminal_admission_rejects_insufficient_sea_braking_margin():
 
     assert not decision.admitted
     assert decision.reason == 'SEA_MARGIN_INSUFFICIENT'
+
+
+def test_terminal_admission_requires_dynamic_preparation_alignment():
+    """Catch a feasible MINCO plan bypassing FAR_GUIDANCE preparation."""
+    decision = evaluate_terminal_admission(
+        horizontal_min_time=2.8,
+        vertical_min_time=2.6,
+        selected_t_go=3.4,
+        planned_capture_margin=0.12,
+        current_z=-5.0,
+        current_vz=0.0,
+        planned_initial_vz=0.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.20,
+        response_delay=0.15,
+        braking_acceleration=2.5,
+        maximum_vertical_speed=4.0,
+        time_sync_tolerance=0.35,
+        preparation_position_error=2.1,
+        preparation_velocity_error=0.2,
+        preparation_position_tolerance=0.75,
+        preparation_velocity_tolerance=0.75,
+        capture_execution_margin=0.25,
+    )
+
+    assert not decision.admitted
+    assert decision.reason == 'HORIZONTAL_PREPARATION_NOT_READY'
+
+
+def test_terminal_admission_requires_time_inside_capture_ball():
+    decision = evaluate_terminal_admission(
+        horizontal_min_time=2.0,
+        vertical_min_time=2.0,
+        selected_t_go=3.0,
+        planned_capture_margin=0.12,
+        current_z=-5.0,
+        current_vz=0.0,
+        planned_initial_vz=0.0,
+        sea_surface_z=0.0,
+        reserve_clearance=0.20,
+        response_delay=0.15,
+        braking_acceleration=2.5,
+        maximum_vertical_speed=4.0,
+        time_sync_tolerance=0.35,
+        preparation_position_error=0.1,
+        preparation_velocity_error=0.1,
+        preparation_position_tolerance=0.75,
+        preparation_velocity_tolerance=0.75,
+        capture_execution_margin=0.10,
+    )
+
+    assert not decision.admitted
+    assert decision.reason == 'CAPTURE_WINDOW_INSUFFICIENT'
+
+
+def test_capture_window_distinguishes_first_entry_from_trajectory_end():
+    class LinearPlan:
+        duration = 2.0
+
+        @staticmethod
+        def sample(relative_time):
+            x = -1.0 + 0.5 * float(relative_time)
+            return type('Sample', (), {'position': (x, 0.0, 0.0)})()
+
+    prediction = PredictionSeries(
+        mission_id=5,
+        sequence_id=1,
+        source_stamp=10.0,
+        valid_until=12.0,
+        samples=(
+            PredictionSample(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                             (0.0, 0.0, 0.0)),
+            PredictionSample(2.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                             (0.0, 0.0, 0.0)),
+        ),
+        source='simulation_truth',
+    )
+
+    window = planned_capture_window(
+        LinearPlan(),
+        prediction,
+        trajectory_start_stamp=10.0,
+        capture_radius=0.5,
+        sample_step=0.05,
+    )
+
+    assert window.first_entry_t_go == pytest.approx(1.0, abs=0.01)
+    assert window.trajectory_end_t_go == pytest.approx(2.0)
+    assert window.execution_margin == pytest.approx(1.0, abs=0.01)
+
+
+def test_replan_starts_from_old_reference_at_expected_handover_time():
+    class ActiveTrajectory:
+        valid_until = 11.0
+
+        @staticmethod
+        def sample_at_ros_time(stamp):
+            return type('Sample', (), {
+                'position': (float(stamp), 1.0, -5.0),
+                'velocity': (4.0, 0.0, 0.0),
+                'acceleration': (0.2, 0.0, 0.0),
+            })()
+
+    measured = UavKinematicState(
+        stamp=10.0,
+        position=(9.5, 1.0, -5.0),
+        velocity=(3.8, 0.0, 0.0),
+        acceleration=(0.0, 0.0, 0.0),
+    )
+
+    selected = select_planning_start_state(
+        measured,
+        ActiveTrajectory(),
+        expected_handover_stamp=10.08,
+    )
+
+    assert selected.stamp == pytest.approx(10.08)
+    assert selected.position == pytest.approx((10.08, 1.0, -5.0))
+    assert selected.velocity == pytest.approx((4.0, 0.0, 0.0))
+    assert selected.acceleration == pytest.approx((0.2, 0.0, 0.0))
