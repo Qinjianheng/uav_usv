@@ -41,6 +41,19 @@ def test_measurement_from_observation_preserves_stamp_and_covariance():
     assert timestamp_ns == 12_345_000_000
 
 
+def test_invalid_time_rejected_observation_never_enters_kf():
+    message = TargetObservation()
+    message.valid = False
+    message.rejection_reason = 'POSITION_TIMESTAMP_BEFORE_HISTORY'
+    message.frame_id = 'local_ned'
+
+    with pytest.raises(ValueError, match='invalid'):
+        target_kalman_filter.measurement_from_observation(
+            message,
+            'local_ned',
+        )
+
+
 def test_kf_projection_keeps_last_real_observation_as_source_stamp():
     node = object.__new__(target_kalman_filter.TargetKalmanFilterNode)
     node.filter = SimpleNamespace(

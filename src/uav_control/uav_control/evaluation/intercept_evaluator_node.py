@@ -590,6 +590,36 @@ class InterceptEvaluatorNode(Node):
                 'pose_history_end_stamp': float(
                     message.pose_history_end_stamp
                 ),
+                'position_source_stamp': float(
+                    message.position_source_stamp
+                ),
+                'position_mapped_stamp': float(
+                    message.position_mapped_stamp
+                ),
+                'attitude_source_stamp': float(
+                    message.attitude_source_stamp
+                ),
+                'attitude_mapped_stamp': float(
+                    message.attitude_mapped_stamp
+                ),
+                'position_history_start_stamp': float(
+                    message.position_history_start_stamp
+                ),
+                'position_history_end_stamp': float(
+                    message.position_history_end_stamp
+                ),
+                'attitude_history_start_stamp': float(
+                    message.attitude_history_start_stamp
+                ),
+                'attitude_history_end_stamp': float(
+                    message.attitude_history_end_stamp
+                ),
+                'image_clock_offset': float(message.image_clock_offset),
+                'px4_clock_offset': float(message.px4_clock_offset),
+                'px4_clock_reset_count': int(
+                    message.px4_clock_reset_count
+                ),
+                'px4_clock_status': str(message.px4_clock_status),
                 'approach_phase': self.approach_phase,
                 'distance_bin': distance_bin,
                 'motion_regime': self.truth_motion_regime,

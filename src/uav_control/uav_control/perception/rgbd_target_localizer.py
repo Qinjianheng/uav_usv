@@ -73,11 +73,65 @@ def due_data_timeout(now, latest_receipt, last_report, timeout):
     )
 
 
+def quaternion_slerp(left, right, fraction):
+    """Interpolate equivalent unit quaternions along the shortest arc."""
+    left = np.asarray(left, dtype=float)
+    right = np.asarray(right, dtype=float)
+    if left.shape != (4,) or right.shape != (4,):
+        raise ValueError('quaternions must contain four values')
+    left_norm = float(np.linalg.norm(left))
+    right_norm = float(np.linalg.norm(right))
+    if left_norm < 1e-9 or right_norm < 1e-9:
+        raise ValueError('quaternions must be nonzero')
+    left /= left_norm
+    right /= right_norm
+    dot = float(np.dot(left, right))
+    if dot < 0.0:
+        right = -right
+        dot = -dot
+    dot = min(max(dot, -1.0), 1.0)
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    if dot > 0.9995:
+        result = left + fraction * (right - left)
+    else:
+        angle = math.acos(dot)
+        sine = math.sin(angle)
+        result = (
+            math.sin((1.0 - fraction) * angle) / sine * left
+            + math.sin(fraction * angle) / sine * right
+        )
+    result /= np.linalg.norm(result)
+    return tuple(float(value) for value in result)
+
+
+def pose_history_rejection_reason(
+    measurement_stamp,
+    position_range,
+    attitude_range,
+):
+    """Explain why the acquisition time lacks a complete UAV pose."""
+    if position_range is None:
+        return 'POSITION_HISTORY_EMPTY'
+    if attitude_range is None:
+        return 'ATTITUDE_HISTORY_EMPTY'
+    stamp = float(measurement_stamp)
+    if stamp < position_range[0] - 1e-9:
+        return 'POSITION_TIMESTAMP_BEFORE_HISTORY'
+    if stamp < attitude_range[0] - 1e-9:
+        return 'ATTITUDE_TIMESTAMP_BEFORE_HISTORY'
+    if stamp > position_range[1] + 1e-9:
+        return 'POSITION_TIMESTAMP_AFTER_HISTORY'
+    if stamp > attitude_range[1] + 1e-9:
+        return 'ATTITUDE_TIMESTAMP_AFTER_HISTORY'
+    return ''
+
+
 class TimestampedVectorHistory:
     """Interpolate a bounded monotonic history without extrapolation."""
 
-    def __init__(self, maximum_age=1.0):
+    def __init__(self, maximum_age=1.0, interpolator=None):
         self.maximum_age = max(float(maximum_age), 1e-3)
+        self.interpolator = interpolator
         self._samples = deque()
 
     @property
@@ -127,6 +181,8 @@ class TimestampedVectorHistory:
                     (stamp - previous_stamp)
                     / max(sample_stamp - previous_stamp, 1e-9)
                 )
+                if self.interpolator is not None:
+                    return self.interpolator(previous, value, fraction)
                 return tuple(
                     left + fraction * (right - left)
                     for left, right in zip(previous, value)
@@ -135,23 +191,80 @@ class TimestampedVectorHistory:
 
 
 class Px4RosClockMapper:
-    """Map a source clock using a multi-sample lower-delay offset estimate."""
+    """Map one clock shared by independently ordered source streams."""
 
-    def __init__(self, maximum_offset_jump=0.05, calibration_samples=4):
+    def __init__(
+        self,
+        maximum_offset_jump=0.05,
+        calibration_samples=4,
+        reset_regression_threshold=0.5,
+        reset_confirmation_window=0.5,
+    ):
         self.maximum_offset_jump = max(float(maximum_offset_jump), 1e-6)
         self.calibration_samples = max(int(calibration_samples), 1)
+        self.reset_regression_threshold = max(
+            float(reset_regression_threshold), 1e-3
+        )
+        self.reset_confirmation_window = max(
+            float(reset_confirmation_window), 1e-3
+        )
         self.offset = None
         self._offset_samples = deque(maxlen=32)
-        self._last_source_time = None
+        self._last_source_times = {}
+        self._last_receipt_time = None
+        self._reset_candidates = {}
         self.reset_count = 0
+        self.last_status = 'UNCALIBRATED'
 
     def reset(self):
         self.offset = None
         self._offset_samples.clear()
-        self._last_source_time = None
+        self._last_source_times.clear()
+        self._last_receipt_time = None
+        self._reset_candidates.clear()
         self.reset_count += 1
+        self.last_status = 'CLOCK_RESET'
 
-    def to_ros_time(self, source_time, receipt_ros_time):
+    def _seed_after_reset(
+        self,
+        stream_name,
+        source_time,
+        receipt_ros_time,
+        observed_offset,
+    ):
+        self._last_source_times[stream_name] = source_time
+        self._last_receipt_time = receipt_ros_time
+        self._offset_samples.append(observed_offset)
+
+    def _confirmed_source_reset(
+        self,
+        stream_name,
+        source_time,
+        receipt_ros_time,
+    ):
+        cutoff = receipt_ros_time - self.reset_confirmation_window
+        self._reset_candidates = {
+            name: candidate
+            for name, candidate in self._reset_candidates.items()
+            if candidate[1] >= cutoff
+        }
+        self._reset_candidates[stream_name] = (
+            source_time,
+            receipt_ros_time,
+        )
+        return any(
+            name != stream_name
+            and abs(candidate[0] - source_time)
+            <= self.reset_regression_threshold
+            for name, candidate in self._reset_candidates.items()
+        )
+
+    def to_ros_time(
+        self,
+        source_time,
+        receipt_ros_time,
+        stream_name=None,
+    ):
         source_time = float(source_time)
         receipt_ros_time = float(receipt_ros_time)
         if (
@@ -159,34 +272,88 @@ class Px4RosClockMapper:
             or source_time <= 0.0
             or not math.isfinite(receipt_ros_time)
         ):
+            self.last_status = 'INVALID_TIMESTAMP'
             return None
+        stream = (
+            '__single_stream__'
+            if stream_name is None else str(stream_name)
+        )
+        observed_offset = receipt_ros_time - source_time
         if (
-            self._last_source_time is not None
-            and source_time < self._last_source_time - 1e-6
+            self._last_receipt_time is not None
+            and receipt_ros_time < self._last_receipt_time - 1e-6
         ):
             self.reset()
-        self._last_source_time = source_time
-        observed_offset = receipt_ros_time - source_time
+            self._seed_after_reset(
+                stream, source_time, receipt_ros_time, observed_offset
+            )
+            self.last_status = 'ROS_CLOCK_RESET'
+            return None
+        self._last_receipt_time = receipt_ros_time
+
+        previous_source = self._last_source_times.get(stream)
+        if previous_source is not None:
+            regression = previous_source - source_time
+            if abs(regression) <= 1e-9:
+                self.last_status = 'DUPLICATE_SOURCE_TIMESTAMP'
+                return None
+            if regression > 0.0:
+                if (
+                    stream_name is not None
+                    and regression <= self.reset_regression_threshold
+                ):
+                    self.last_status = 'OUT_OF_ORDER_SOURCE_TIMESTAMP'
+                    return None
+                confirmed = (
+                    stream_name is None
+                    or self._confirmed_source_reset(
+                        stream, source_time, receipt_ros_time
+                    )
+                )
+                if not confirmed:
+                    self.last_status = 'SOURCE_RESET_CANDIDATE'
+                    return None
+                self.reset()
+                self._seed_after_reset(
+                    stream, source_time, receipt_ros_time, observed_offset
+                )
+                self.last_status = 'PX4_CLOCK_RESET'
+                return None
+        if (
+            stream_name is not None
+            and self.offset is not None
+            and observed_offset
+            < self.offset - self.maximum_offset_jump
+        ):
+            self.last_status = 'OFFSET_OUTLIER'
+            return None
+        self._last_source_times[stream] = source_time
+        self._reset_candidates.pop(stream, None)
         self._offset_samples.append(observed_offset)
         if len(self._offset_samples) < self.calibration_samples:
+            self.last_status = 'UNCALIBRATED'
             return None
         if (
             max(self._offset_samples) - min(self._offset_samples)
             > self.maximum_offset_jump
             and self.offset is None
         ):
+            self.last_status = 'OFFSET_UNSTABLE'
             return None
         candidate = min(self._offset_samples)
         if self.offset is not None and abs(
             candidate - self.offset
         ) > self.maximum_offset_jump:
             self.reset()
-            self._last_source_time = source_time
-            self._offset_samples.append(observed_offset)
+            self._seed_after_reset(
+                stream, source_time, receipt_ros_time, observed_offset
+            )
+            self.last_status = 'OFFSET_JUMP_RESET'
             return None
         self.offset = candidate if self.offset is None else min(
             self.offset, candidate
         )
+        self.last_status = 'MAPPED'
         return source_time + self.offset
 
 
@@ -543,6 +710,10 @@ class RgbdTargetLocalizer(Node):
         self.uav_position_time = -math.inf
         self.uav_attitude = None
         self.uav_attitude_time = -math.inf
+        self.position_source_stamp = math.nan
+        self.position_mapped_stamp = math.nan
+        self.attitude_source_stamp = math.nan
+        self.attitude_mapped_stamp = math.nan
         self.processed_color_time = -math.inf
         self.last_image_timeout_report = -math.inf
         self.last_pair_rejection = ''
@@ -560,7 +731,8 @@ class RgbdTargetLocalizer(Node):
             self.state_history_duration
         )
         self.attitude_history = TimestampedVectorHistory(
-            self.state_history_duration
+            self.state_history_duration,
+            interpolator=quaternion_slerp,
         )
         self.image_clock_mapper = Px4RosClockMapper(
             self.maximum_clock_offset_jump
@@ -627,19 +799,31 @@ class RgbdTargetLocalizer(Node):
         if all(math.isfinite(value) for value in values):
             receipt = self._ros_seconds()
             source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            self.position_source_stamp = source_stamp
             reset_count = self.px4_clock_mapper.reset_count
             stamp = self.px4_clock_mapper.to_ros_time(
                 source_stamp,
                 receipt,
+                stream_name='position',
             )
-            if self.px4_clock_mapper.reset_count != reset_count:
+            clock_reset = (
+                self.px4_clock_mapper.reset_count != reset_count
+            )
+            if clock_reset:
                 self._reset_pose_time_state()
             if stamp is None:
-                self._pending_pose_samples_for_node().append(
-                    ('position', source_stamp, tuple(float(v) for v in values))
-                )
+                if (
+                    clock_reset
+                    or self.px4_clock_mapper.last_status == 'UNCALIBRATED'
+                ):
+                    self._pending_pose_samples_for_node().append((
+                        'position',
+                        source_stamp,
+                        tuple(float(v) for v in values),
+                    ))
                 return
             self._flush_pending_pose_samples()
+            self.position_mapped_stamp = stamp
             position = tuple(float(value) for value in values)
             if self.position_history.add(stamp, position):
                 self.uav_position = position
@@ -651,19 +835,29 @@ class RgbdTargetLocalizer(Node):
         if all(math.isfinite(value) for value in quaternion):
             receipt = self._ros_seconds()
             source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            self.attitude_source_stamp = source_stamp
             reset_count = self.px4_clock_mapper.reset_count
             stamp = self.px4_clock_mapper.to_ros_time(
                 source_stamp,
                 receipt,
+                stream_name='attitude',
             )
-            if self.px4_clock_mapper.reset_count != reset_count:
+            clock_reset = (
+                self.px4_clock_mapper.reset_count != reset_count
+            )
+            if clock_reset:
                 self._reset_pose_time_state()
             if stamp is None:
-                self._pending_pose_samples_for_node().append(
-                    ('attitude', source_stamp, quaternion)
-                )
+                if (
+                    clock_reset
+                    or self.px4_clock_mapper.last_status == 'UNCALIBRATED'
+                ):
+                    self._pending_pose_samples_for_node().append(
+                        ('attitude', source_stamp, quaternion)
+                    )
                 return
             self._flush_pending_pose_samples()
+            self.attitude_mapped_stamp = stamp
             self._add_attitude_sample(stamp, quaternion)
 
     def _pending_pose_samples_for_node(self):
@@ -689,6 +883,12 @@ class RgbdTargetLocalizer(Node):
         self._pending_pose_samples_for_node().clear()
         self.position_history.clear()
         self.attitude_history.clear()
+        self.uav_position = None
+        self.uav_attitude = None
+        self.uav_position_time = -math.inf
+        self.uav_attitude_time = -math.inf
+        self.position_mapped_stamp = math.nan
+        self.attitude_mapped_stamp = math.nan
 
     def _flush_pending_pose_samples(self):
         if self.px4_clock_mapper.offset is None:
@@ -701,8 +901,10 @@ class RgbdTargetLocalizer(Node):
                 if self.position_history.add(stamp, values):
                     self.uav_position = values
                     self.uav_position_time = stamp
+                    self.position_mapped_stamp = stamp
             else:
                 self._add_attitude_sample(stamp, values)
+                self.attitude_mapped_stamp = stamp
 
     def _ros_seconds(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -764,8 +966,21 @@ class RgbdTargetLocalizer(Node):
             'rgb_mapped_stamp', 'depth_mapped_stamp',
             'rgb_depth_acquisition_skew',
             'pose_history_start_stamp', 'pose_history_end_stamp',
+            'position_source_stamp', 'position_mapped_stamp',
+            'attitude_source_stamp', 'attitude_mapped_stamp',
+            'position_history_start_stamp',
+            'position_history_end_stamp',
+            'attitude_history_start_stamp',
+            'attitude_history_end_stamp',
+            'image_clock_offset', 'px4_clock_offset',
         ):
             setattr(message, name, float(values.get(name, math.nan)))
+        message.px4_clock_reset_count = int(values.get(
+            'px4_clock_reset_count', 0
+        ))
+        message.px4_clock_status = str(values.get(
+            'px4_clock_status', 'UNKNOWN'
+        ))
 
     def timed_localize(self):
         """Measure one rate-limited localization pass, including failures."""
@@ -800,7 +1015,8 @@ class RgbdTargetLocalizer(Node):
                 )
                 self.last_image_timeout_report = now
             return
-        color_frame, depth_frame = self.pending_image_pairs.popleft()
+        color_frame, depth_frame = self.pending_image_pairs.pop()
+        self.pending_image_pairs.clear()
         color_message = color_frame.message
         depth_message = depth_frame.message
         raw_measurement_stamp = synchronized_measurement_time(
@@ -855,6 +1071,37 @@ class RgbdTargetLocalizer(Node):
             ),
             'pose_history_start_stamp': pose_start,
             'pose_history_end_stamp': pose_end,
+            'position_source_stamp': getattr(
+                self, 'position_source_stamp', math.nan
+            ),
+            'position_mapped_stamp': getattr(
+                self, 'position_mapped_stamp', math.nan
+            ),
+            'attitude_source_stamp': getattr(
+                self, 'attitude_source_stamp', math.nan
+            ),
+            'attitude_mapped_stamp': getattr(
+                self, 'attitude_mapped_stamp', math.nan
+            ),
+            'position_history_start_stamp': (
+                position_range[0] if position_range else math.nan
+            ),
+            'position_history_end_stamp': (
+                position_range[1] if position_range else math.nan
+            ),
+            'attitude_history_start_stamp': (
+                attitude_range[0] if attitude_range else math.nan
+            ),
+            'attitude_history_end_stamp': (
+                attitude_range[1] if attitude_range else math.nan
+            ),
+            'image_clock_offset': image_offset,
+            'px4_clock_offset': (
+                self.px4_clock_mapper.offset
+                if self.px4_clock_mapper.offset is not None else math.nan
+            ),
+            'px4_clock_reset_count': self.px4_clock_mapper.reset_count,
+            'px4_clock_status': self.px4_clock_mapper.last_status,
         }
         if mapped_measurement_stamp is None:
             self.publish_invalid_observation(
@@ -865,6 +1112,18 @@ class RgbdTargetLocalizer(Node):
         if measurement_stamp is None:
             self.publish_invalid_observation(
                 'IMAGE_CLOCK_DOMAIN_MISMATCH', received_stamp=received_stamp
+            )
+            return
+        pose_rejection = pose_history_rejection_reason(
+            measurement_stamp,
+            position_range,
+            attitude_range,
+        )
+        if pose_rejection:
+            self.publish_invalid_observation(
+                pose_rejection,
+                measurement_stamp,
+                received_stamp,
             )
             return
         self.color_mask = red_pixel_mask(
@@ -908,7 +1167,8 @@ class RgbdTargetLocalizer(Node):
             red_pixels < self.minimum_red_pixels
         ):
             self.publish_invalid_observation(
-                'POSE_UNAVAILABLE' if not state_fresh else 'IMAGE_INVALID',
+                'POSE_TIME_GAP_TOO_LARGE'
+                if not state_fresh else 'IMAGE_INVALID',
                 measurement_stamp,
                 received_stamp,
             )

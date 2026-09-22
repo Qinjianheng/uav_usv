@@ -124,6 +124,9 @@ def test_optional_visual_event_file_is_event_based(tmp_path):
     lines = paths.visual_path.read_text(encoding='utf-8').splitlines()
     assert len(lines) == 2
     assert 'measurement_stamp' in lines[0]
+    assert 'position_source_stamp' in lines[0]
+    assert 'attitude_history_start_stamp' in lines[0]
+    assert 'px4_clock_reset_count' in lines[0]
     assert 'front_rgbd_red_sphere' in lines[1]
 
 
