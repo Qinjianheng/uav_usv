@@ -439,6 +439,14 @@ rgbd_target_localizer:
     # PX4 uXRCE-DDS time sync already converts outgoing sample timestamps
     # into the ROS agent clock domain; do not apply a second receipt offset.
     px4_timestamp_is_ros_time: true
+    # Gazebo images keep simulation acquisition stamps. The localizer maps
+    # them with the sim/system pair carried by the same Gazebo Clock message;
+    # image bridge receipt time is never used to estimate this mapping.
+    gazebo_world_name: default
+    image_clock_reference_timeout: 0.5
+    image_clock_history_duration: 2.0
+    image_clock_wait_timeout: 0.15
+    maximum_system_clock_step: 0.25
     pose_wait_timeout: 0.15
     maximum_pose_wait_gap: 0.15
     image_pair_buffer_size: 8

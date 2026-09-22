@@ -14,6 +14,7 @@ float64 rgb_receipt_stamp
 float64 depth_receipt_stamp
 float64 rgb_mapped_stamp
 float64 depth_mapped_stamp
+float64 image_measurement_stamp
 float64 rgb_depth_acquisition_skew
 float64 pose_history_start_stamp
 float64 pose_history_end_stamp
@@ -26,6 +27,14 @@ float64 position_history_end_stamp
 float64 attitude_history_start_stamp
 float64 attitude_history_end_stamp
 float64 image_clock_offset
+string image_clock_mapping_mode
+string image_clock_status
+uint32 image_clock_reset_count
+float64 image_clock_anchor_sim_stamp
+float64 image_clock_anchor_system_stamp
+float64 image_clock_reference_age
+float64 image_clock_sync_quality
+string image_measurement_time_source
 float64 px4_clock_offset
 uint32 px4_clock_reset_count
 uint32 px4_clock_calibration_count

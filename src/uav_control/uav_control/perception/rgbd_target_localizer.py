@@ -7,6 +7,7 @@ USV detector replaces the color mask.
 """
 
 import math
+import threading
 import time
 from dataclasses import dataclass
 from collections import deque
@@ -52,7 +53,7 @@ def validated_sensor_stamp(measurement_stamp, receipt_stamp, maximum_age):
 
 
 def synchronized_measurement_time(color_stamp, depth_stamp, maximum_skew):
-    """Return the midpoint acquisition time for a valid RGB/depth pair."""
+    """Use RGB acquisition time for a valid pair and preserve the real skew."""
     color_stamp = float(color_stamp)
     depth_stamp = float(depth_stamp)
     if (
@@ -61,7 +62,7 @@ def synchronized_measurement_time(color_stamp, depth_stamp, maximum_skew):
         or abs(color_stamp - depth_stamp) > float(maximum_skew) + 1e-9
     ):
         return None
-    return 0.5 * (color_stamp + depth_stamp)
+    return color_stamp
 
 
 def due_data_timeout(now, latest_receipt, last_report, timeout):
@@ -294,7 +295,9 @@ class Px4RosClockMapper:
         if len(samples) < self.offset_recovery_samples:
             return False
         candidate = sum(value for value, _stamp in samples) / len(samples)
-        for other_stream, other_samples in self._offset_outlier_samples.items():
+        for other_stream, other_samples in (
+            self._offset_outlier_samples.items()
+        ):
             if (
                 other_stream == stream_name
                 or len(other_samples) < self.offset_recovery_samples
@@ -429,6 +432,238 @@ class Px4RosClockMapper:
 
 
 @dataclass(frozen=True)
+class GazeboClockAnchor:
+    """Gazebo simulation and system times sampled in one Clock message."""
+
+    sim_time: float
+    system_time: float
+    receipt_ros_time: float
+    receipt_monotonic: float
+
+
+class GazeboImageClockMapper:
+    """
+    Map Gazebo sensor time using server-side sim/system clock pairs.
+
+    Image receipt time is deliberately excluded from the mapping.  It is only
+    used later for freshness checks.  Mapping is interpolation-only so an
+    image newer than the latest clock anchor waits instead of being
+    extrapolated from an uncertain real-time factor.
+    """
+
+    mapping_mode = 'GAZEBO_CLOCK_SYSTEM_INTERPOLATION'
+
+    def __init__(
+        self,
+        maximum_reference_age=0.5,
+        history_duration=2.0,
+        maximum_system_clock_step=0.25,
+        capacity=4096,
+    ):
+        self.maximum_reference_age = max(
+            float(maximum_reference_age), 1e-3
+        )
+        self.history_duration = max(float(history_duration), 0.1)
+        self.maximum_system_clock_step = max(
+            float(maximum_system_clock_step), 1e-3
+        )
+        self._anchors = deque(maxlen=max(int(capacity), 4))
+        self._lock = threading.Lock()
+        self.reset_count = 0
+        self.last_status = 'CLOCK_REFERENCE_UNAVAILABLE'
+        self.offset = None
+        self.last_quality = math.nan
+        self.last_anchor_sim_time = math.nan
+        self.last_anchor_system_time = math.nan
+        self.last_reference_age = math.nan
+        self._pending_reset_status = ''
+
+    def reset(self, status='CLOCK_REFERENCE_RESET'):
+        with self._lock:
+            self._reset_locked(status)
+
+    def _reset_locked(self, status):
+        self._anchors.clear()
+        self.reset_count += 1
+        self.last_status = str(status)
+        self.offset = None
+        self.last_quality = math.nan
+        self.last_anchor_sim_time = math.nan
+        self.last_anchor_system_time = math.nan
+        self.last_reference_age = math.nan
+        self._pending_reset_status = self.last_status
+
+    @property
+    def anchor_range(self):
+        with self._lock:
+            if not self._anchors:
+                return None
+            return (
+                self._anchors[0].sim_time,
+                self._anchors[-1].sim_time,
+            )
+
+    def add_anchor(
+        self,
+        sim_time,
+        system_time,
+        receipt_ros_time,
+        receipt_monotonic=None,
+    ):
+        """Add one trusted pair from the same Gazebo Clock message."""
+        sim_time = float(sim_time)
+        system_time = float(system_time)
+        receipt_ros_time = float(receipt_ros_time)
+        receipt_monotonic = (
+            time.monotonic()
+            if receipt_monotonic is None else float(receipt_monotonic)
+        )
+        if (
+            not all(math.isfinite(value) for value in (
+                sim_time,
+                system_time,
+                receipt_ros_time,
+                receipt_monotonic,
+            ))
+            or sim_time < 0.0
+            or system_time <= 0.0
+        ):
+            with self._lock:
+                self.last_status = 'INVALID_CLOCK_REFERENCE'
+            return False
+        reference_age = receipt_ros_time - system_time
+        if (
+            reference_age < -1e-3
+            or reference_age > self.maximum_reference_age
+        ):
+            with self._lock:
+                self.last_status = 'CLOCK_REFERENCE_DOMAIN_MISMATCH'
+                self.last_reference_age = reference_age
+            return False
+        anchor = GazeboClockAnchor(
+            sim_time,
+            system_time,
+            receipt_ros_time,
+            receipt_monotonic,
+        )
+        with self._lock:
+            if self._anchors:
+                previous = self._anchors[-1]
+                sim_delta = sim_time - previous.sim_time
+                system_delta = system_time - previous.system_time
+                monotonic_delta = (
+                    receipt_monotonic - previous.receipt_monotonic
+                )
+                if sim_delta < -1e-9:
+                    self._reset_locked('SIM_TIME_RESET')
+                    self._anchors.append(anchor)
+                    self._record_anchor_locked(anchor, reference_age)
+                    return False
+                if abs(sim_delta) <= 1e-9:
+                    self.last_status = 'SIM_TIME_PAUSED'
+                    self.last_reference_age = reference_age
+                    return False
+                if (
+                    system_delta <= 0.0
+                    or monotonic_delta <= 0.0
+                    or abs(system_delta - monotonic_delta)
+                    > self.maximum_system_clock_step
+                ):
+                    self._reset_locked('SYSTEM_CLOCK_RESET')
+                    self._anchors.append(anchor)
+                    self._record_anchor_locked(anchor, reference_age)
+                    return False
+            self._anchors.append(anchor)
+            cutoff = sim_time - self.history_duration
+            while (
+                len(self._anchors) > 2
+                and self._anchors[1].sim_time < cutoff
+            ):
+                self._anchors.popleft()
+            self._record_anchor_locked(anchor, reference_age)
+            self.last_status = (
+                'CLOCK_REFERENCE_READY'
+                if len(self._anchors) >= 2
+                else 'CLOCK_REFERENCE_WARMING_UP'
+            )
+            if len(self._anchors) >= 2:
+                self._pending_reset_status = ''
+            return True
+
+    def _record_anchor_locked(self, anchor, reference_age):
+        self.last_anchor_sim_time = anchor.sim_time
+        self.last_anchor_system_time = anchor.system_time
+        self.last_reference_age = reference_age
+
+    def map_time(self, sim_time, now_ros_time):
+        """Return a mapped time and status from one atomic clock snapshot."""
+        sim_time = float(sim_time)
+        now_ros_time = float(now_ros_time)
+        if (
+            not math.isfinite(sim_time)
+            or sim_time <= 0.0
+            or not math.isfinite(now_ros_time)
+        ):
+            with self._lock:
+                self.last_status = 'INVALID_IMAGE_TIMESTAMP'
+                return None, self.last_status
+        with self._lock:
+            if len(self._anchors) < 2:
+                if self._pending_reset_status:
+                    self.last_status = self._pending_reset_status
+                elif self._anchors:
+                    self.last_status = 'CLOCK_REFERENCE_WARMING_UP'
+                else:
+                    self.last_status = 'CLOCK_REFERENCE_UNAVAILABLE'
+                return None, self.last_status
+            latest = self._anchors[-1]
+            reference_age = now_ros_time - latest.system_time
+            self.last_reference_age = reference_age
+            if reference_age > self.maximum_reference_age + 1e-9:
+                self.last_status = 'CLOCK_REFERENCE_STALE'
+                return None, self.last_status
+            if sim_time < self._anchors[0].sim_time - 1e-9:
+                self.last_status = 'IMAGE_BEFORE_CLOCK_REFERENCE'
+                return None, self.last_status
+            if sim_time > latest.sim_time + 1e-9:
+                self.last_status = 'IMAGE_AFTER_CLOCK_REFERENCE'
+                return None, self.last_status
+            left = self._anchors[0]
+            right = self._anchors[-1]
+            for index, candidate in enumerate(self._anchors):
+                if abs(sim_time - candidate.sim_time) <= 1e-9:
+                    left = right = candidate
+                    break
+                if candidate.sim_time > sim_time:
+                    left = self._anchors[index - 1]
+                    right = candidate
+                    break
+            if left is right:
+                mapped = left.system_time
+                self.last_quality = 0.0
+                self.last_status = 'MAPPED_EXACT'
+            else:
+                sim_delta = right.sim_time - left.sim_time
+                fraction = (sim_time - left.sim_time) / sim_delta
+                mapped = left.system_time + fraction * (
+                    right.system_time - left.system_time
+                )
+                # The interpolation bracket width is the timing quality
+                # metric: smaller is better, while zero is an exact anchor.
+                self.last_quality = sim_delta
+                self.last_status = 'MAPPED_INTERPOLATED'
+            self.offset = mapped - sim_time
+            self.last_anchor_sim_time = right.sim_time
+            self.last_anchor_system_time = right.system_time
+            return mapped, self.last_status
+
+    def to_ros_time(self, sim_time, now_ros_time):
+        """Interpolate a bracketed Gazebo acquisition time into ROS time."""
+        mapped, _status = self.map_time(sim_time, now_ros_time)
+        return mapped
+
+
+@dataclass(frozen=True)
 class TimestampedImageFrame:
     message: object
     raw_stamp: float
@@ -444,11 +679,13 @@ class RgbDepthPairBuffer:
         self.color = deque(maxlen=self.capacity)
         self.depth = deque(maxlen=self.capacity)
         self.last_stamp = {'color': None, 'depth': None}
+        self.last_rejected_pair = None
 
     def reset(self):
         self.color.clear()
         self.depth.clear()
         self.last_stamp = {'color': None, 'depth': None}
+        self.last_rejected_pair = None
 
     def add(self, stream, message, raw_stamp, receipt_stamp):
         raw_stamp = float(raw_stamp)
@@ -478,14 +715,27 @@ class RgbDepthPairBuffer:
 
     def pop_pair(self):
         while self.color and self.depth:
-            color = self.color[0]
-            depth = self.depth[0]
-            skew = color.raw_stamp - depth.raw_stamp
-            if abs(skew) <= self.maximum_skew + 1e-9:
-                return self.color.popleft(), self.depth.popleft(), ''
-            if skew < 0.0:
+            color_index, depth_index, minimum_skew = min(
+                (
+                    (color_index, depth_index, abs(
+                        color.raw_stamp - depth.raw_stamp
+                    ))
+                    for color_index, color in enumerate(self.color)
+                    for depth_index, depth in enumerate(self.depth)
+                ),
+                key=lambda candidate: candidate[2],
+            )
+            if minimum_skew <= self.maximum_skew + 1e-9:
+                color = self.color[color_index]
+                depth = self.depth[depth_index]
+                del self.color[color_index]
+                del self.depth[depth_index]
+                return color, depth, ''
+            if self.color[0].raw_stamp < self.depth[0].raw_stamp:
+                self.last_rejected_pair = (self.color[0], self.depth[0])
                 self.color.popleft()
                 return None, None, 'RGB_FRAME_UNMATCHED'
+            self.last_rejected_pair = (self.color[0], self.depth[0])
             self.depth.popleft()
             return None, None, 'DEPTH_FRAME_UNMATCHED'
         return None, None, ''
@@ -493,6 +743,10 @@ class RgbDepthPairBuffer:
 
 def _stamp_seconds(stamp):
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def _gazebo_time_seconds(stamp):
+    return float(stamp.sec) + float(stamp.nsec) * 1e-9
 
 
 def _seconds_to_time(value):
@@ -642,6 +896,11 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('state_history_duration', 1.0)
         self.declare_parameter('maximum_clock_offset_jump', 0.05)
         self.declare_parameter('px4_timestamp_is_ros_time', True)
+        self.declare_parameter('gazebo_world_name', 'default')
+        self.declare_parameter('image_clock_reference_timeout', 0.5)
+        self.declare_parameter('image_clock_history_duration', 2.0)
+        self.declare_parameter('image_clock_wait_timeout', 0.15)
+        self.declare_parameter('maximum_system_clock_step', 0.25)
         self.declare_parameter('pose_wait_timeout', 0.15)
         self.declare_parameter('maximum_pose_wait_gap', 0.15)
         self.declare_parameter('image_pair_buffer_size', 8)
@@ -693,6 +952,26 @@ class RgbdTargetLocalizer(Node):
         )
         self.px4_timestamp_is_ros_time = bool(
             self.get_parameter('px4_timestamp_is_ros_time').value
+        )
+        self.image_clock_reference_timeout = max(
+            float(
+                self.get_parameter('image_clock_reference_timeout').value
+            ),
+            0.05,
+        )
+        self.image_clock_history_duration = max(
+            float(
+                self.get_parameter('image_clock_history_duration').value
+            ),
+            self.image_clock_reference_timeout,
+        )
+        self.image_clock_wait_timeout = max(
+            float(self.get_parameter('image_clock_wait_timeout').value),
+            0.0,
+        )
+        self.maximum_system_clock_step = max(
+            float(self.get_parameter('maximum_system_clock_step').value),
+            1e-3,
         )
         self.pose_wait_timeout = max(
             float(self.get_parameter('pose_wait_timeout').value),
@@ -820,13 +1099,33 @@ class RgbdTargetLocalizer(Node):
             self.state_history_duration,
             interpolator=quaternion_slerp,
         )
-        self.image_clock_mapper = Px4RosClockMapper(
-            self.maximum_clock_offset_jump
+        self.image_clock_mapper = GazeboImageClockMapper(
+            maximum_reference_age=self.image_clock_reference_timeout,
+            history_duration=self.image_clock_history_duration,
+            maximum_system_clock_step=self.maximum_system_clock_step,
         )
         self.px4_clock_mapper = Px4RosClockMapper(
             self.maximum_clock_offset_jump,
             source_is_ros_time=self.px4_timestamp_is_ros_time,
         )
+        self._image_clock_reset_pending = False
+        from gz.msgs10.clock_pb2 import Clock as GazeboClock
+        from gz.transport13 import Node as GazeboTransportNode
+
+        world_name = str(
+            self.get_parameter('gazebo_world_name').value
+        ).strip().strip('/')
+        self.gazebo_clock_topic = f'/world/{world_name}/clock'
+        self.gazebo_clock_node = GazeboTransportNode()
+        if not self.gazebo_clock_node.subscribe(
+            GazeboClock,
+            self.gazebo_clock_topic,
+            self.gazebo_clock_callback,
+        ):
+            raise RuntimeError(
+                'Could not subscribe to trusted Gazebo clock topic '
+                f'{self.gazebo_clock_topic}.'
+            )
         localization_rate_hz = max(
             float(self.get_parameter('localization_rate_hz').value),
             1.0,
@@ -838,8 +1137,29 @@ class RgbdTargetLocalizer(Node):
         self.get_logger().info(
             'RGB-D TARGET LOCALIZER READY | '
             f'RGB={color_topic} | depth={depth_topic} | '
+            f'clock={self.gazebo_clock_topic} | '
             'output frame=local_ned | detector=red validation sphere'
         )
+
+    def gazebo_clock_callback(self, message):
+        """Store a server-side Gazebo sim/system time correspondence."""
+        reset_count = self.image_clock_mapper.reset_count
+        self.image_clock_mapper.add_anchor(
+            _gazebo_time_seconds(message.sim),
+            _gazebo_time_seconds(message.system),
+            self._ros_seconds(),
+            time.monotonic(),
+        )
+        if self.image_clock_mapper.reset_count != reset_count:
+            self._image_clock_reset_pending = True
+
+    def _apply_pending_image_clock_reset(self):
+        if not getattr(self, '_image_clock_reset_pending', False):
+            return
+        self._image_clock_reset_pending = False
+        self.image_pair_buffer.reset()
+        self.pending_image_pairs.clear()
+        self.waiting_image_pair = None
 
     def color_callback(self, message):
         """Cache RGB by acquisition stamp without image work in DDS."""
@@ -850,6 +1170,12 @@ class RgbdTargetLocalizer(Node):
         self.last_pair_rejection = self.image_pair_buffer.add(
             'color', message, source, receipt
         )
+        if not hasattr(self, 'last_time_diagnostic'):
+            self.last_time_diagnostic = {}
+        self.last_time_diagnostic.update({
+            'rgb_raw_stamp': source,
+            'rgb_receipt_stamp': receipt,
+        })
         if self.last_pair_rejection == 'TIME_RESET':
             self.pending_image_pairs.clear()
             self.waiting_image_pair = None
@@ -865,6 +1191,12 @@ class RgbdTargetLocalizer(Node):
         self.last_pair_rejection = self.image_pair_buffer.add(
             'depth', message, source, receipt
         )
+        if not hasattr(self, 'last_time_diagnostic'):
+            self.last_time_diagnostic = {}
+        self.last_time_diagnostic.update({
+            'depth_raw_stamp': source,
+            'depth_receipt_stamp': receipt,
+        })
         if self.last_pair_rejection == 'TIME_RESET':
             self.pending_image_pairs.clear()
             self.waiting_image_pair = None
@@ -876,6 +1208,23 @@ class RgbdTargetLocalizer(Node):
             color, depth, rejection = self.image_pair_buffer.pop_pair()
             if rejection:
                 self.last_pair_rejection = rejection
+                rejected = self.image_pair_buffer.last_rejected_pair
+                if rejected is not None:
+                    rejected_color, rejected_depth = rejected
+                    self.last_time_diagnostic.update({
+                        'rgb_raw_stamp': rejected_color.raw_stamp,
+                        'depth_raw_stamp': rejected_depth.raw_stamp,
+                        'rgb_receipt_stamp': (
+                            rejected_color.receipt_stamp
+                        ),
+                        'depth_receipt_stamp': (
+                            rejected_depth.receipt_stamp
+                        ),
+                        'rgb_depth_acquisition_skew': abs(
+                            rejected_color.raw_stamp
+                            - rejected_depth.raw_stamp
+                        ),
+                    })
                 continue
             if color is None:
                 return
@@ -1062,6 +1411,7 @@ class RgbdTargetLocalizer(Node):
             'rgb_raw_stamp', 'depth_raw_stamp',
             'rgb_receipt_stamp', 'depth_receipt_stamp',
             'rgb_mapped_stamp', 'depth_mapped_stamp',
+            'image_measurement_stamp',
             'rgb_depth_acquisition_skew',
             'pose_history_start_stamp', 'pose_history_end_stamp',
             'position_source_stamp', 'position_mapped_stamp',
@@ -1070,9 +1420,26 @@ class RgbdTargetLocalizer(Node):
             'position_history_end_stamp',
             'attitude_history_start_stamp',
             'attitude_history_end_stamp',
-            'image_clock_offset', 'px4_clock_offset',
+            'image_clock_offset',
+            'image_clock_anchor_sim_stamp',
+            'image_clock_anchor_system_stamp',
+            'image_clock_reference_age',
+            'image_clock_sync_quality',
+            'px4_clock_offset',
         ):
             setattr(message, name, float(values.get(name, math.nan)))
+        message.image_clock_mapping_mode = str(values.get(
+            'image_clock_mapping_mode', 'UNKNOWN'
+        ))
+        message.image_clock_status = str(values.get(
+            'image_clock_status', 'UNKNOWN'
+        ))
+        message.image_clock_reset_count = int(values.get(
+            'image_clock_reset_count', 0
+        ))
+        message.image_measurement_time_source = str(values.get(
+            'image_measurement_time_source', 'RGB'
+        ))
         message.px4_clock_reset_count = int(values.get(
             'px4_clock_reset_count', 0
         ))
@@ -1096,8 +1463,36 @@ class RgbdTargetLocalizer(Node):
             message.data = float(time.perf_counter() - started)
             self.compute_time_pub.publish(message)
 
+    @staticmethod
+    def _image_clock_rejection_reason(status):
+        reasons = {
+            'INVALID_IMAGE_TIMESTAMP': 'RAW_IMAGE_TIMESTAMP_INVALID',
+            'INVALID_CLOCK_REFERENCE': 'IMAGE_CLOCK_REFERENCE_INVALID',
+            'CLOCK_REFERENCE_DOMAIN_MISMATCH': (
+                'IMAGE_CLOCK_REFERENCE_INVALID'
+            ),
+            'CLOCK_REFERENCE_UNAVAILABLE': (
+                'IMAGE_CLOCK_REFERENCE_UNAVAILABLE'
+            ),
+            'CLOCK_REFERENCE_WARMING_UP': (
+                'IMAGE_CLOCK_REFERENCE_UNAVAILABLE'
+            ),
+            'CLOCK_REFERENCE_STALE': 'IMAGE_CLOCK_REFERENCE_STALE',
+            'SIM_TIME_RESET': 'IMAGE_CLOCK_RESET',
+            'SYSTEM_CLOCK_RESET': 'IMAGE_CLOCK_RESET',
+            'CLOCK_REFERENCE_RESET': 'IMAGE_CLOCK_RESET',
+            'IMAGE_BEFORE_CLOCK_REFERENCE': (
+                'IMAGE_CLOCK_REFERENCE_EXPIRED'
+            ),
+            'IMAGE_AFTER_CLOCK_REFERENCE': (
+                'IMAGE_CLOCK_REFERENCE_NOT_YET_COVERING_IMAGE'
+            ),
+        }
+        return reasons.get(status, 'IMAGE_CLOCK_MAPPING_FAILED')
+
     def localize(self):
         """Publish one synchronized RGB-D target observation when valid."""
+        self._apply_pending_image_clock_reset()
         now = self._ros_seconds()
         waiting_pair = getattr(self, 'waiting_image_pair', None)
         if waiting_pair is None and not self.pending_image_pairs:
@@ -1135,27 +1530,26 @@ class RgbdTargetLocalizer(Node):
         received_stamp = max(
             color_frame.receipt_stamp, depth_frame.receipt_stamp
         )
-        direct_measurement_stamp = (
-            validated_sensor_stamp(
-                raw_measurement_stamp, received_stamp, self.data_timeout
-            ) if raw_measurement_stamp is not None else None
-        )
-        mapped_measurement_stamp = (
-            direct_measurement_stamp
-            if direct_measurement_stamp is not None else
-            self.image_clock_mapper.to_ros_time(
-                raw_measurement_stamp, received_stamp
-            ) if raw_measurement_stamp is not None else None
-        )
-        measurement_stamp = (
-            validated_sensor_stamp(
-                mapped_measurement_stamp, received_stamp, self.data_timeout
-            ) if mapped_measurement_stamp is not None else None
-        )
+        if raw_measurement_stamp is not None:
+            rgb_mapped_stamp, rgb_clock_status = (
+                self.image_clock_mapper.map_time(
+                    color_frame.raw_stamp, now
+                )
+            )
+            depth_mapped_stamp, depth_clock_status = (
+                self.image_clock_mapper.map_time(
+                    depth_frame.raw_stamp, now
+                )
+            )
+        else:
+            rgb_mapped_stamp = depth_mapped_stamp = None
+            rgb_clock_status = depth_clock_status = (
+                'INVALID_IMAGE_TIMESTAMP'
+            )
+        measurement_stamp = rgb_mapped_stamp
         image_offset = (
-            0.0 if direct_measurement_stamp is not None else
-            self.image_clock_mapper.offset
-            if self.image_clock_mapper.offset is not None else math.nan
+            measurement_stamp - color_frame.raw_stamp
+            if measurement_stamp is not None else math.nan
         )
         position_range = self.position_history.time_range
         attitude_range = self.attitude_history.time_range
@@ -1172,8 +1566,18 @@ class RgbdTargetLocalizer(Node):
             'depth_raw_stamp': depth_frame.raw_stamp,
             'rgb_receipt_stamp': color_frame.receipt_stamp,
             'depth_receipt_stamp': depth_frame.receipt_stamp,
-            'rgb_mapped_stamp': color_frame.raw_stamp + image_offset,
-            'depth_mapped_stamp': depth_frame.raw_stamp + image_offset,
+            'rgb_mapped_stamp': (
+                rgb_mapped_stamp
+                if rgb_mapped_stamp is not None else math.nan
+            ),
+            'depth_mapped_stamp': (
+                depth_mapped_stamp
+                if depth_mapped_stamp is not None else math.nan
+            ),
+            'image_measurement_stamp': (
+                measurement_stamp
+                if measurement_stamp is not None else math.nan
+            ),
             'rgb_depth_acquisition_skew': abs(
                 color_frame.raw_stamp - depth_frame.raw_stamp
             ),
@@ -1204,6 +1608,39 @@ class RgbdTargetLocalizer(Node):
                 attitude_range[1] if attitude_range else math.nan
             ),
             'image_clock_offset': image_offset,
+            'image_clock_mapping_mode': getattr(
+                self.image_clock_mapper,
+                'mapping_mode',
+                'UNKNOWN',
+            ),
+            'image_clock_status': (
+                rgb_clock_status
+                if rgb_mapped_stamp is None else depth_clock_status
+            ),
+            'image_clock_reset_count': getattr(
+                self.image_clock_mapper, 'reset_count', 0
+            ),
+            'image_clock_anchor_sim_stamp': getattr(
+                self.image_clock_mapper,
+                'last_anchor_sim_time',
+                math.nan,
+            ),
+            'image_clock_anchor_system_stamp': getattr(
+                self.image_clock_mapper,
+                'last_anchor_system_time',
+                math.nan,
+            ),
+            'image_clock_reference_age': getattr(
+                self.image_clock_mapper,
+                'last_reference_age',
+                math.nan,
+            ),
+            'image_clock_sync_quality': getattr(
+                self.image_clock_mapper,
+                'last_quality',
+                math.nan,
+            ),
+            'image_measurement_time_source': 'RGB',
             'px4_clock_offset': (
                 self.px4_clock_mapper.offset
                 if self.px4_clock_mapper.offset is not None else math.nan
@@ -1217,17 +1654,54 @@ class RgbdTargetLocalizer(Node):
             ),
             'px4_clock_status': self.px4_clock_mapper.last_status,
         }
-        if mapped_measurement_stamp is None:
+        if raw_measurement_stamp is None:
             self.waiting_image_pair = None
             self.publish_invalid_observation(
-                'IMAGE_CLOCK_UNCALIBRATED',
+                'RGB_DEPTH_TIME_MISMATCH',
                 received_stamp=received_stamp,
             )
             return
-        if measurement_stamp is None:
+        if rgb_mapped_stamp is None or depth_mapped_stamp is None:
+            status = (
+                rgb_clock_status
+                if rgb_mapped_stamp is None else depth_clock_status
+            )
+            waiting_for_reference = status in (
+                'CLOCK_REFERENCE_UNAVAILABLE',
+                'CLOCK_REFERENCE_WARMING_UP',
+                'IMAGE_AFTER_CLOCK_REFERENCE',
+            )
+            if (
+                waiting_for_reference
+                and now - received_stamp
+                <= self.image_clock_wait_timeout + 1e-9
+            ):
+                self.waiting_image_pair = (color_frame, depth_frame)
+                return
             self.waiting_image_pair = None
             self.publish_invalid_observation(
-                'IMAGE_CLOCK_DOMAIN_MISMATCH', received_stamp=received_stamp
+                self._image_clock_rejection_reason(status),
+                received_stamp=received_stamp,
+            )
+            return
+        measurement_age = now - measurement_stamp
+        if measurement_age < -1e-9:
+            self.waiting_image_pair = None
+            self.publish_invalid_observation(
+                'IMAGE_TIMESTAMP_IN_FUTURE',
+                measurement_stamp,
+                received_stamp,
+            )
+            return
+        if (
+            measurement_age > self.data_timeout + 1e-9
+            or now - received_stamp > self.data_timeout + 1e-9
+        ):
+            self.waiting_image_pair = None
+            self.publish_invalid_observation(
+                'IMAGE_TIMESTAMP_STALE',
+                measurement_stamp,
+                received_stamp,
             )
             return
         pose_rejection = pose_history_rejection_reason(

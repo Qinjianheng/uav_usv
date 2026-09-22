@@ -186,6 +186,7 @@ class VisionMetricAccumulator:
         distance_bin='UNKNOWN',
         motion_regime='UNKNOWN',
         approach_phase='UNKNOWN',
+        rejection_reason='',
     ):
         camera = self._camera_name(source)
         values = self._camera.setdefault(camera, {
@@ -199,6 +200,7 @@ class VisionMetricAccumulator:
             'ages': [],
             'loss_started_at': None,
             'longest_loss': 0.0,
+            'rejections': {},
         })
         values['total'] += 1
         stratum_key = (
@@ -215,6 +217,11 @@ class VisionMetricAccumulator:
         })
         stratum['total'] += 1
         if not valid:
+            reason = str(rejection_reason).strip()
+            if reason:
+                values['rejections'][reason] = (
+                    values['rejections'].get(reason, 0) + 1
+                )
             stamp = float(measurement_stamp)
             if not math.isfinite(stamp) or stamp <= 0.0:
                 stamp = float(receipt_stamp)
@@ -300,6 +307,9 @@ class VisionMetricAccumulator:
                 'raw_position_3d': _error_summary(values['position_3d']),
                 'observation_age': _error_summary(values['ages']),
                 'longest_continuous_loss': values['longest_loss'],
+                'rejection_histogram': dict(sorted(
+                    values['rejections'].items()
+                )),
             }
         summary['kf_position_3d'] = _error_summary(self._kf_position)
         summary['kf_velocity_3d'] = _error_summary(self._kf_velocity)
@@ -899,13 +909,19 @@ class ExperimentArtifactWriter:
         'rgb_raw_stamp', 'depth_raw_stamp',
         'rgb_receipt_stamp', 'depth_receipt_stamp',
         'rgb_mapped_stamp', 'depth_mapped_stamp',
+        'image_measurement_stamp',
         'rgb_depth_acquisition_skew',
         'pose_history_start_stamp', 'pose_history_end_stamp',
         'position_source_stamp', 'position_mapped_stamp',
         'attitude_source_stamp', 'attitude_mapped_stamp',
         'position_history_start_stamp', 'position_history_end_stamp',
         'attitude_history_start_stamp', 'attitude_history_end_stamp',
-        'image_clock_offset', 'px4_clock_offset',
+        'image_clock_offset', 'image_clock_mapping_mode',
+        'image_clock_status', 'image_clock_reset_count',
+        'image_clock_anchor_sim_stamp',
+        'image_clock_anchor_system_stamp',
+        'image_clock_reference_age', 'image_clock_sync_quality',
+        'image_measurement_time_source', 'px4_clock_offset',
         'px4_clock_reset_count', 'px4_clock_calibration_count',
         'px4_clock_recalibration_count', 'px4_clock_status',
         'approach_phase', 'distance_bin', 'motion_regime',

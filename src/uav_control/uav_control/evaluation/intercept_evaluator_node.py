@@ -559,6 +559,7 @@ class InterceptEvaluatorNode(Node):
                 distance_bin=distance_bin,
                 motion_regime=self.truth_motion_regime,
                 approach_phase=self.approach_phase,
+                rejection_reason=message.rejection_reason,
             )
             error = tuple(
                 estimate[index] - truth_position[index]
@@ -581,6 +582,9 @@ class InterceptEvaluatorNode(Node):
                 'depth_receipt_stamp': float(message.depth_receipt_stamp),
                 'rgb_mapped_stamp': float(message.rgb_mapped_stamp),
                 'depth_mapped_stamp': float(message.depth_mapped_stamp),
+                'image_measurement_stamp': float(
+                    message.image_measurement_stamp
+                ),
                 'rgb_depth_acquisition_skew': float(
                     message.rgb_depth_acquisition_skew
                 ),
@@ -615,6 +619,28 @@ class InterceptEvaluatorNode(Node):
                     message.attitude_history_end_stamp
                 ),
                 'image_clock_offset': float(message.image_clock_offset),
+                'image_clock_mapping_mode': str(
+                    message.image_clock_mapping_mode
+                ),
+                'image_clock_status': str(message.image_clock_status),
+                'image_clock_reset_count': int(
+                    message.image_clock_reset_count
+                ),
+                'image_clock_anchor_sim_stamp': float(
+                    message.image_clock_anchor_sim_stamp
+                ),
+                'image_clock_anchor_system_stamp': float(
+                    message.image_clock_anchor_system_stamp
+                ),
+                'image_clock_reference_age': float(
+                    message.image_clock_reference_age
+                ),
+                'image_clock_sync_quality': float(
+                    message.image_clock_sync_quality
+                ),
+                'image_measurement_time_source': str(
+                    message.image_measurement_time_source
+                ),
                 'px4_clock_offset': float(message.px4_clock_offset),
                 'px4_clock_reset_count': int(
                     message.px4_clock_reset_count

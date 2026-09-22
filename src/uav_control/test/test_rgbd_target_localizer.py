@@ -9,6 +9,7 @@ from sensor_msgs.msg import Image
 from uav_control.perception import rgbd_target_localizer
 
 from uav_control.perception.rgbd_target_localizer import (
+    GazeboImageClockMapper,
     Px4RosClockMapper,
     RgbDepthPairBuffer,
     TimestampedVectorHistory,
@@ -21,6 +22,78 @@ from uav_control.perception.rgbd_target_localizer import (
     target_vector_from_rgbd,
     validated_sensor_stamp,
 )
+
+
+def test_gazebo_clock_maps_sim_time_from_server_side_dual_clock_anchors():
+    mapper = GazeboImageClockMapper()
+    assert mapper.add_anchor(10.0, 1000.0, 1000.04, 50.0)
+    assert mapper.add_anchor(10.1, 1000.2, 1000.25, 50.2)
+
+    mapped = mapper.to_ros_time(10.05, now_ros_time=1000.25)
+
+    assert mapped == pytest.approx(1000.1)
+    assert mapper.last_status == 'MAPPED_INTERPOLATED'
+    assert mapper.mapping_mode == 'GAZEBO_CLOCK_SYSTEM_INTERPOLATION'
+
+
+def test_gazebo_mapping_does_not_follow_image_bridge_delay_variation():
+    mapper = GazeboImageClockMapper()
+    mapper.add_anchor(20.0, 2000.0, 2000.01, 60.0)
+    mapper.add_anchor(20.2, 2000.2, 2000.22, 60.2)
+
+    early_receipt_mapping = mapper.to_ros_time(20.1, 2000.22)
+    late_receipt_mapping = mapper.to_ros_time(20.1, 2000.60)
+
+    assert early_receipt_mapping == pytest.approx(2000.1)
+    assert late_receipt_mapping == pytest.approx(2000.1)
+
+
+def test_gazebo_clock_system_jump_invalidates_old_mapping():
+    mapper = GazeboImageClockMapper(maximum_system_clock_step=0.1)
+    mapper.add_anchor(5.0, 100.0, 100.01, 10.0)
+    mapper.add_anchor(5.1, 100.1, 100.11, 10.1)
+    assert mapper.to_ros_time(5.05, 100.11) == pytest.approx(100.05)
+
+    accepted = mapper.add_anchor(5.2, 101.2, 101.21, 10.2)
+
+    assert not accepted
+    assert mapper.reset_count == 1
+    assert mapper.to_ros_time(5.15, 101.21) is None
+    assert mapper.last_status == 'SYSTEM_CLOCK_RESET'
+
+
+def test_gazebo_clock_pause_resume_and_rewind_are_bounded():
+    mapper = GazeboImageClockMapper()
+    mapper.add_anchor(1.0, 50.0, 50.01, 1.0)
+    mapper.add_anchor(1.1, 50.1, 50.11, 1.1)
+
+    assert not mapper.add_anchor(1.1, 50.3, 50.31, 1.3)
+    assert mapper.last_status == 'SIM_TIME_PAUSED'
+    assert mapper.add_anchor(1.2, 50.4, 50.41, 1.4)
+    assert mapper.to_ros_time(1.15, 50.41) == pytest.approx(50.25)
+
+    assert not mapper.add_anchor(0.1, 50.5, 50.51, 1.5)
+    assert mapper.reset_count == 1
+    assert mapper.last_status == 'SIM_TIME_RESET'
+    assert mapper.to_ros_time(1.15, 50.51) is None
+
+
+def test_gazebo_image_time_without_trusted_clock_pair_is_rejected():
+    mapper = GazeboImageClockMapper()
+
+    assert mapper.to_ros_time(12.0, 100.0) is None
+    assert mapper.last_status == 'CLOCK_REFERENCE_UNAVAILABLE'
+
+
+def test_gazebo_clock_rejects_stale_and_future_mapped_images_separately():
+    mapper = GazeboImageClockMapper(maximum_reference_age=0.5)
+    mapper.add_anchor(10.0, 100.0, 100.01, 1.0)
+    mapper.add_anchor(10.2, 100.2, 100.21, 1.2)
+
+    assert mapper.to_ros_time(10.1, 101.0) is None
+    assert mapper.last_status == 'CLOCK_REFERENCE_STALE'
+    assert mapper.to_ros_time(10.3, 100.21) is None
+    assert mapper.last_status == 'IMAGE_AFTER_CLOCK_REFERENCE'
 
 
 def test_missing_image_timeout_is_reported_at_a_bounded_rate():
@@ -180,7 +253,7 @@ def test_sensor_stamp_must_be_in_the_ros_clock_domain():
 
 def test_rgb_depth_pair_uses_acquisition_time_and_rejects_mismatch():
     assert synchronized_measurement_time(10.00, 10.04, 0.05) == (
-        pytest.approx(10.02)
+        pytest.approx(10.00)
     )
     assert synchronized_measurement_time(10.00, 10.06, 0.05) is None
 
@@ -674,6 +747,39 @@ def test_rgb_depth_pairs_by_acquisition_time_despite_transport_delay():
     assert paired_color.raw_stamp == paired_depth.raw_stamp == 5.0
 
 
+def test_rgb_depth_pairing_selects_closest_acquisition_times():
+    pairs = RgbDepthPairBuffer(maximum_skew=0.1, capacity=4)
+    early_color = object()
+    nearest_color = object()
+    depth = object()
+    pairs.add('color', early_color, 5.00, 10.01)
+    pairs.add('color', nearest_color, 5.09, 10.10)
+    pairs.add('depth', depth, 5.08, 10.20)
+
+    paired_color, paired_depth, reason = pairs.pop_pair()
+
+    assert reason == ''
+    assert paired_color.message is nearest_color
+    assert paired_depth.message is depth
+    assert paired_color.raw_stamp - paired_depth.raw_stamp == pytest.approx(
+        0.01
+    )
+    assert len(pairs.color) == 1
+    assert pairs.color[0].message is early_color
+
+
+def test_rgb_depth_pairs_are_consumed_once_and_keep_real_skew():
+    pairs = RgbDepthPairBuffer(maximum_skew=0.1, capacity=4)
+    pairs.add('color', object(), 8.00, 20.02)
+    pairs.add('depth', object(), 8.04, 20.11)
+
+    color, depth, reason = pairs.pop_pair()
+
+    assert reason == ''
+    assert depth.raw_stamp - color.raw_stamp == pytest.approx(0.04)
+    assert pairs.pop_pair() == (None, None, '')
+
+
 def test_rgb_depth_buffer_rejects_duplicates_mismatch_and_resets():
     pairs = RgbDepthPairBuffer(maximum_skew=0.02, capacity=4)
     assert pairs.add('color', object(), 5.0, 10.0) == ''
@@ -692,14 +798,11 @@ def test_synthetic_synchronized_red_rgbd_produces_valid_observation():
     node.data_timeout = 0.5
     node.image_pair_buffer = RgbDepthPairBuffer(0.02, 4)
     node.pending_image_pairs = __import__('collections').deque(maxlen=4)
-    node.image_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
+    node.image_clock_mapper = GazeboImageClockMapper()
     node.px4_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
-    assert node.image_clock_mapper.to_ros_time(10.0, 100.0) is None
-    assert node.image_clock_mapper.to_ros_time(10.02, 100.02) is None
-    assert node.image_clock_mapper.to_ros_time(10.04, 100.04) is None
-    assert node.image_clock_mapper.to_ros_time(10.06, 100.06) == (
-        pytest.approx(100.06)
-    )
+    node.image_clock_mapper.add_anchor(10.0, 100.0, 100.01, 1.0)
+    node.image_clock_mapper.add_anchor(10.2, 100.2, 100.21, 1.2)
+    node.image_clock_wait_timeout = 0.15
     node.position_history = TimestampedVectorHistory(1.0)
     node.attitude_history = TimestampedVectorHistory(1.0)
     node.position_history.add(100.0, (0.0, 0.0, -5.0))
@@ -772,7 +875,10 @@ def _make_synthetic_localizer(now):
     node.waiting_image_pair = None
     node.pose_wait_timeout = 0.15
     node.maximum_pose_wait_gap = 0.15
-    node.image_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
+    node.image_clock_wait_timeout = 0.15
+    node.image_clock_mapper = GazeboImageClockMapper()
+    node.image_clock_mapper.add_anchor(99.9, 99.9, 99.91, 1.0)
+    node.image_clock_mapper.add_anchor(100.7, 100.7, 100.71, 1.8)
     node.px4_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
     node.position_history = TimestampedVectorHistory(1.0)
     node.attitude_history = TimestampedVectorHistory(
@@ -1085,3 +1191,84 @@ def test_attitude_cache_normalizes_antipodal_quaternions():
     assert node.attitude_history.value_at(10.1) == pytest.approx(
         (1.0, 0.0, 0.0, 0.0)
     )
+
+
+def test_image_waits_for_next_clock_anchor_then_localizes():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.image_clock_mapper = GazeboImageClockMapper()
+    node.image_clock_mapper.add_anchor(100.00, 100.00, 100.01, 1.0)
+    node.image_clock_mapper.add_anchor(100.08, 100.08, 100.09, 1.08)
+    node.position_history.add(100.0, (0.0, 0.0, -5.0))
+    node.position_history.add(100.2, (0.0, 0.0, -5.0))
+    node.attitude_history.add(100.0, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(100.2, (1.0, 0.0, 0.0, 0.0))
+    _enqueue_rgbd(node, now, 100.10, 0.02, 0.03)
+
+    node.localize()
+
+    assert observations == []
+    assert node.waiting_image_pair is not None
+
+    node.image_clock_mapper.add_anchor(100.20, 100.20, 100.21, 1.2)
+    now[0] = 100.14
+    node.localize()
+
+    assert len(observations) == 1
+    assert observations[0].valid
+
+
+def test_missing_clock_reference_times_out_without_fabricating_stamp():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.image_clock_mapper = GazeboImageClockMapper()
+    _enqueue_rgbd(node, now, 10.10, 90.02, 90.03)
+
+    node.localize()
+    assert observations == []
+
+    now[0] = 100.31
+    node.localize()
+
+    assert len(observations) == 1
+    assert not observations[0].valid
+    assert observations[0].rejection_reason == (
+        'IMAGE_CLOCK_REFERENCE_UNAVAILABLE'
+    )
+    assert observations[0].stamp.sec == 0
+
+
+def test_mapped_image_in_future_has_specific_rejection_reason():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.image_clock_mapper = GazeboImageClockMapper()
+    node.image_clock_mapper.add_anchor(10.0, 100.5, 100.51, 1.0)
+    node.image_clock_mapper.add_anchor(10.2, 100.7, 100.71, 1.2)
+    color, depth = _rgbd_messages(10.1)
+    now[0] = 100.10
+    node.color_callback(color)
+    now[0] = 100.11
+    node.depth_callback(depth)
+    now[0] = 100.12
+
+    node.localize()
+
+    assert observations[-1].rejection_reason == 'IMAGE_TIMESTAMP_IN_FUTURE'
+
+
+def test_old_mapped_image_has_specific_stale_rejection_reason():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.image_clock_mapper = GazeboImageClockMapper()
+    node.image_clock_mapper.add_anchor(10.0, 99.0, 99.01, 1.0)
+    node.image_clock_mapper.add_anchor(11.0, 100.0, 100.01, 2.0)
+    color, depth = _rgbd_messages(10.1)
+    now[0] = 100.02
+    node.color_callback(color)
+    now[0] = 100.03
+    node.depth_callback(depth)
+    now[0] = 100.04
+
+    node.localize()
+
+    assert observations[-1].rejection_reason == 'IMAGE_TIMESTAMP_STALE'

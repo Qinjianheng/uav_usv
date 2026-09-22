@@ -104,6 +104,29 @@ def test_visual_no_measurements_report_no_data_instead_of_zero_error():
     assert summary['observation_age']['count'] == 0
 
 
+def test_visual_summary_counts_distinct_rejection_reasons():
+    metrics = VisionMetricAccumulator()
+    for reason in (
+        'IMAGE_CLOCK_REFERENCE_UNAVAILABLE',
+        'IMAGE_CLOCK_REFERENCE_UNAVAILABLE',
+        'IMAGE_TIMESTAMP_STALE',
+    ):
+        metrics.observe_raw(
+            source='front_rgbd_red_sphere',
+            measurement_stamp=0.0,
+            receipt_stamp=10.0,
+            estimate=(math.nan,) * 3,
+            truth=(math.nan,) * 3,
+            valid=False,
+            rejection_reason=reason,
+        )
+
+    assert metrics.summary()['front']['rejection_histogram'] == {
+        'IMAGE_CLOCK_REFERENCE_UNAVAILABLE': 2,
+        'IMAGE_TIMESTAMP_STALE': 1,
+    }
+
+
 def test_optional_visual_event_file_is_event_based(tmp_path):
     writer = ExperimentArtifactWriter(
         tmp_path,
@@ -129,7 +152,52 @@ def test_optional_visual_event_file_is_event_based(tmp_path):
     assert 'px4_clock_reset_count' in lines[0]
     assert 'px4_clock_calibration_count' in lines[0]
     assert 'px4_clock_recalibration_count' in lines[0]
+    assert 'image_measurement_stamp' in lines[0]
+    assert 'image_clock_mapping_mode' in lines[0]
+    assert 'image_clock_status' in lines[0]
+    assert 'image_clock_reset_count' in lines[0]
+    assert 'image_clock_anchor_sim_stamp' in lines[0]
+    assert 'image_clock_anchor_system_stamp' in lines[0]
+    assert 'image_clock_reference_age' in lines[0]
+    assert 'image_clock_sync_quality' in lines[0]
+    assert 'image_measurement_time_source' in lines[0]
     assert 'front_rgbd_red_sphere' in lines[1]
+
+
+def test_visual_csv_preserves_distinct_image_clock_failure_reasons(tmp_path):
+    writer = ExperimentArtifactWriter(
+        tmp_path,
+        mission_id=4,
+        config={},
+        prefix='clock_failures',
+        visual_evaluation_enabled=True,
+    )
+    for reason, status in (
+        ('IMAGE_CLOCK_REFERENCE_UNAVAILABLE',
+         'CLOCK_REFERENCE_UNAVAILABLE'),
+        ('IMAGE_CLOCK_RESET', 'SIM_TIME_RESET'),
+        ('IMAGE_TIMESTAMP_IN_FUTURE', 'MAPPED_INTERPOLATED'),
+        ('IMAGE_TIMESTAMP_STALE', 'MAPPED_INTERPOLATED'),
+    ):
+        writer.append_visual_event({
+            'measurement_stamp': 10.0,
+            'receipt_stamp': 10.1,
+            'source': 'front_rgbd_red_sphere',
+            'valid': False,
+            'rejection_reason': reason,
+            'image_clock_mapping_mode': (
+                'GAZEBO_CLOCK_SYSTEM_INTERPOLATION'
+            ),
+            'image_clock_status': status,
+        })
+    path = writer.finalize({'outcome': 'TEST'}).visual_path
+    contents = path.read_text(encoding='utf-8')
+
+    assert 'IMAGE_CLOCK_REFERENCE_UNAVAILABLE' in contents
+    assert 'IMAGE_CLOCK_RESET' in contents
+    assert 'IMAGE_TIMESTAMP_IN_FUTURE' in contents
+    assert 'IMAGE_TIMESTAMP_STALE' in contents
+    assert 'GAZEBO_CLOCK_SYSTEM_INTERPOLATION' in contents
 
 
 def test_capture_is_detected_between_truth_samples():
