@@ -328,11 +328,38 @@ def test_tracker_ack_commits_only_matching_pending_candidate():
 
     accepted = ControllerDiagnostic()
     accepted.mission_id = 2
+    accepted.plan_id = 8
     accepted.attempted_plan_id = 8
     accepted.status = 'PLAN_ACCEPTED'
+    accepted.trajectory_replaced = True
     node.controller_diagnostic_callback(accepted)
     assert node.contact_schedule.contact_stamp == pytest.approx(11.8)
     assert node.contact_schedule.committed_plan_id == 8
+
+
+def test_tracker_accept_without_replacement_does_not_change_active_reference():
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.mission_id = 2
+    node.planning_cycle_id = 5
+    node.contact_schedule = ContactTimeSchedule()
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node.contact_schedule.propose(8, 11.8, 5, 10.05)
+    old_reference = object()
+    candidate_reference = object()
+    node.active_plan_reference = old_reference
+    node.published_plan_references = {8: candidate_reference}
+
+    accepted = ControllerDiagnostic()
+    accepted.mission_id = 2
+    accepted.plan_id = 7
+    accepted.attempted_plan_id = 8
+    accepted.status = 'PLAN_ACCEPTED'
+    accepted.trajectory_replaced = False
+    node.controller_diagnostic_callback(accepted)
+
+    assert node.active_plan_reference is old_reference
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)
+    assert 8 not in node.published_plan_references
 
 
 def test_candidate_reject_then_accept_commits_only_real_tracker_acceptance():
@@ -393,8 +420,10 @@ def test_candidate_reject_then_accept_commits_only_real_tracker_acceptance():
     assert accepted == TrajectoryRejectReason.NONE
     confirmation = ControllerDiagnostic()
     confirmation.mission_id = 2
+    confirmation.plan_id = 9
     confirmation.attempted_plan_id = 9
     confirmation.status = 'PLAN_ACCEPTED'
+    confirmation.trajectory_replaced = True
     planner_node.controller_diagnostic_callback(confirmation)
     assert schedule.contact_stamp == pytest.approx(11.2)
     assert schedule.committed_plan_id == 9

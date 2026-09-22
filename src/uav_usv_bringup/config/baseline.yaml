@@ -436,6 +436,8 @@ rgbd_target_localizer:
     data_timeout: 0.5
     state_history_duration: 1.0
     maximum_clock_offset_jump: 0.05
+    image_pair_buffer_size: 8
+    time_pair_diagnostics_enabled: false
     localization_rate_hz: 10.0
     camera_pitch_down: 0.20944
     camera_translation_x: 0.35

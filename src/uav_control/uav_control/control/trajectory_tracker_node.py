@@ -2,7 +2,7 @@
 
 import math
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import rclpy
 from builtin_interfaces.msg import Time
@@ -22,6 +22,15 @@ from .trajectory_tracking import PolynomialTrajectory
 from .trajectory_tracking import TrackerKinematicState
 from .trajectory_tracking import TrajectoryRejectReason
 from .trajectory_tracking import TrajectoryTrackerCore
+
+
+@dataclass(frozen=True)
+class PendingTrajectory:
+    """One future-start candidate awaiting a state at its execution time."""
+
+    trajectory: PolynomialTrajectory
+    planner_published_stamp: float
+    tracker_receipt_stamp: float
 
 
 def _stamp_seconds(stamp):
@@ -565,6 +574,8 @@ class TrajectoryTrackerNode(Node):
         self.mission_state = MissionState.INIT
         self.mission_state_name = 'INIT'
         self.last_rejection = TrajectoryRejectReason.NONE
+        self.last_rejection_subreason = ''
+        self.pending_trajectory = None
         self.last_callback_time = 0.0
         self.control_counter = 0
         self.preflight_counter = 0
@@ -593,6 +604,7 @@ class TrajectoryTrackerNode(Node):
             message,
             self._ros_seconds(),
         )
+        self._process_pending_trajectory()
 
     def vehicle_status_callback(self, message):
         self.vehicle_status_stamp = self._ros_seconds()
@@ -624,6 +636,8 @@ class TrajectoryTrackerNode(Node):
             self.tracker.reset()
             self.flight_guidance.reset()
             self.last_rejection = TrajectoryRejectReason.NONE
+            self.last_rejection_subreason = ''
+            self.pending_trajectory = None
             self.takeoff_complete_sent = False
             self.last_target_yaw = None
             self.terminal_hold_position = None
@@ -635,6 +649,7 @@ class TrajectoryTrackerNode(Node):
             self.terminal_mode_latched = True
         if self.mission_state in self.TERMINAL_STATES:
             self.tracker.reset()
+            self.pending_trajectory = None
             self.terminal_mode_latched = False
             if self.latest_state is not None:
                 safe_z = min(
@@ -648,8 +663,95 @@ class TrajectoryTrackerNode(Node):
                     safe_z,
                 )
 
+    def _candidate_endpoint(self, trajectory):
+        if self.latest_prediction is None:
+            raise ValueError('prediction unavailable')
+        if int(self.latest_prediction.mission_id) != self.mission_id:
+            raise ValueError('prediction mission mismatch')
+        return prediction_endpoint_from_message(
+            self.latest_prediction,
+            (
+                trajectory.contact_stamp
+                if trajectory.contact_stamp > 0.0
+                else trajectory.source_stamp + trajectory.duration
+            ),
+        )
+
+    def _evaluate_trajectory(self, trajectory):
+        if self.latest_state is None or self.latest_prediction is None:
+            return TrajectoryRejectReason.PREDICTION_MISMATCH
+        if int(self.latest_prediction.mission_id) != self.mission_id:
+            return TrajectoryRejectReason.PREDICTION_MISMATCH
+        try:
+            endpoint = self._candidate_endpoint(trajectory)
+        except (TypeError, ValueError):
+            return TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
+        rejection = self.tracker.accept(
+            trajectory,
+            self.latest_state,
+            self.mission_id,
+            prediction_sequence_id=None,
+            target_endpoint=endpoint,
+            maximum_position_error=(
+                self.terminal_replacement_position_error
+                if self.mission_state == MissionState.TERMINAL_MINCO
+                else None
+            ),
+        )
+        if (
+            rejection == TrajectoryRejectReason.NONE
+            and trajectory.terminal_mode
+        ):
+            self.terminal_mode_latched = True
+        return rejection
+
+    def _publish_candidate_result(self, pending, rejection, started):
+        trajectory = pending.trajectory
+        source_age = (
+            self.latest_state.stamp - trajectory.source_stamp
+            if self.latest_state is not None else math.nan
+        )
+        subreason = ''
+        if rejection == TrajectoryRejectReason.SOURCE_STALE:
+            subreason = (
+                'FUTURE_TRAJECTORY_START'
+                if source_age < 0.0 else 'TRAJECTORY_START_TOO_OLD'
+            )
+        self.last_rejection = rejection
+        self.last_rejection_subreason = subreason
+        self.last_callback_time = time.perf_counter() - started
+        self._publish_diagnostic(
+            self._ros_seconds(),
+            None,
+            ('PLAN_ACCEPTED' if rejection == TrajectoryRejectReason.NONE
+             else 'PLAN_REJECTED'),
+            self.last_callback_time,
+            attempted_plan_id=trajectory.plan_id,
+            candidate=pending,
+        )
+
+    def _process_pending_trajectory(self):
+        pending = getattr(self, 'pending_trajectory', None)
+        if pending is None or self.latest_state is None:
+            return
+        trajectory = pending.trajectory
+        if self.latest_state.stamp < trajectory.source_stamp - 1e-9:
+            if self._ros_seconds() - trajectory.source_stamp <= (
+                self.tracker.maximum_plan_age
+            ):
+                return
+            rejection = TrajectoryRejectReason.SOURCE_STALE
+        else:
+            rejection = self._evaluate_trajectory(trajectory)
+        self.pending_trajectory = None
+        self._publish_candidate_result(
+            pending, rejection, time.perf_counter()
+        )
+
     def trajectory_callback(self, message):
         started = time.perf_counter()
+        self.tracker.last_replacement_performed = False
+        receipt_stamp = self._ros_seconds()
         attempted_plan_id = int(message.plan_id)
         rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         try:
@@ -661,52 +763,41 @@ class TrajectoryTrackerNode(Node):
         except (TypeError, ValueError):
             rejection = TrajectoryRejectReason.INVALID_TRAJECTORY
         else:
-            if self.latest_state is None or self.latest_prediction is None:
-                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
-            elif int(self.latest_prediction.mission_id) != self.mission_id:
-                rejection = TrajectoryRejectReason.PREDICTION_MISMATCH
-            else:
-                try:
-                    endpoint = prediction_endpoint_from_message(
-                        self.latest_prediction,
-                        (
-                            trajectory.contact_stamp
-                            if trajectory.contact_stamp > 0.0
-                            else trajectory.source_stamp + trajectory.duration
-                        ),
+            pending = PendingTrajectory(
+                trajectory=trajectory,
+                planner_published_stamp=_stamp_seconds(
+                    message.published_stamp
+                ),
+                tracker_receipt_stamp=receipt_stamp,
+            )
+            if (
+                self.latest_state is not None
+                and self.latest_state.stamp < trajectory.source_stamp - 1e-9
+            ):
+                current = getattr(self, 'pending_trajectory', None)
+                if (
+                    current is None
+                    or trajectory.plan_id >= current.trajectory.plan_id
+                ):
+                    self.pending_trajectory = pending
+                    self.last_rejection = TrajectoryRejectReason.NONE
+                    self.last_rejection_subreason = 'FUTURE_TRAJECTORY_START'
+                    self.last_callback_time = time.perf_counter() - started
+                    self._publish_diagnostic(
+                        receipt_stamp, None, 'PLAN_PENDING',
+                        self.last_callback_time,
+                        attempted_plan_id=attempted_plan_id,
+                        candidate=pending,
                     )
-                except (TypeError, ValueError):
-                    rejection = TrajectoryRejectReason.TARGET_ENDPOINT_MISMATCH
-                else:
-                    rejection = self.tracker.accept(
-                        trajectory,
-                        self.latest_state,
-                        self.mission_id,
-                        prediction_sequence_id=None,
-                        target_endpoint=endpoint,
-                        maximum_position_error=(
-                            self.terminal_replacement_position_error
-                            if self.mission_state
-                            == MissionState.TERMINAL_MINCO
-                            else None
-                        ),
-                    )
-                    if (
-                        rejection == TrajectoryRejectReason.NONE
-                        and trajectory.terminal_mode
-                    ):
-                        self.terminal_mode_latched = True
+                    return
+            rejection = self._evaluate_trajectory(trajectory)
+            self._publish_candidate_result(pending, rejection, started)
+            return
         self.last_rejection = rejection
+        self.last_rejection_subreason = ''
         self.last_callback_time = time.perf_counter() - started
         self._publish_diagnostic(
-            self._ros_seconds(),
-            None,
-            (
-                'PLAN_ACCEPTED'
-                if rejection == TrajectoryRejectReason.NONE
-                else 'PLAN_REJECTED'
-            ),
-            self.last_callback_time,
+            receipt_stamp, None, 'PLAN_REJECTED', self.last_callback_time,
             attempted_plan_id=attempted_plan_id,
         )
 
@@ -764,6 +855,7 @@ class TrajectoryTrackerNode(Node):
         status,
         callback_time,
         attempted_plan_id=0,
+        candidate=None,
     ):
         message = ControllerDiagnostic()
         message.stamp = _seconds_to_time(now)
@@ -810,6 +902,33 @@ class TrajectoryTrackerNode(Node):
         )
         message.status = str(status)
         message.rejection_reason = self.last_rejection.value
+        message.rejection_subreason = str(getattr(
+            self, 'last_rejection_subreason', ''
+        ))
+        if candidate is not None:
+            trajectory = candidate.trajectory
+            message.trajectory_start_stamp = _seconds_to_time(
+                trajectory.source_stamp
+            )
+            message.planner_published_stamp = _seconds_to_time(
+                candidate.planner_published_stamp
+            )
+            message.tracker_receipt_stamp = _seconds_to_time(
+                candidate.tracker_receipt_stamp
+            )
+            if self.latest_state is not None:
+                message.tracker_state_stamp = _seconds_to_time(
+                    self.latest_state.stamp
+                )
+                message.source_age = (
+                    self.latest_state.stamp - trajectory.source_stamp
+                )
+                message.state_age_at_receipt = (
+                    candidate.tracker_receipt_stamp - self.latest_state.stamp
+                )
+            message.remaining_valid_time = (
+                trajectory.valid_until - candidate.tracker_receipt_stamp
+            )
         message.trajectory_replaced = bool(
             self.tracker.last_replacement_performed
         )
@@ -842,6 +961,7 @@ class TrajectoryTrackerNode(Node):
     def timer_callback(self):
         started = time.perf_counter()
         now = self._ros_seconds()
+        self._process_pending_trajectory()
         if self.latest_state is None:
             self._publish_bool(self.flight_ready_pub, False)
             self._publish_diagnostic(

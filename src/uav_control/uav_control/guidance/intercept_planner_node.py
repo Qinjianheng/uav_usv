@@ -569,16 +569,28 @@ class InterceptPlannerNode(Node):
             return
         attempted_plan_id = int(message.attempted_plan_id)
         if message.status == 'PLAN_ACCEPTED':
-            confirmed = self.contact_schedule.confirm(
-                attempted_plan_id,
-                self.planning_cycle_id,
+            actually_replaced = bool(
+                getattr(message, 'trajectory_replaced', False)
+                and int(message.plan_id) == attempted_plan_id
             )
+            confirmed = (
+                self.contact_schedule.confirm(
+                    attempted_plan_id,
+                    self.planning_cycle_id,
+                )
+                if actually_replaced else False
+            )
+            if not actually_replaced:
+                self.contact_schedule.reject(
+                    attempted_plan_id,
+                    self.planning_cycle_id,
+                )
             references = getattr(self, 'published_plan_references', {})
             reference = references.pop(
                 attempted_plan_id,
                 None,
             )
-            if confirmed and reference is not None:
+            if confirmed and reference is not None and actually_replaced:
                 self.active_plan_reference = reference
         elif message.status == 'PLAN_REJECTED':
             self.contact_schedule.reject(

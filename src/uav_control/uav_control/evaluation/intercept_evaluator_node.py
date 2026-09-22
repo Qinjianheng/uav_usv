@@ -554,7 +554,8 @@ class InterceptEvaluatorNode(Node):
                 receipt_stamp=receipt_stamp,
                 estimate=estimate,
                 truth=truth_position,
-                valid=bool(message.valid and truth is not None),
+                valid=bool(message.valid),
+                truth_available=truth is not None,
                 distance_bin=distance_bin,
                 motion_regime=self.truth_motion_regime,
                 approach_phase=self.approach_phase,
@@ -570,8 +571,25 @@ class InterceptEvaluatorNode(Node):
                 'processed_stamp': _stamp_seconds(message.processed_stamp),
                 'published_stamp': _stamp_seconds(message.published_stamp),
                 'source': str(message.source),
-                'valid': bool(message.valid and truth is not None),
+                'valid': bool(message.valid),
+                'observation_valid': bool(message.valid),
+                'truth_available': truth is not None,
                 'rejection_reason': str(message.rejection_reason),
+                'rgb_raw_stamp': float(message.rgb_raw_stamp),
+                'depth_raw_stamp': float(message.depth_raw_stamp),
+                'rgb_receipt_stamp': float(message.rgb_receipt_stamp),
+                'depth_receipt_stamp': float(message.depth_receipt_stamp),
+                'rgb_mapped_stamp': float(message.rgb_mapped_stamp),
+                'depth_mapped_stamp': float(message.depth_mapped_stamp),
+                'rgb_depth_acquisition_skew': float(
+                    message.rgb_depth_acquisition_skew
+                ),
+                'pose_history_start_stamp': float(
+                    message.pose_history_start_stamp
+                ),
+                'pose_history_end_stamp': float(
+                    message.pose_history_end_stamp
+                ),
                 'approach_phase': self.approach_phase,
                 'distance_bin': distance_bin,
                 'motion_regime': self.truth_motion_regime,
@@ -594,7 +612,10 @@ class InterceptEvaluatorNode(Node):
                 'error_z': error[2],
                 'horizontal_error': math.hypot(error[0], error[1]),
                 'position_3d_error': math.sqrt(sum(v * v for v in error)),
-                'observation_age': receipt_stamp - measurement_stamp,
+                'observation_age': (
+                    receipt_stamp - measurement_stamp
+                    if measurement_stamp > 0.0 else math.nan
+                ),
             })
         self.pending_visual_observations = pending
 
@@ -772,7 +793,9 @@ class InterceptEvaluatorNode(Node):
         self.last_safety_state = safety_state
         if (
             self.writer is not None
-            and message.status in ('PLAN_ACCEPTED', 'PLAN_REJECTED')
+            and message.status in (
+                'PLAN_PENDING', 'PLAN_ACCEPTED', 'PLAN_REJECTED'
+            )
         ):
             self.writer.append_detail_event(
                 'tracker',
@@ -781,6 +804,28 @@ class InterceptEvaluatorNode(Node):
                     'status': str(message.status),
                     'active_plan_id': int(message.plan_id),
                     'rejection_reason': str(message.rejection_reason),
+                    'rejection_subreason': str(
+                        message.rejection_subreason
+                    ),
+                    'trajectory_start_stamp': _stamp_seconds(
+                        message.trajectory_start_stamp
+                    ),
+                    'planner_published_stamp': _stamp_seconds(
+                        message.planner_published_stamp
+                    ),
+                    'tracker_receipt_stamp': _stamp_seconds(
+                        message.tracker_receipt_stamp
+                    ),
+                    'tracker_state_stamp': _stamp_seconds(
+                        message.tracker_state_stamp
+                    ),
+                    'source_age': float(message.source_age),
+                    'state_age_at_receipt': float(
+                        message.state_age_at_receipt
+                    ),
+                    'remaining_valid_time': float(
+                        message.remaining_valid_time
+                    ),
                     'trajectory_replaced': bool(message.trajectory_replaced),
                     'handover_position_error': float(
                         message.handover_position_error

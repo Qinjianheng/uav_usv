@@ -14,9 +14,11 @@ from uav_usv_interfaces.msg import (
 )
 
 from uav_control.control.trajectory_tracker_node import command_to_setpoint
-from uav_control.control.trajectory_tracker_node import flight_command_to_setpoint
-from uav_control.control.trajectory_tracker_node import trajectory_from_message
-from uav_control.control.trajectory_tracker_node import tracker_state_from_message
+from uav_control.control.trajectory_tracker_node import (
+    flight_command_to_setpoint,
+    tracker_state_from_message,
+    trajectory_from_message,
+)
 from uav_control.control.trajectory_tracker_node import (
     prediction_endpoint_from_message,
 )
@@ -300,6 +302,100 @@ def test_rejected_candidate_reports_attempted_plan_without_replacing_active():
     assert node.tracker.active_trajectory.plan_id == 8
 
 
+def _pending_test_node(now=100.20):
+    node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
+    node.mission_id = 3
+    node.mission_state = MissionState.MINCO_TRACKING
+    node.tracker = TrajectoryTrackerCore()
+    node.latest_state = TrackerKinematicState(
+        stamp=100.20,
+        position=(0.0, 0.0, -1.0),
+        velocity=(1.0, 0.0, 0.0),
+    )
+    prediction = TargetPrediction()
+    prediction.mission_id = 3
+    prediction.frame_id = 'local_ned'
+    prediction.valid = True
+    prediction.source_stamp.sec = 100
+    prediction.prediction_horizon = 3.0
+    point = PredictedTargetPoint()
+    point.relative_time.sec = 2
+    point.relative_time.nanosec = 250_000_000
+    point.position.x = 2.0
+    point.position.y = 0.0
+    point.position.z = -1.0
+    prediction.samples = [point]
+    node.latest_prediction = prediction
+    node.latest_target_state = None
+    node.last_target_yaw = None
+    node.last_rejection = trajectory_tracker_node.TrajectoryRejectReason.NONE
+    node.last_rejection_subreason = ''
+    node.terminal_mode_latched = False
+    node.pending_trajectory = None
+    node._ros_seconds = lambda: now
+    published = []
+    node.diagnostic_pub = type(
+        'Publisher', (),
+        {'publish': lambda _self, message: published.append(message)},
+    )()
+    return node, published
+
+
+def test_future_trajectory_waits_for_state_at_execution_start_then_accepts():
+    node, published = _pending_test_node()
+    candidate = make_trajectory_message()
+    candidate.frame_id = 'local_ned'
+    candidate.terminal_position.x = 2.0
+    candidate.terminal_position.y = 0.0
+    candidate.terminal_position.z = -1.0
+    candidate.segments[0].coefficients = [
+        0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ]
+
+    node.trajectory_callback(candidate)
+
+    assert node.pending_trajectory is not None
+    assert node.tracker.active_trajectory is None
+    assert published[-1].status == 'PLAN_PENDING'
+    assert published[-1].rejection_subreason == 'FUTURE_TRAJECTORY_START'
+    assert published[-1].source_age == pytest.approx(-0.05)
+
+    node.latest_state = TrackerKinematicState(
+        stamp=100.25,
+        position=(0.0, 0.0, -1.0),
+        velocity=(1.0, 0.0, 0.0),
+    )
+    node._process_pending_trajectory()
+
+    assert node.pending_trajectory is None
+    assert node.tracker.active_trajectory.plan_id == 7
+    assert published[-1].status == 'PLAN_ACCEPTED'
+    assert published[-1].trajectory_replaced
+
+
+def test_pending_trajectory_that_becomes_too_old_is_rejected():
+    node, published = _pending_test_node(now=100.50)
+    candidate = make_trajectory_message()
+    candidate.frame_id = 'local_ned'
+    node.trajectory_callback(candidate)
+    node.latest_state = TrackerKinematicState(
+        stamp=100.50,
+        position=(0.0, 1.0, 2.0),
+        velocity=(6.0, 7.0, 8.0),
+    )
+
+    node._process_pending_trajectory()
+
+    assert node.pending_trajectory is None
+    assert node.tracker.active_trajectory is None
+    assert published[-1].status == 'PLAN_REJECTED'
+    assert published[-1].rejection_reason == 'SOURCE_STALE'
+    assert published[-1].rejection_subreason == 'TRAJECTORY_START_TOO_OLD'
+    assert published[-1].source_age == pytest.approx(0.25)
+
+
 def test_tracker_endpoint_query_uses_absolute_contact_stamp():
     message = make_prediction_message(
         source_stamp=10.2,
@@ -356,7 +452,7 @@ def test_flight_velocity_command_does_not_activate_position_control():
     assert list(message.velocity) == pytest.approx([3.0, 4.0, -1.0])
 
 
-def test_tracking_velocity_mode_drops_position_and_sends_the_command_velocity():
+def test_tracking_velocity_mode_uses_command_velocity_without_position():
     """
     Guard velocity-driven MINCO tracking, which is what builds closing speed.
 

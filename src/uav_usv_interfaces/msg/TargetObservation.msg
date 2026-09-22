@@ -8,6 +8,15 @@ float64[9] covariance
 float32 confidence
 string source
 string rejection_reason
+float64 rgb_raw_stamp
+float64 depth_raw_stamp
+float64 rgb_receipt_stamp
+float64 depth_receipt_stamp
+float64 rgb_mapped_stamp
+float64 depth_mapped_stamp
+float64 rgb_depth_acquisition_skew
+float64 pose_history_start_stamp
+float64 pose_history_end_stamp
 uint32 red_pixel_count
 float32 valid_depth_ratio
 float32 target_range

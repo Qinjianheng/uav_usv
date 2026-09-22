@@ -4,11 +4,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
+from sensor_msgs.msg import Image
 
 from uav_control.perception import rgbd_target_localizer
 
 from uav_control.perception.rgbd_target_localizer import (
     Px4RosClockMapper,
+    RgbDepthPairBuffer,
     TimestampedVectorHistory,
     body_frd_to_ned_rotation,
     camera_target_to_local_ned,
@@ -126,6 +128,9 @@ def test_image_callbacks_only_replace_latest_frames(monkeypatch):
     node.depth_measurement_time = None
     node.data_timeout = 0.5
     node.image_clock_mapper = Px4RosClockMapper(0.05)
+    node.image_pair_buffer = RgbDepthPairBuffer(0.05)
+    node.pending_image_pairs = __import__('collections').deque(maxlen=8)
+    node.last_pair_rejection = ''
     node._ros_seconds = lambda: 10.0
     monkeypatch.setattr(
         rgbd_target_localizer,
@@ -192,13 +197,115 @@ def test_pose_history_interpolates_at_image_acquisition_time():
 def test_px4_clock_mapper_rejects_a_time_jump_instead_of_retiming_pose():
     mapper = Px4RosClockMapper(maximum_offset_jump=0.05)
 
-    assert mapper.to_ros_time(
-        2.0, receipt_ros_time=10.0
-    ) == pytest.approx(10.0)
+    assert mapper.to_ros_time(2.0, receipt_ros_time=10.0) is None
+    assert mapper.to_ros_time(2.0, receipt_ros_time=10.01) is None
+    assert mapper.to_ros_time(2.05, receipt_ros_time=10.05) is None
     assert mapper.to_ros_time(
         2.1, receipt_ros_time=10.1
     ) == pytest.approx(10.1)
     assert mapper.to_ros_time(1.0, receipt_ros_time=10.2) is None
+
+
+def test_rgb_depth_pairs_by_acquisition_time_despite_transport_delay():
+    pairs = RgbDepthPairBuffer(maximum_skew=0.02, capacity=4)
+    color = object()
+    depth = object()
+
+    assert pairs.add('color', color, 5.0, 10.01) == ''
+    assert pairs.add('depth', depth, 5.0, 10.08) == ''
+    paired_color, paired_depth, reason = pairs.pop_pair()
+
+    assert reason == ''
+    assert paired_color.message is color
+    assert paired_depth.message is depth
+    assert paired_color.raw_stamp == paired_depth.raw_stamp == 5.0
+
+
+def test_rgb_depth_buffer_rejects_duplicates_mismatch_and_resets():
+    pairs = RgbDepthPairBuffer(maximum_skew=0.02, capacity=4)
+    assert pairs.add('color', object(), 5.0, 10.0) == ''
+    assert pairs.add('color', object(), 5.0, 10.1) == 'DUPLICATE_FRAME'
+    assert pairs.add('depth', object(), 5.2, 10.2) == ''
+    assert pairs.pop_pair()[2] == 'RGB_FRAME_UNMATCHED'
+    assert pairs.add('color', object(), 1.0, 11.0) == 'TIME_RESET'
+    assert len(pairs.depth) == 0
+
+
+def test_synthetic_synchronized_red_rgbd_produces_valid_observation():
+    node = object.__new__(rgbd_target_localizer.RgbdTargetLocalizer)
+    now = [100.12]
+    node._ros_seconds = lambda: now[0]
+    node.maximum_rgb_depth_skew = 0.02
+    node.data_timeout = 0.5
+    node.image_pair_buffer = RgbDepthPairBuffer(0.02, 4)
+    node.pending_image_pairs = __import__('collections').deque(maxlen=4)
+    node.image_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
+    assert node.image_clock_mapper.to_ros_time(10.0, 100.0) is None
+    assert node.image_clock_mapper.to_ros_time(10.02, 100.02) is None
+    assert node.image_clock_mapper.to_ros_time(10.04, 100.04) is None
+    assert node.image_clock_mapper.to_ros_time(10.06, 100.06) == (
+        pytest.approx(100.06)
+    )
+    node.position_history = TimestampedVectorHistory(1.0)
+    node.attitude_history = TimestampedVectorHistory(1.0)
+    node.position_history.add(100.0, (0.0, 0.0, -5.0))
+    node.position_history.add(100.2, (0.0, 0.0, -5.0))
+    node.attitude_history.add(100.0, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(100.2, (1.0, 0.0, 0.0, 0.0))
+    node.color_time = node.depth_time = -math.inf
+    node.last_pair_rejection = ''
+    node.last_image_timeout_report = -math.inf
+    node.last_time_diagnostic = {}
+    node.frame_id = 'local_ned'
+    node.horizontal_fov = math.pi / 2.0
+    node.minimum_red_pixels = 3
+    node.minimum_depth = 0.2
+    node.maximum_depth = 25.0
+    node.minimum_depth_ratio = 0.5
+    node.camera_translation_flu = (0.0, 0.0, 0.0)
+    node.camera_pitch_down = 0.0
+    node.target_radius = 0.0
+    node.target_reference_z_offset = 0.0
+    node.base_position_std = 0.08
+    node.range_position_std_scale = 0.01
+    observations = []
+    positions = []
+    node.observation_pub = SimpleNamespace(
+        publish=lambda message: observations.append(message)
+    )
+    node.target_position_pub = SimpleNamespace(
+        publish=lambda message: positions.append(message)
+    )
+
+    color_array = np.zeros((4, 4, 3), dtype=np.uint8)
+    color_array[1:3, 1:3, 2] = 255
+    depth_array = np.full((4, 4), 5.0, dtype='<f4')
+    color = Image()
+    color.header.stamp.sec = 10
+    color.header.stamp.nanosec = 100_000_000
+    color.width = color.height = 4
+    color.step = 12
+    color.encoding = 'bgr8'
+    color.data = color_array.tobytes()
+    depth = Image()
+    depth.header.stamp.sec = 10
+    depth.header.stamp.nanosec = 100_000_000
+    depth.width = depth.height = 4
+    depth.step = 16
+    depth.encoding = '32FC1'
+    depth.data = depth_array.tobytes()
+
+    node.color_callback(color)
+    now[0] = 100.13
+    node.depth_callback(depth)
+    node.localize()
+
+    assert len(observations) == 1
+    assert observations[0].valid
+    assert observations[0].red_pixel_count == 4
+    assert observations[0].rejection_reason == ''
+    assert observations[0].rgb_depth_acquisition_skew == pytest.approx(0.0)
+    assert len(positions) == 1
 
 
 def test_px4_callbacks_cache_pose_in_mapped_measurement_time():
@@ -258,6 +365,12 @@ def test_attitude_cache_normalizes_antipodal_quaternions():
     first.timestamp = 2_000_000
     first.q = [1.0, 0.0, 0.0, 0.0]
     node.attitude_callback(first)
+    for source_seconds in (2.05, 2.10):
+        now[0] = source_seconds + 8.0
+        intermediate = VehicleAttitude()
+        intermediate.timestamp = int(source_seconds * 1_000_000)
+        intermediate.q = [-1.0, 0.0, 0.0, 0.0]
+        node.attitude_callback(intermediate)
     now[0] = 10.2
     second = VehicleAttitude()
     second.timestamp = 2_200_000

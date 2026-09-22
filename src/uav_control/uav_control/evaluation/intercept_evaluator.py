@@ -147,11 +147,12 @@ def _error_summary(values):
     values = [float(value) for value in values]
     return {
         'count': len(values),
-        'p50': _percentile(values, 0.50),
-        'p95': _percentile(values, 0.95),
+        'available': bool(values),
+        'p50': _percentile(values, 0.50) if values else None,
+        'p95': _percentile(values, 0.95) if values else None,
         'rmse': (
             math.sqrt(sum(value * value for value in values) / len(values))
-            if values else 0.0
+            if values else None
         ),
     }
 
@@ -181,6 +182,7 @@ class VisionMetricAccumulator:
         estimate,
         truth,
         valid,
+        truth_available=True,
         distance_bin='UNKNOWN',
         motion_regime='UNKNOWN',
         approach_phase='UNKNOWN',
@@ -220,15 +222,10 @@ class VisionMetricAccumulator:
                 if values['loss_started_at'] is None:
                     values['loss_started_at'] = stamp
             return
-        error = tuple(
-            float(left) - float(right)
-            for left, right in zip(estimate, truth)
-        )
-        if len(error) != 3 or not all(map(math.isfinite, error)):
-            return
         age = float(receipt_stamp) - float(measurement_stamp)
-        if not math.isfinite(age) or age < 0.0:
-            return
+        if math.isfinite(age) and age >= 0.0:
+            values['ages'].append(age)
+            stratum['ages'].append(age)
         values['valid'] += 1
         stratum['valid'] += 1
         if values['loss_started_at'] is not None:
@@ -237,14 +234,20 @@ class VisionMetricAccumulator:
                 float(receipt_stamp) - values['loss_started_at'],
             )
             values['loss_started_at'] = None
+        if not truth_available:
+            return
+        error = tuple(
+            float(left) - float(right)
+            for left, right in zip(estimate, truth)
+        )
+        if len(error) != 3 or not all(map(math.isfinite, error)):
+            return
         values['axis_x'].append(abs(error[0]))
         values['axis_y'].append(abs(error[1]))
         values['axis_z'].append(abs(error[2]))
         values['horizontal'].append(math.hypot(error[0], error[1]))
         values['position_3d'].append(_norm(error))
-        values['ages'].append(age)
         stratum['position_3d'].append(_norm(error))
-        stratum['ages'].append(age)
 
     def observe_kf(
         self,
@@ -891,7 +894,13 @@ class ExperimentArtifactWriter:
     )
     VISUAL_FIELDS = (
         'measurement_stamp', 'receipt_stamp', 'processed_stamp',
-        'published_stamp', 'source', 'valid', 'rejection_reason',
+        'published_stamp', 'source', 'valid', 'observation_valid',
+        'truth_available', 'rejection_reason',
+        'rgb_raw_stamp', 'depth_raw_stamp',
+        'rgb_receipt_stamp', 'depth_receipt_stamp',
+        'rgb_mapped_stamp', 'depth_mapped_stamp',
+        'rgb_depth_acquisition_skew',
+        'pose_history_start_stamp', 'pose_history_end_stamp',
         'approach_phase', 'distance_bin', 'motion_regime',
         'confidence', 'red_pixel_count', 'valid_depth_ratio',
         'target_range', 'view_angle',

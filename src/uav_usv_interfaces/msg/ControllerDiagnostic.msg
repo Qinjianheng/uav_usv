@@ -7,9 +7,17 @@ uint64 prediction_sequence_id
 
 string status
 string rejection_reason
+string rejection_subreason
+
+builtin_interfaces/Time trajectory_start_stamp
+builtin_interfaces/Time planner_published_stamp
+builtin_interfaces/Time tracker_receipt_stamp
+builtin_interfaces/Time tracker_state_stamp
 
 float64 callback_compute_time
 float64 source_age
+float64 state_age_at_receipt
+float64 remaining_valid_time
 float64 prediction_age
 float64 trajectory_age
 float64 remaining_time

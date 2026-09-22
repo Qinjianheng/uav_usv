@@ -90,6 +90,20 @@ def test_visual_loss_duration_counts_explicit_invalid_interval_only():
     )
 
 
+def test_visual_no_measurements_report_no_data_instead_of_zero_error():
+    metrics = VisionMetricAccumulator()
+    metrics.observe_raw(
+        source='front', measurement_stamp=0.0, receipt_stamp=10.5,
+        estimate=(math.nan,) * 3, truth=(math.nan,) * 3, valid=False,
+    )
+
+    summary = metrics.summary()['front']
+    assert summary['raw_position_3d']['count'] == 0
+    assert not summary['raw_position_3d']['available']
+    assert summary['raw_position_3d']['rmse'] is None
+    assert summary['observation_age']['count'] == 0
+
+
 def test_optional_visual_event_file_is_event_based(tmp_path):
     writer = ExperimentArtifactWriter(
         tmp_path,
