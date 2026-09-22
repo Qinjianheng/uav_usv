@@ -199,6 +199,8 @@ class Px4RosClockMapper:
         calibration_samples=4,
         reset_regression_threshold=0.5,
         reset_confirmation_window=0.5,
+        offset_recovery_samples=3,
+        source_is_ros_time=False,
     ):
         self.maximum_offset_jump = max(float(maximum_offset_jump), 1e-6)
         self.calibration_samples = max(int(calibration_samples), 1)
@@ -208,17 +210,25 @@ class Px4RosClockMapper:
         self.reset_confirmation_window = max(
             float(reset_confirmation_window), 1e-3
         )
-        self.offset = None
+        self.offset_recovery_samples = max(
+            int(offset_recovery_samples), 2
+        )
+        self.source_is_ros_time = bool(source_is_ros_time)
+        self.offset = 0.0 if self.source_is_ros_time else None
         self._offset_samples = deque(maxlen=32)
+        self._offset_outlier_samples = {}
         self._last_source_times = {}
         self._last_receipt_time = None
         self._reset_candidates = {}
         self.reset_count = 0
+        self.calibration_count = 1 if self.source_is_ros_time else 0
+        self.offset_recalibration_count = 0
         self.last_status = 'UNCALIBRATED'
 
     def reset(self):
-        self.offset = None
+        self.offset = 0.0 if self.source_is_ros_time else None
         self._offset_samples.clear()
+        self._offset_outlier_samples.clear()
         self._last_source_times.clear()
         self._last_receipt_time = None
         self._reset_candidates.clear()
@@ -234,7 +244,8 @@ class Px4RosClockMapper:
     ):
         self._last_source_times[stream_name] = source_time
         self._last_receipt_time = receipt_ros_time
-        self._offset_samples.append(observed_offset)
+        if not self.source_is_ros_time:
+            self._offset_samples.append(observed_offset)
 
     def _confirmed_source_reset(
         self,
@@ -258,6 +269,43 @@ class Px4RosClockMapper:
             <= self.reset_regression_threshold
             for name, candidate in self._reset_candidates.items()
         )
+
+    def _confirmed_offset_change(
+        self,
+        stream_name,
+        observed_offset,
+        receipt_ros_time,
+    ):
+        samples = self._offset_outlier_samples.setdefault(
+            stream_name,
+            deque(maxlen=self.offset_recovery_samples),
+        )
+        if (
+            samples
+            and (
+                receipt_ros_time - samples[-1][1]
+                > self.reset_confirmation_window
+                or abs(observed_offset - samples[-1][0])
+                > self.maximum_offset_jump
+            )
+        ):
+            samples.clear()
+        samples.append((observed_offset, receipt_ros_time))
+        if len(samples) < self.offset_recovery_samples:
+            return False
+        candidate = sum(value for value, _stamp in samples) / len(samples)
+        for other_stream, other_samples in self._offset_outlier_samples.items():
+            if (
+                other_stream == stream_name
+                or len(other_samples) < self.offset_recovery_samples
+            ):
+                continue
+            other_candidate = sum(
+                value for value, _stamp in other_samples
+            ) / len(other_samples)
+            if abs(candidate - other_candidate) <= self.maximum_offset_jump:
+                return True
+        return False
 
     def to_ros_time(
         self,
@@ -319,16 +367,37 @@ class Px4RosClockMapper:
                 )
                 self.last_status = 'PX4_CLOCK_RESET'
                 return None
+        if self.source_is_ros_time:
+            self._last_source_times[stream] = source_time
+            self._reset_candidates.pop(stream, None)
+            self.last_status = 'DIRECT_TIMESTAMP'
+            return source_time
         if (
             stream_name is not None
             and self.offset is not None
             and observed_offset
             < self.offset - self.maximum_offset_jump
         ):
+            if self._confirmed_offset_change(
+                stream,
+                observed_offset,
+                receipt_ros_time,
+            ):
+                self.reset()
+                self.offset_recalibration_count += 1
+                self._seed_after_reset(
+                    stream,
+                    source_time,
+                    receipt_ros_time,
+                    observed_offset,
+                )
+                self.last_status = 'OFFSET_RECALIBRATING'
+                return None
             self.last_status = 'OFFSET_OUTLIER'
             return None
         self._last_source_times[stream] = source_time
         self._reset_candidates.pop(stream, None)
+        self._offset_outlier_samples.pop(stream, None)
         self._offset_samples.append(observed_offset)
         if len(self._offset_samples) < self.calibration_samples:
             self.last_status = 'UNCALIBRATED'
@@ -350,9 +419,11 @@ class Px4RosClockMapper:
             )
             self.last_status = 'OFFSET_JUMP_RESET'
             return None
-        self.offset = candidate if self.offset is None else min(
-            self.offset, candidate
-        )
+        if self.offset is None:
+            self.offset = candidate
+            self.calibration_count += 1
+        else:
+            self.offset = min(self.offset, candidate)
         self.last_status = 'MAPPED'
         return source_time + self.offset
 
@@ -570,6 +641,9 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('data_timeout', 0.5)
         self.declare_parameter('state_history_duration', 1.0)
         self.declare_parameter('maximum_clock_offset_jump', 0.05)
+        self.declare_parameter('px4_timestamp_is_ros_time', True)
+        self.declare_parameter('pose_wait_timeout', 0.15)
+        self.declare_parameter('maximum_pose_wait_gap', 0.15)
         self.declare_parameter('image_pair_buffer_size', 8)
         self.declare_parameter('time_pair_diagnostics_enabled', False)
         self.declare_parameter('localization_rate_hz', 20.0)
@@ -616,6 +690,17 @@ class RgbdTargetLocalizer(Node):
         self.maximum_clock_offset_jump = max(
             float(self.get_parameter('maximum_clock_offset_jump').value),
             1e-3,
+        )
+        self.px4_timestamp_is_ros_time = bool(
+            self.get_parameter('px4_timestamp_is_ros_time').value
+        )
+        self.pose_wait_timeout = max(
+            float(self.get_parameter('pose_wait_timeout').value),
+            0.0,
+        )
+        self.maximum_pose_wait_gap = max(
+            float(self.get_parameter('maximum_pose_wait_gap').value),
+            0.0,
         )
         self.camera_pitch_down = float(
             self.get_parameter('camera_pitch_down').value
@@ -720,6 +805,7 @@ class RgbdTargetLocalizer(Node):
         self.pending_image_pairs = deque(maxlen=max(
             int(self.get_parameter('image_pair_buffer_size').value), 2
         ))
+        self.waiting_image_pair = None
         self.image_pair_buffer = RgbDepthPairBuffer(
             self.maximum_rgb_depth_skew,
             self.pending_image_pairs.maxlen,
@@ -738,7 +824,8 @@ class RgbdTargetLocalizer(Node):
             self.maximum_clock_offset_jump
         )
         self.px4_clock_mapper = Px4RosClockMapper(
-            self.maximum_clock_offset_jump
+            self.maximum_clock_offset_jump,
+            source_is_ros_time=self.px4_timestamp_is_ros_time,
         )
         localization_rate_hz = max(
             float(self.get_parameter('localization_rate_hz').value),
@@ -765,6 +852,7 @@ class RgbdTargetLocalizer(Node):
         )
         if self.last_pair_rejection == 'TIME_RESET':
             self.pending_image_pairs.clear()
+            self.waiting_image_pair = None
             self.image_clock_mapper.reset()
         self._collect_image_pair()
 
@@ -779,6 +867,7 @@ class RgbdTargetLocalizer(Node):
         )
         if self.last_pair_rejection == 'TIME_RESET':
             self.pending_image_pairs.clear()
+            self.waiting_image_pair = None
             self.image_clock_mapper.reset()
         self._collect_image_pair()
 
@@ -798,7 +887,11 @@ class RgbdTargetLocalizer(Node):
         values = (message.x, message.y, message.z)
         if all(math.isfinite(value) for value in values):
             receipt = self._ros_seconds()
-            source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            source_timestamp = (
+                getattr(message, 'timestamp_sample', 0)
+                or getattr(message, 'timestamp', 0)
+            )
+            source_stamp = float(source_timestamp) * 1e-6
             self.position_source_stamp = source_stamp
             reset_count = self.px4_clock_mapper.reset_count
             stamp = self.px4_clock_mapper.to_ros_time(
@@ -834,7 +927,11 @@ class RgbdTargetLocalizer(Node):
         quaternion = tuple(float(value) for value in message.q)
         if all(math.isfinite(value) for value in quaternion):
             receipt = self._ros_seconds()
-            source_stamp = float(getattr(message, 'timestamp', 0)) * 1e-6
+            source_timestamp = (
+                getattr(message, 'timestamp_sample', 0)
+                or getattr(message, 'timestamp', 0)
+            )
+            source_stamp = float(source_timestamp) * 1e-6
             self.attitude_source_stamp = source_stamp
             reset_count = self.px4_clock_mapper.reset_count
             stamp = self.px4_clock_mapper.to_ros_time(
@@ -881,6 +978,7 @@ class RgbdTargetLocalizer(Node):
 
     def _reset_pose_time_state(self):
         self._pending_pose_samples_for_node().clear()
+        self.waiting_image_pair = None
         self.position_history.clear()
         self.attitude_history.clear()
         self.uav_position = None
@@ -978,6 +1076,12 @@ class RgbdTargetLocalizer(Node):
         message.px4_clock_reset_count = int(values.get(
             'px4_clock_reset_count', 0
         ))
+        message.px4_clock_calibration_count = int(values.get(
+            'px4_clock_calibration_count', 0
+        ))
+        message.px4_clock_recalibration_count = int(values.get(
+            'px4_clock_recalibration_count', 0
+        ))
         message.px4_clock_status = str(values.get(
             'px4_clock_status', 'UNKNOWN'
         ))
@@ -995,7 +1099,8 @@ class RgbdTargetLocalizer(Node):
     def localize(self):
         """Publish one synchronized RGB-D target observation when valid."""
         now = self._ros_seconds()
-        if not self.pending_image_pairs:
+        waiting_pair = getattr(self, 'waiting_image_pair', None)
+        if waiting_pair is None and not self.pending_image_pairs:
             if self.last_pair_rejection:
                 self.publish_invalid_observation(
                     self.last_pair_rejection,
@@ -1015,8 +1120,11 @@ class RgbdTargetLocalizer(Node):
                 )
                 self.last_image_timeout_report = now
             return
-        color_frame, depth_frame = self.pending_image_pairs.pop()
-        self.pending_image_pairs.clear()
+        if waiting_pair is not None:
+            color_frame, depth_frame = waiting_pair
+        else:
+            color_frame, depth_frame = self.pending_image_pairs.pop()
+            self.pending_image_pairs.clear()
         color_message = color_frame.message
         depth_message = depth_frame.message
         raw_measurement_stamp = synchronized_measurement_time(
@@ -1101,15 +1209,23 @@ class RgbdTargetLocalizer(Node):
                 if self.px4_clock_mapper.offset is not None else math.nan
             ),
             'px4_clock_reset_count': self.px4_clock_mapper.reset_count,
+            'px4_clock_calibration_count': (
+                self.px4_clock_mapper.calibration_count
+            ),
+            'px4_clock_recalibration_count': (
+                self.px4_clock_mapper.offset_recalibration_count
+            ),
             'px4_clock_status': self.px4_clock_mapper.last_status,
         }
         if mapped_measurement_stamp is None:
+            self.waiting_image_pair = None
             self.publish_invalid_observation(
                 'IMAGE_CLOCK_UNCALIBRATED',
                 received_stamp=received_stamp,
             )
             return
         if measurement_stamp is None:
+            self.waiting_image_pair = None
             self.publish_invalid_observation(
                 'IMAGE_CLOCK_DOMAIN_MISMATCH', received_stamp=received_stamp
             )
@@ -1120,12 +1236,32 @@ class RgbdTargetLocalizer(Node):
             attitude_range,
         )
         if pose_rejection:
+            missing_future_gap = max(
+                measurement_stamp - position_range[1]
+                if position_range else math.inf,
+                measurement_stamp - attitude_range[1]
+                if attitude_range else math.inf,
+            )
+            if (
+                pose_rejection in (
+                    'POSITION_TIMESTAMP_AFTER_HISTORY',
+                    'ATTITUDE_TIMESTAMP_AFTER_HISTORY',
+                )
+                and now - received_stamp
+                <= getattr(self, 'pose_wait_timeout', 0.0) + 1e-9
+                and missing_future_gap
+                <= getattr(self, 'maximum_pose_wait_gap', 0.0) + 1e-9
+            ):
+                self.waiting_image_pair = (color_frame, depth_frame)
+                return
+            self.waiting_image_pair = None
             self.publish_invalid_observation(
                 pose_rejection,
                 measurement_stamp,
                 received_stamp,
             )
             return
+        self.waiting_image_pair = None
         self.color_mask = red_pixel_mask(
             color_message.data,
             color_message.width,

@@ -28,6 +28,8 @@ float64 attitude_history_end_stamp
 float64 image_clock_offset
 float64 px4_clock_offset
 uint32 px4_clock_reset_count
+uint32 px4_clock_calibration_count
+uint32 px4_clock_recalibration_count
 string px4_clock_status
 uint32 red_pixel_count
 float32 valid_depth_ratio

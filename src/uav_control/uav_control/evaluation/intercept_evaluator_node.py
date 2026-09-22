@@ -619,6 +619,12 @@ class InterceptEvaluatorNode(Node):
                 'px4_clock_reset_count': int(
                     message.px4_clock_reset_count
                 ),
+                'px4_clock_calibration_count': int(
+                    message.px4_clock_calibration_count
+                ),
+                'px4_clock_recalibration_count': int(
+                    message.px4_clock_recalibration_count
+                ),
                 'px4_clock_status': str(message.px4_clock_status),
                 'approach_phase': self.approach_phase,
                 'distance_bin': distance_bin,

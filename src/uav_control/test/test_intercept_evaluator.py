@@ -127,6 +127,8 @@ def test_optional_visual_event_file_is_event_based(tmp_path):
     assert 'position_source_stamp' in lines[0]
     assert 'attitude_history_start_stamp' in lines[0]
     assert 'px4_clock_reset_count' in lines[0]
+    assert 'px4_clock_calibration_count' in lines[0]
+    assert 'px4_clock_recalibration_count' in lines[0]
     assert 'front_rgbd_red_sphere' in lines[1]
 
 

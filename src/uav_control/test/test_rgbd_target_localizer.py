@@ -365,6 +365,145 @@ def test_single_forward_timestamp_outlier_does_not_reset_shared_mapping():
     ) == pytest.approx(100.05)
 
 
+@pytest.mark.parametrize('old_offset', (0.507, 0.191))
+def test_sustained_two_stream_offset_change_recovers_mapping(old_offset):
+    mapper = Px4RosClockMapper(
+        maximum_offset_jump=0.05,
+        calibration_samples=4,
+        offset_recovery_samples=3,
+    )
+    for stream, source in (
+        ('position', 10.00),
+        ('attitude', 10.00),
+        ('position', 10.05),
+        ('attitude', 10.05),
+    ):
+        mapper.to_ros_time(
+            source,
+            source + old_offset,
+            stream_name=stream,
+        )
+    assert mapper.offset == pytest.approx(old_offset)
+
+    mapped = []
+    for index in range(6):
+        source = 20.0 + 0.05 * index
+        mapped.append(mapper.to_ros_time(
+            source,
+            source + 0.004,
+            stream_name='position',
+        ))
+        mapped.append(mapper.to_ros_time(
+            source + 0.002,
+            source + 0.008,
+            stream_name='attitude',
+        ))
+
+    assert mapper.offset_recalibration_count == 1
+    assert mapper.reset_count == 1
+    assert mapper.calibration_count == 2
+    assert mapper.offset == pytest.approx(0.004)
+    assert mapped[-1] == pytest.approx(20.256)
+    assert mapper.last_status == 'MAPPED'
+
+
+def test_one_stream_offset_outlier_does_not_trigger_recalibration():
+    mapper = Px4RosClockMapper(
+        maximum_offset_jump=0.05,
+        calibration_samples=4,
+        offset_recovery_samples=3,
+    )
+    for stream, source in (
+        ('position', 10.00),
+        ('attitude', 10.00),
+        ('position', 10.05),
+        ('attitude', 10.05),
+    ):
+        mapper.to_ros_time(
+            source,
+            source + 0.507,
+            stream_name=stream,
+        )
+
+    assert mapper.to_ros_time(
+        20.10, 20.105, stream_name='position'
+    ) is None
+    assert mapper.to_ros_time(
+        20.10, 20.607, stream_name='attitude'
+    ) == pytest.approx(20.607)
+    assert mapper.reset_count == 0
+    assert mapper.offset_recalibration_count == 0
+
+
+def test_offset_recalibration_replaces_old_pose_history():
+    node = object.__new__(rgbd_target_localizer.RgbdTargetLocalizer)
+    now = [10.0]
+    node._ros_seconds = lambda: now[0]
+    node.px4_clock_mapper = Px4RosClockMapper(
+        maximum_offset_jump=0.05,
+        calibration_samples=4,
+        offset_recovery_samples=3,
+    )
+    node.position_history = TimestampedVectorHistory(1.0)
+    node.attitude_history = TimestampedVectorHistory(1.0)
+    node.uav_position = None
+    node.uav_attitude = None
+    node.uav_position_time = -math.inf
+    node.uav_attitude_time = -math.inf
+    node.position_mapped_stamp = math.nan
+    node.attitude_mapped_stamp = math.nan
+    node.waiting_image_pair = None
+
+    def send(stream, source, receipt):
+        now[0] = receipt
+        if stream == 'position':
+            message = VehicleLocalPosition()
+            message.x, message.y, message.z = 0.0, 0.0, -5.0
+            callback = node.position_callback
+        else:
+            message = VehicleAttitude()
+            message.q = [1.0, 0.0, 0.0, 0.0]
+            callback = node.attitude_callback
+        message.timestamp = round(source * 1_000_000)
+        callback(message)
+
+    for stream, source in (
+        ('position', 10.00),
+        ('attitude', 10.00),
+        ('position', 10.05),
+        ('attitude', 10.05),
+    ):
+        send(stream, source, source + 0.507)
+    assert node.position_history.time_range is not None
+    assert node.attitude_history.time_range is not None
+
+    for index in range(6):
+        source = 20.0 + 0.05 * index
+        send('position', source, source + 0.004)
+        send('attitude', source + 0.002, source + 0.008)
+
+    assert node.px4_clock_mapper.offset_recalibration_count == 1
+    assert node.position_history.time_range[0] >= 20.0
+    assert node.attitude_history.time_range[0] >= 20.0
+
+
+def test_px4_ros_domain_mode_keeps_true_source_sample_time():
+    mapper = Px4RosClockMapper(
+        source_is_ros_time=True,
+        calibration_samples=4,
+    )
+
+    mapped = mapper.to_ros_time(
+        100.125,
+        receipt_ros_time=100.500,
+        stream_name='position',
+    )
+
+    assert mapped == pytest.approx(100.125)
+    assert mapper.offset == pytest.approx(0.0)
+    assert mapper.last_status == 'DIRECT_TIMESTAMP'
+
+
 def test_duplicate_and_small_out_of_order_sample_are_bounded_per_stream():
     mapper = Px4RosClockMapper(calibration_samples=1)
     mapper.to_ros_time(10.0, 100.0, stream_name='position')
@@ -470,6 +609,7 @@ def test_confirmed_px4_restart_clears_both_old_pose_histories():
     node.uav_attitude_time = -math.inf
     node.position_mapped_stamp = math.nan
     node.attitude_mapped_stamp = math.nan
+    node.waiting_image_pair = ('old-clock-color', 'old-clock-depth')
 
     for kind, source, receipt in (
         ('position', 10.00, 100.00),
@@ -505,6 +645,18 @@ def test_confirmed_px4_restart_clears_both_old_pose_histories():
     assert node.px4_clock_mapper.reset_count == 1
     assert node.position_history.time_range is None
     assert node.attitude_history.time_range is None
+    assert node.waiting_image_pair is None
+
+    now[0] = 100.16
+    new_position = VehicleLocalPosition()
+    new_position.timestamp = 1_050_000
+    new_position.x, new_position.y, new_position.z = 0.0, 0.0, -5.0
+    node.position_callback(new_position)
+
+    assert node.position_history.time_range is not None
+    assert node.attitude_history.time_range is not None
+    assert node.position_history.time_range[0] > 100.0
+    assert node.attitude_history.time_range[0] > 100.0
 
 
 def test_rgb_depth_pairs_by_acquisition_time_despite_transport_delay():
@@ -617,6 +769,9 @@ def _make_synthetic_localizer(now):
     node.data_timeout = 0.5
     node.image_pair_buffer = RgbDepthPairBuffer(0.02, 8)
     node.pending_image_pairs = __import__('collections').deque(maxlen=8)
+    node.waiting_image_pair = None
+    node.pose_wait_timeout = 0.15
+    node.maximum_pose_wait_gap = 0.15
     node.image_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
     node.px4_clock_mapper = Px4RosClockMapper(0.05, calibration_samples=4)
     node.position_history = TimestampedVectorHistory(1.0)
@@ -757,6 +912,73 @@ def test_localizer_reports_which_pose_history_misses_image_time(
     assert observations[0].rejection_reason == expected
 
 
+def test_image_waits_for_slightly_late_pose_then_localizes():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.position_history.add(100.00, (0.0, 0.0, -5.0))
+    node.position_history.add(100.08, (0.08, 0.0, -5.0))
+    node.attitude_history.add(100.00, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(100.08, (1.0, 0.0, 0.0, 0.0))
+    _enqueue_rgbd(node, now, 100.10, 0.02, 0.03)
+
+    node.localize()
+
+    assert observations == []
+    assert node.waiting_image_pair is not None
+
+    node.position_history.add(100.12, (0.12, 0.0, -5.0))
+    node.attitude_history.add(100.12, (1.0, 0.0, 0.0, 0.0))
+    now[0] = 100.16
+    node.localize()
+
+    assert len(observations) == 1
+    assert observations[0].valid
+    assert observations[0].stamp.sec == 100
+    assert observations[0].stamp.nanosec == 100_000_000
+    assert node.waiting_image_pair is None
+
+
+def test_image_does_not_wait_for_multi_second_pose_mismatch():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.position_history.add(95.00, (0.0, 0.0, -5.0))
+    node.position_history.add(95.10, (0.1, 0.0, -5.0))
+    node.attitude_history.add(95.00, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(95.10, (1.0, 0.0, 0.0, 0.0))
+    _enqueue_rgbd(node, now, 100.10, 0.02, 0.03)
+
+    node.localize()
+
+    assert len(observations) == 1
+    assert not observations[0].valid
+    assert observations[0].rejection_reason == (
+        'POSITION_TIMESTAMP_AFTER_HISTORY'
+    )
+    assert node.waiting_image_pair is None
+
+
+def test_image_wait_timeout_reports_original_pose_rejection():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.position_history.add(100.00, (0.0, 0.0, -5.0))
+    node.position_history.add(100.08, (0.08, 0.0, -5.0))
+    node.attitude_history.add(100.00, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(100.08, (1.0, 0.0, 0.0, 0.0))
+    _enqueue_rgbd(node, now, 100.10, 0.02, 0.03)
+    node.localize()
+    assert observations == []
+
+    now[0] = 100.29
+    node.localize()
+
+    assert len(observations) == 1
+    assert not observations[0].valid
+    assert observations[0].rejection_reason == (
+        'POSITION_TIMESTAMP_AFTER_HISTORY'
+    )
+    assert node.waiting_image_pair is None
+
+
 def test_px4_callbacks_cache_pose_in_mapped_measurement_time():
     node = object.__new__(rgbd_target_localizer.RgbdTargetLocalizer)
     now = [10.0]
@@ -799,6 +1021,40 @@ def test_px4_callbacks_cache_pose_in_mapped_measurement_time():
     assert node.attitude_history.value_at(10.1) == pytest.approx(
         (1.0, 0.0, 0.0, 0.0)
     )
+
+
+def test_px4_callbacks_use_timestamp_sample_in_ros_time_domain():
+    node = object.__new__(rgbd_target_localizer.RgbdTargetLocalizer)
+    node._ros_seconds = lambda: 100.30
+    node.px4_clock_mapper = Px4RosClockMapper(
+        source_is_ros_time=True,
+    )
+    node.position_history = TimestampedVectorHistory(1.0)
+    node.attitude_history = TimestampedVectorHistory(1.0)
+    node.uav_position = None
+    node.uav_attitude = None
+    node.uav_position_time = -math.inf
+    node.uav_attitude_time = -math.inf
+    position = VehicleLocalPosition()
+    position.timestamp = 100_200_000
+    position.timestamp_sample = 100_100_000
+    position.x, position.y, position.z = 1.0, 2.0, -5.0
+    attitude = VehicleAttitude()
+    attitude.timestamp = 100_210_000
+    attitude.timestamp_sample = 100_110_000
+    attitude.q = [1.0, 0.0, 0.0, 0.0]
+
+    node.position_callback(position)
+    node.attitude_callback(attitude)
+
+    assert node.position_history.time_range == pytest.approx(
+        (100.1, 100.1)
+    )
+    assert node.attitude_history.time_range == pytest.approx(
+        (100.11, 100.11)
+    )
+    assert node.position_mapped_stamp == pytest.approx(100.1)
+    assert node.attitude_mapped_stamp == pytest.approx(100.11)
 
 
 def test_attitude_cache_normalizes_antipodal_quaternions():
