@@ -460,7 +460,7 @@ rgbd_target_localizer:
     camera_pitch_down: 0.20944
     camera_translation_x: 0.35
     camera_translation_y: 0.0
-    camera_translation_z: -0.05
+    camera_translation_z: 0.19
     target_radius: 0.25
     target_reference_z_offset: 0.42
     # Optional bounded geometry fields for offline error attribution.

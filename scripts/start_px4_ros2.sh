@@ -21,6 +21,8 @@ CAMERA_STARTUP_TIMEOUT="${CAMERA_STARTUP_TIMEOUT:-180}"
 FLIGHT_READY_TIMEOUT="${FLIGHT_READY_TIMEOUT:-60}"
 PX4_VERTICAL_SPEED_LIMIT="${PX4_VERTICAL_SPEED_LIMIT:-4.0}"
 EXPERIMENT_LAUNCH="${UAV_USV_EXPERIMENT_LAUNCH:-modular_intercept.launch.py}"
+EXPERIMENT_CONFIG_FILE="${UAV_USV_EXPERIMENT_CONFIG_FILE:-}"
+EXPERIMENT_CONFIG_ARG=""
 
 if [[ "${1:-}" == "--no-build" ]]; then
     BUILD_WORKSPACE=false
@@ -59,6 +61,14 @@ fi
 if ! [[ "${EXPERIMENT_LAUNCH}" =~ ^[A-Za-z0-9_.-]+[.]launch[.]py$ ]]; then
     echo "UAV_USV_EXPERIMENT_LAUNCH must be a launch filename." >&2
     exit 2
+fi
+if [[ -n "${EXPERIMENT_CONFIG_FILE}" ]]; then
+    if [[ ! -f "${EXPERIMENT_CONFIG_FILE}" ]]; then
+        echo "Experiment config file not found: ${EXPERIMENT_CONFIG_FILE}" >&2
+        exit 2
+    fi
+    printf -v EXPERIMENT_CONFIG_ARG ' config_file:=%q' \
+        "${EXPERIMENT_CONFIG_FILE}"
 fi
 
 for required_command in gnome-terminal gz MicroXRCEAgent timeout rg; do
@@ -366,6 +376,9 @@ sleep 5
 
 echo "Starting UAV-USV experiment..."
 echo "Experiment launch: ${EXPERIMENT_LAUNCH}"
+if [[ -n "${EXPERIMENT_CONFIG_FILE}" ]]; then
+    echo "Experiment config: ${EXPERIMENT_CONFIG_FILE}"
+fi
 gnome-terminal --title="UAV-USV experiment" -- bash -lc "
 printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/experiment.pid' &&
 export UAV_USV_WS='${WS_ROOT}' &&
@@ -373,7 +386,7 @@ source /opt/ros/humble/setup.bash &&
 source '${WS_ROOT}/install/setup.bash' &&
 cd '${WS_ROOT}' &&
 ros2 launch uav_usv_bringup '${EXPERIMENT_LAUNCH}' \
-    enable_shadow_perception:=true;
+    enable_shadow_perception:=true${EXPERIMENT_CONFIG_ARG};
 component_status=\$?;
 if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
 exit \${component_status}"

@@ -35,6 +35,12 @@ from .front_tof_monitor import (
 )
 
 
+# The PX4 local position is referenced to the Gazebo model origin.  The
+# merged x500_base puts base_link at model z=+0.24 m; front_camera_link is
+# z=-0.05 m relative to base_link, so its model-relative z is +0.19 m.
+DEFAULT_CAMERA_TRANSLATION_FLU = (0.35, 0.0, 0.19)
+
+
 def validated_sensor_stamp(measurement_stamp, receipt_stamp, maximum_age):
     """Accept only acquisition stamps demonstrably in the ROS clock domain."""
     measurement_stamp = float(measurement_stamp)
@@ -1032,9 +1038,9 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('time_pair_diagnostics_enabled', False)
         self.declare_parameter('localization_rate_hz', 20.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
-        self.declare_parameter('camera_translation_x', 0.35)
-        self.declare_parameter('camera_translation_y', 0.0)
-        self.declare_parameter('camera_translation_z', -0.05)
+        self.declare_parameter('camera_translation_x', DEFAULT_CAMERA_TRANSLATION_FLU[0])
+        self.declare_parameter('camera_translation_y', DEFAULT_CAMERA_TRANSLATION_FLU[1])
+        self.declare_parameter('camera_translation_z', DEFAULT_CAMERA_TRANSLATION_FLU[2])
         self.declare_parameter('target_radius', 0.25)
         self.declare_parameter('target_reference_z_offset', 0.42)
         self.declare_parameter('geometry_diagnostics_enabled', False)

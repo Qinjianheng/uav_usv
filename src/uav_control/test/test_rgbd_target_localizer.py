@@ -1,8 +1,10 @@
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from sensor_msgs.msg import Image
 
@@ -247,6 +249,19 @@ def test_camera_pose_transform_compensates_mount_pitch_and_translation():
     )
 
     assert position == pytest.approx((11.0, 2.0, -1.58))
+
+
+def test_default_camera_translation_uses_px4_model_origin():
+    # x500_base's merged model has base_link at z=+0.24 m.  The front camera
+    # is z=-0.05 m relative to that link, hence z=+0.19 m from model origin.
+    mount = rgbd_target_localizer.DEFAULT_CAMERA_TRANSLATION_FLU
+    assert mount == pytest.approx((0.35, 0.0, 0.19))
+    baseline = Path(__file__).parents[2] / 'uav_usv_bringup/config/baseline.yaml'
+    parameters = yaml.safe_load(baseline.read_text())[
+        'rgbd_target_localizer']['ros__parameters']
+    assert tuple(
+        parameters[f'camera_translation_{axis}'] for axis in 'xyz'
+    ) == pytest.approx(mount)
 
 
 def test_body_to_ned_rotation_applies_yaw():
