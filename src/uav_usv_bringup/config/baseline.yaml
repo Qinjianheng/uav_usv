@@ -402,6 +402,11 @@ intercept_evaluator_node:
     truth_topic: /target/state
     shadow_prediction_topic: /planning/shadow_target_prediction
     gazebo_world_name: default
+    # Evaluator-only actual entity pose capture; enable for dedicated visual
+    # attribution runs because /pose/info can be high rate.
+    gazebo_entity_diagnostics_enabled: false
+    gazebo_target_entity_name: usv_target
+    gazebo_visual_height_offset: 0.42
     gazebo_pause_timeout_ms: 250
     gazebo_pause_maximum_attempts: 2
     gazebo_pause_retry_delay: 0.05
@@ -458,6 +463,8 @@ rgbd_target_localizer:
     camera_translation_z: -0.05
     target_radius: 0.25
     target_reference_z_offset: 0.42
+    # Optional bounded geometry fields for offline error attribution.
+    geometry_diagnostics_enabled: false
     base_position_std: 0.08
     range_position_std_scale: 0.01
 

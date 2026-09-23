@@ -60,6 +60,12 @@ def test_visual_metrics_keep_raw_and_kf_errors_separate():
     assert summary['front']['valid_observation_rate'] == pytest.approx(1.0)
     assert summary['front']['raw_position_3d']['count'] == 1
     assert summary['front']['raw_position_horizontal']['count'] == 1
+    assert summary['front']['raw_signed_position_x']['mean'] == (
+        pytest.approx(0.2)
+    )
+    assert summary['front']['raw_signed_position_y']['mean'] == (
+        pytest.approx(-0.2)
+    )
     assert summary['front']['observation_age']['p50'] == pytest.approx(0.04)
     assert summary['strata'][0]['camera'] == 'front'
     assert summary['strata'][0]['distance_bin'] == 'MID'
@@ -161,6 +167,21 @@ def test_optional_visual_event_file_is_event_based(tmp_path):
     assert 'image_clock_reference_age' in lines[0]
     assert 'image_clock_sync_quality' in lines[0]
     assert 'image_measurement_time_source' in lines[0]
+    assert 'mask_centroid_u' in lines[0]
+    assert 'depth_median' in lines[0]
+    assert 'center_camera_x' in lines[0]
+    assert 'target_body_flu_x' in lines[0]
+    assert 'interpolated_uav_x' in lines[0]
+    assert 'target_reference_z_offset' in lines[0]
+    assert 'gazebo_entity_raw_stamp' in lines[0]
+    assert 'gazebo_entity_reference_x' in lines[0]
+    assert 'entity_expected_camera_x' in lines[0]
+    assert 'entity_expected_projection_u' in lines[0]
+    assert 'projection_error_u' in lines[0]
+    assert 'camera_center_error_3d' in lines[0]
+    assert 'body_flu_error_3d' in lines[0]
+    assert 'vision_to_entity_3d' in lines[0]
+    assert 'entity_to_truth_3d' in lines[0]
     assert 'front_rgbd_red_sphere' in lines[1]
 
 

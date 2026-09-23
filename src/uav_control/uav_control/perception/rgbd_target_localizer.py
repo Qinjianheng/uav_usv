@@ -670,6 +670,23 @@ class TimestampedImageFrame:
     receipt_stamp: float
 
 
+@dataclass(frozen=True)
+class RgbdTargetGeometry:
+    """Bounded intermediate geometry for one RGB-D localization event."""
+
+    red_pixel_count: int
+    valid_depth_count: int
+    mask_center: tuple
+    projection_center: tuple
+    mask_bbox: tuple
+    depth_min: float
+    depth_median: float
+    depth_mad: float
+    intrinsics: tuple
+    surface_camera: tuple
+    center_camera: tuple
+
+
 class RgbDepthPairBuffer:
     """Pair each frame at most once using bounded acquisition-time queues."""
 
@@ -797,9 +814,41 @@ def target_vector_from_rgbd(
     target_radius=0.0,
 ):
     """Recover the target-center vector in camera FLU coordinates."""
+    geometry = target_geometry_from_rgbd(
+        target_mask,
+        depth,
+        horizontal_fov,
+        minimum_depth,
+        maximum_depth,
+        target_radius,
+    )
+    if geometry is None:
+        return None
+    return np.asarray(geometry.center_camera, dtype=float)
+
+
+def target_geometry_from_rgbd(
+    target_mask,
+    depth,
+    horizontal_fov,
+    minimum_depth,
+    maximum_depth,
+    target_radius=0.0,
+):
+    """
+    Return the current estimator inputs and intermediate camera vectors.
+
+    Gazebo Rendering's RGB-D depth image contains the camera-forward X
+    component.  This helper intentionally preserves the existing
+    ``median(depth) + radius`` estimator; the extra values make its sphere
+    approximation independently auditable before any formula is replaced.
+    """
     if target_mask is None or depth is None:
         return None
     if target_mask.shape != depth.shape:
+        return None
+    mask_rows, mask_columns = np.nonzero(target_mask)
+    if mask_columns.size == 0:
         return None
     valid = (
         target_mask
@@ -812,18 +861,44 @@ def target_vector_from_rgbd(
         return None
     height, width = depth.shape
     fx, fy, cx, cy = camera_intrinsics(width, height, horizontal_fov)
-    forward = float(np.median(depth[valid])) + max(
+    valid_depths = np.asarray(depth[valid], dtype=float)
+    surface_forward = float(np.median(valid_depths))
+    forward = surface_forward + max(
         float(target_radius),
         0.0,
     )
+    mask_center_x = float(np.median(mask_columns))
+    mask_center_y = float(np.median(mask_rows))
     image_x = float(np.median(columns))
     image_y = float(np.median(rows))
 
     # Gazebo's camera optical axis is +X. Image right is camera -Y and
     # image down is camera -Z for the FLU camera-link convention.
+    surface_left = -(image_x - cx) * surface_forward / fx
+    surface_up = -(image_y - cy) * surface_forward / fy
     left = -(image_x - cx) * forward / fx
     up = -(image_y - cy) * forward / fy
-    return np.array((forward, left, up), dtype=float)
+    depth_mad = float(np.median(np.abs(
+        valid_depths - surface_forward
+    )))
+    return RgbdTargetGeometry(
+        red_pixel_count=int(mask_columns.size),
+        valid_depth_count=int(columns.size),
+        mask_center=(mask_center_x, mask_center_y),
+        projection_center=(image_x, image_y),
+        mask_bbox=(
+            int(mask_columns.min()),
+            int(mask_rows.min()),
+            int(mask_columns.max()),
+            int(mask_rows.max()),
+        ),
+        depth_min=float(valid_depths.min()),
+        depth_median=surface_forward,
+        depth_mad=depth_mad,
+        intrinsics=(float(fx), float(fy), float(cx), float(cy)),
+        surface_camera=(surface_forward, surface_left, surface_up),
+        center_camera=(forward, left, up),
+    )
 
 
 def camera_target_to_local_ned(
@@ -835,18 +910,38 @@ def camera_target_to_local_ned(
     target_reference_z_offset=0.0,
 ):
     """Transform a camera-FLU target vector to PX4 local NED position."""
-    camera_vector = np.asarray(camera_vector_flu, dtype=float)
+    body_flu = camera_target_to_body_flu(
+        camera_vector_flu,
+        camera_translation_flu,
+        camera_pitch_down,
+    )
     uav_position = np.asarray(uav_position_ned, dtype=float)
+    if uav_position.shape != (3,) or not np.all(np.isfinite(uav_position)):
+        raise ValueError('vehicle position must be a finite 3-vector')
+    body_frd = np.array((body_flu[0], -body_flu[1], -body_flu[2]))
+    position_ned = (
+        uav_position
+        + body_frd_to_ned_rotation(attitude_quaternion) @ body_frd
+    )
+    position_ned[2] += float(target_reference_z_offset)
+    return position_ned
+
+
+def camera_target_to_body_flu(
+    camera_vector_flu,
+    camera_translation_flu,
+    camera_pitch_down,
+):
+    """Apply the SDF camera mount transform without changing conventions."""
+    camera_vector = np.asarray(camera_vector_flu, dtype=float)
     translation = np.asarray(camera_translation_flu, dtype=float)
     if (
         camera_vector.shape != (3,)
-        or uav_position.shape != (3,)
         or translation.shape != (3,)
         or not np.all(np.isfinite(camera_vector))
-        or not np.all(np.isfinite(uav_position))
         or not np.all(np.isfinite(translation))
     ):
-        raise ValueError('camera, vehicle, and translation must be 3-vectors')
+        raise ValueError('camera and translation must be finite 3-vectors')
 
     pitch = float(camera_pitch_down)
     cosine = math.cos(pitch)
@@ -857,13 +952,43 @@ def camera_target_to_local_ned(
         camera_y,
         -sine * camera_x + cosine * camera_z,
     ))
-    body_frd = np.array((body_flu[0], -body_flu[1], -body_flu[2]))
-    position_ned = (
-        uav_position
-        + body_frd_to_ned_rotation(attitude_quaternion) @ body_frd
+    return body_flu
+
+
+def local_ned_target_to_camera_flu(
+    target_position_ned,
+    uav_position_ned,
+    attitude_quaternion,
+    camera_translation_flu,
+    camera_pitch_down,
+):
+    """Invert the configured camera mount and vehicle pose for diagnostics."""
+    target_position = np.asarray(target_position_ned, dtype=float)
+    uav_position = np.asarray(uav_position_ned, dtype=float)
+    translation = np.asarray(camera_translation_flu, dtype=float)
+    if (
+        target_position.shape != (3,)
+        or uav_position.shape != (3,)
+        or translation.shape != (3,)
+        or not np.all(np.isfinite(target_position))
+        or not np.all(np.isfinite(uav_position))
+        or not np.all(np.isfinite(translation))
+    ):
+        raise ValueError('target, vehicle and translation must be finite')
+    relative_ned = target_position - uav_position
+    body_frd = (
+        body_frd_to_ned_rotation(attitude_quaternion).T @ relative_ned
     )
-    position_ned[2] += float(target_reference_z_offset)
-    return position_ned
+    body_flu = np.array((body_frd[0], -body_frd[1], -body_frd[2]))
+    relative_body = body_flu - translation
+    pitch = float(camera_pitch_down)
+    cosine = math.cos(pitch)
+    sine = math.sin(pitch)
+    return np.array((
+        cosine * relative_body[0] - sine * relative_body[2],
+        relative_body[1],
+        sine * relative_body[0] + cosine * relative_body[2],
+    ))
 
 
 class RgbdTargetLocalizer(Node):
@@ -912,6 +1037,7 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('camera_translation_z', -0.05)
         self.declare_parameter('target_radius', 0.25)
         self.declare_parameter('target_reference_z_offset', 0.42)
+        self.declare_parameter('geometry_diagnostics_enabled', False)
         self.declare_parameter('base_position_std', 0.08)
         self.declare_parameter('range_position_std_scale', 0.01)
 
@@ -998,6 +1124,9 @@ class RgbdTargetLocalizer(Node):
         )
         self.target_reference_z_offset = float(
             self.get_parameter('target_reference_z_offset').value
+        )
+        self.geometry_diagnostics_enabled = bool(
+            self.get_parameter('geometry_diagnostics_enabled').value
         )
         self.base_position_std = max(
             float(self.get_parameter('base_position_std').value),
@@ -1796,7 +1925,7 @@ class RgbdTargetLocalizer(Node):
                 'DEPTH_RATIO_LOW', measurement_stamp, received_stamp
             )
             return
-        camera_vector = target_vector_from_rgbd(
+        geometry = target_geometry_from_rgbd(
             self.color_mask,
             self.depth,
             self.horizontal_fov,
@@ -1804,12 +1933,18 @@ class RgbdTargetLocalizer(Node):
             self.maximum_depth,
             self.target_radius,
         )
-        if camera_vector is None:
+        if geometry is None:
             self.publish_invalid_observation(
                 'TARGET_VECTOR_INVALID', measurement_stamp, received_stamp
             )
             return
+        camera_vector = np.asarray(geometry.center_camera, dtype=float)
         try:
+            body_flu = camera_target_to_body_flu(
+                camera_vector,
+                self.camera_translation_flu,
+                self.camera_pitch_down,
+            )
             target_position = camera_target_to_local_ned(
                 camera_vector,
                 uav_position,
@@ -1863,6 +1998,63 @@ class RgbdTargetLocalizer(Node):
             math.hypot(camera_vector[1], camera_vector[2]),
             max(camera_vector[0], 1e-9),
         ))
+        if getattr(self, 'geometry_diagnostics_enabled', False):
+            observation.geometry_diagnostics_enabled = True
+            observation.mask_centroid_u = geometry.mask_center[0]
+            observation.mask_centroid_v = geometry.mask_center[1]
+            observation.projection_centroid_u = geometry.projection_center[0]
+            observation.projection_centroid_v = geometry.projection_center[1]
+            (
+                observation.mask_bbox_left,
+                observation.mask_bbox_top,
+                observation.mask_bbox_right,
+                observation.mask_bbox_bottom,
+            ) = geometry.mask_bbox
+            observation.valid_depth_count = geometry.valid_depth_count
+            observation.depth_min = geometry.depth_min
+            observation.depth_median = geometry.depth_median
+            observation.depth_mad = geometry.depth_mad
+            (
+                observation.camera_fx,
+                observation.camera_fy,
+                observation.camera_cx,
+                observation.camera_cy,
+            ) = geometry.intrinsics
+            (
+                observation.camera_translation_x,
+                observation.camera_translation_y,
+                observation.camera_translation_z,
+            ) = self.camera_translation_flu
+            observation.camera_pitch_down = self.camera_pitch_down
+            (
+                observation.surface_camera_x,
+                observation.surface_camera_y,
+                observation.surface_camera_z,
+            ) = geometry.surface_camera
+            (
+                observation.center_camera_x,
+                observation.center_camera_y,
+                observation.center_camera_z,
+            ) = geometry.center_camera
+            (
+                observation.target_body_flu_x,
+                observation.target_body_flu_y,
+                observation.target_body_flu_z,
+            ) = body_flu
+            (
+                observation.interpolated_uav_x,
+                observation.interpolated_uav_y,
+                observation.interpolated_uav_z,
+            ) = uav_position
+            (
+                observation.interpolated_attitude_w,
+                observation.interpolated_attitude_x,
+                observation.interpolated_attitude_y,
+                observation.interpolated_attitude_z,
+            ) = uav_attitude
+            observation.target_reference_z_offset = (
+                self.target_reference_z_offset
+            )
         observation.valid = True
         self.observation_pub.publish(observation)
 

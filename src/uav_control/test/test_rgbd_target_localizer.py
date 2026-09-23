@@ -19,7 +19,9 @@ from uav_control.perception.rgbd_target_localizer import (
     pose_history_rejection_reason,
     quaternion_slerp,
     synchronized_measurement_time,
+    target_geometry_from_rgbd,
     target_vector_from_rgbd,
+    local_ned_target_to_camera_flu,
     validated_sensor_stamp,
 )
 
@@ -120,6 +122,89 @@ def test_rgbd_center_pixel_recovers_forward_target_center():
     assert vector == pytest.approx((10.0, 0.0, 0.0))
 
 
+def test_rgbd_geometry_exposes_bounded_mask_and_depth_diagnostics():
+    mask = np.zeros((5, 7), dtype=bool)
+    mask[1:4, 2:6] = True
+    depth = np.full((5, 7), math.inf, dtype=float)
+    depth[1:4, 2:6] = np.array((
+        (4.9, 4.8, 4.9, math.inf),
+        (4.8, 4.75, 4.8, 4.9),
+        (4.9, 4.8, 4.9, math.nan),
+    ))
+
+    geometry = target_geometry_from_rgbd(
+        mask,
+        depth,
+        horizontal_fov=math.pi / 2.0,
+        minimum_depth=0.2,
+        maximum_depth=25.0,
+        target_radius=0.25,
+    )
+
+    assert geometry.red_pixel_count == 12
+    assert geometry.valid_depth_count == 10
+    assert geometry.mask_bbox == (2, 1, 5, 3)
+    assert geometry.mask_center == pytest.approx((3.5, 2.0))
+    assert geometry.projection_center == pytest.approx((3.0, 2.0))
+    assert geometry.depth_min == pytest.approx(4.75)
+    assert geometry.depth_median == pytest.approx(4.85)
+    assert geometry.depth_mad == pytest.approx(0.05)
+    assert geometry.surface_camera[0] == pytest.approx(4.85)
+    assert geometry.center_camera[0] == pytest.approx(5.10)
+
+
+def test_off_axis_depth_is_forward_axis_not_euclidean_range():
+    mask = np.zeros((5, 7), dtype=bool)
+    mask[2, 5] = True
+    depth = np.full((5, 7), math.inf, dtype=float)
+    depth[2, 5] = 4.75
+
+    geometry = target_geometry_from_rgbd(
+        mask,
+        depth,
+        horizontal_fov=math.pi / 2.0,
+        minimum_depth=0.2,
+        maximum_depth=25.0,
+        target_radius=0.25,
+    )
+
+    # Gazebo Rendering publishes the reconstructed camera-forward X
+    # component in the depth image.  Therefore pinhole Y/Z use the same
+    # forward depth; treating 4.75 as a slant range would under-project Y.
+    fx = geometry.intrinsics[0]
+    expected_left = -(5.0 - geometry.intrinsics[2]) * 5.0 / fx
+    assert geometry.center_camera[0] == pytest.approx(5.0)
+    assert geometry.center_camera[1] == pytest.approx(expected_left)
+    assert np.linalg.norm(geometry.center_camera) > 5.0
+
+
+def test_median_depth_plus_radius_is_not_claimed_as_exact_for_partial_sphere():
+    mask = np.zeros((5, 7), dtype=bool)
+    mask[1:4, 3:6] = True
+    depth = np.full((5, 7), math.inf, dtype=float)
+    # A deliberately asymmetric visible patch has a surface-depth median
+    # that is not the optical-axis front point.  The diagnostic preserves
+    # this evidence instead of hiding it behind a fixed world-axis offset.
+    depth[1:4, 3:6] = np.array((
+        (7.86, 7.88, 7.91),
+        (7.75, 7.80, 7.86),
+        (7.86, 7.88, 7.91),
+    ))
+
+    geometry = target_geometry_from_rgbd(
+        mask,
+        depth,
+        horizontal_fov=1.74,
+        minimum_depth=0.2,
+        maximum_depth=25.0,
+        target_radius=0.25,
+    )
+
+    assert geometry.depth_median == pytest.approx(7.86)
+    assert geometry.center_camera[0] == pytest.approx(8.11)
+    assert geometry.depth_mad > 0.0
+
+
 def test_rgbd_projection_uses_camera_flu_image_signs():
     mask = np.zeros((3, 5), dtype=bool)
     mask[0, 4] = True
@@ -177,6 +262,128 @@ def test_body_to_ned_rotation_applies_yaw():
         (0.0, 10.0, 0.0),
         abs=1.0e-9,
     )
+
+
+def _quaternion_from_roll_pitch_yaw(roll, pitch, yaw):
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+@pytest.mark.parametrize(
+    'attitude',
+    (
+        (0.0, 0.0, 0.0),
+        (math.radians(8.0), math.radians(-6.0), math.radians(25.0)),
+        (math.radians(-12.0), math.radians(10.0), math.radians(-70.0)),
+    ),
+)
+def test_camera_body_ned_transform_round_trip_for_full_attitude(attitude):
+    quaternion = _quaternion_from_roll_pitch_yaw(*attitude)
+    camera_vector = np.array((8.0, -1.2, 0.7))
+    uav_position = np.array((3.0, -4.0, -6.0))
+    translation = np.array((0.35, 0.0, -0.05))
+    camera_pitch = math.radians(12.0)
+
+    target_ned = camera_target_to_local_ned(
+        camera_vector,
+        uav_position,
+        quaternion,
+        translation,
+        camera_pitch,
+    )
+    reconstructed = local_ned_target_to_camera_flu(
+        target_ned,
+        uav_position,
+        quaternion,
+        translation,
+        camera_pitch,
+    )
+
+    assert reconstructed == pytest.approx(camera_vector, abs=1.0e-9)
+
+
+def _render_forward_depth_sphere(center, radius, width=320, height=240):
+    fx, fy, cx, cy = rgbd_target_localizer.camera_intrinsics(
+        width, height, 1.74
+    )
+    columns, rows = np.meshgrid(np.arange(width), np.arange(height))
+    ray_y = -(columns - cx) / fx
+    ray_z = -(rows - cy) / fy
+    center = np.asarray(center, dtype=float)
+    a = 1.0 + ray_y * ray_y + ray_z * ray_z
+    b = -2.0 * (center[0] + center[1] * ray_y + center[2] * ray_z)
+    c = float(center @ center - radius * radius)
+    discriminant = b * b - 4.0 * a * c
+    mask = discriminant >= 0.0
+    depth = np.full((height, width), math.inf, dtype=float)
+    depth[mask] = (
+        -b[mask] - np.sqrt(discriminant[mask])
+    ) / (2.0 * a[mask])
+    mask &= depth > 0.0
+    depth[~mask] = math.inf
+    return mask, depth
+
+
+@pytest.mark.parametrize('distance', (3.0, 5.0, 8.0, 12.0))
+def test_synthetic_sphere_exposes_median_plus_radius_forward_bias(distance):
+    radius = 0.25
+    expected = np.array((distance, 0.0, 0.0))
+    mask, depth = _render_forward_depth_sphere(expected, radius)
+
+    geometry = target_geometry_from_rgbd(
+        mask, depth, 1.74, 0.2, 25.0, radius
+    )
+
+    assert geometry is not None
+    assert geometry.projection_center == pytest.approx((160.0, 120.0))
+    assert geometry.center_camera[0] > expected[0]
+    assert geometry.center_camera[0] - expected[0] < radius
+    assert abs(geometry.center_camera[1]) < 0.02
+    assert abs(geometry.center_camera[2]) < 0.02
+
+
+def test_synthetic_off_axis_and_edge_spheres_keep_correct_camera_signs():
+    cases = (
+        np.array((5.0, -1.0, 0.6)),
+        np.array((8.0, 5.0, -2.0)),
+    )
+    for expected in cases:
+        mask, depth = _render_forward_depth_sphere(expected, 0.25)
+        geometry = target_geometry_from_rgbd(
+            mask, depth, 1.74, 0.2, 25.0, 0.25
+        )
+
+        assert geometry is not None
+        assert math.copysign(1.0, geometry.center_camera[1]) == (
+            math.copysign(1.0, expected[1])
+        )
+        assert math.copysign(1.0, geometry.center_camera[2]) == (
+            math.copysign(1.0, expected[2])
+        )
+        assert np.linalg.norm(
+            np.asarray(geometry.center_camera) - expected
+        ) < 0.35
+
+
+def test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias():
+    expected = np.array((5.0, -0.8, 0.4))
+    mask, depth = _render_forward_depth_sphere(expected, 0.25)
+    visible_columns = np.nonzero(mask)[1]
+    mask[:, :int(np.median(visible_columns))] = False
+
+    geometry = target_geometry_from_rgbd(
+        mask, depth, 1.74, 0.2, 25.0, 0.25
+    )
+
+    assert geometry is not None
+    assert abs(geometry.center_camera[1] - expected[1]) > 0.03
 
 
 def test_rgbd_localizer_rejects_missing_valid_depth():
@@ -825,6 +1032,7 @@ def test_synthetic_synchronized_red_rgbd_produces_valid_observation():
     node.target_reference_z_offset = 0.0
     node.base_position_std = 0.08
     node.range_position_std_scale = 0.01
+    node.geometry_diagnostics_enabled = True
     observations = []
     positions = []
     node.observation_pub = SimpleNamespace(
@@ -862,6 +1070,15 @@ def test_synthetic_synchronized_red_rgbd_produces_valid_observation():
     assert observations[0].red_pixel_count == 4
     assert observations[0].rejection_reason == ''
     assert observations[0].rgb_depth_acquisition_skew == pytest.approx(0.0)
+    assert observations[0].geometry_diagnostics_enabled
+    assert observations[0].mask_centroid_u == pytest.approx(1.5)
+    assert observations[0].mask_centroid_v == pytest.approx(1.5)
+    assert observations[0].mask_bbox_left == 1
+    assert observations[0].mask_bbox_right == 2
+    assert observations[0].valid_depth_count == 4
+    assert observations[0].depth_median == pytest.approx(5.0)
+    assert observations[0].center_camera_x == pytest.approx(5.0)
+    assert observations[0].interpolated_uav_z == pytest.approx(-5.0)
     assert len(positions) == 1
 
 

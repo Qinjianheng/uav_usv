@@ -2,6 +2,7 @@
 
 import math
 import statistics
+import time
 from collections import deque
 
 from builtin_interfaces.msg import Time
@@ -28,6 +29,8 @@ from .intercept_evaluator import TimestampedStateHistory
 from .intercept_evaluator import VisionMetricAccumulator
 from .intercept_evaluator import synchronize_histories
 from .gazebo_terminal import GazeboTerminalPauser, GazeboWorldPauseClient
+from .gazebo_entity_pose import entity_geometry_residuals
+from .gazebo_entity_pose import GazeboEntityPoseTracker
 from uav_control.common.runtime_performance import RateMeter
 
 
@@ -171,6 +174,9 @@ class InterceptEvaluatorNode(Node):
             '/planning/shadow_target_prediction',
         )
         self.declare_parameter('gazebo_world_name', 'default')
+        self.declare_parameter('gazebo_entity_diagnostics_enabled', False)
+        self.declare_parameter('gazebo_target_entity_name', 'usv_target')
+        self.declare_parameter('gazebo_visual_height_offset', 0.42)
         self.declare_parameter('gazebo_pause_timeout_ms', 250)
         self.declare_parameter('gazebo_pause_maximum_attempts', 2)
         self.declare_parameter('gazebo_pause_retry_delay', 0.05)
@@ -209,6 +215,17 @@ class InterceptEvaluatorNode(Node):
             self.get_parameter('shadow_prediction_topic').value
         )
         self.gazebo_pauser = None
+        self.gazebo_entity_tracker = None
+        self.gazebo_entity_node = None
+        self.gazebo_target_entity_name = str(
+            self.get_parameter('gazebo_target_entity_name').value
+        )
+        self.gazebo_visual_height_offset = float(
+            self.get_parameter('gazebo_visual_height_offset').value
+        )
+        world_name = str(
+            self.get_parameter('gazebo_world_name').value
+        ).strip().strip('/')
         try:
             pause_client = GazeboWorldPauseClient(
                 world_name=self.get_parameter('gazebo_world_name').value,
@@ -229,6 +246,41 @@ class InterceptEvaluatorNode(Node):
             self.get_logger().warn(
                 f'Independent Gazebo pause client unavailable: {error}'
             )
+        self.gazebo_entity_diagnostics_enabled = bool(self.get_parameter(
+            'gazebo_entity_diagnostics_enabled'
+        ).value)
+        if self.gazebo_entity_diagnostics_enabled:
+            try:
+                from gz.msgs10.clock_pb2 import Clock as GazeboClock
+                from gz.msgs10.pose_v_pb2 import Pose_V
+                from gz.transport13 import Node as GazeboTransportNode
+
+                self.gazebo_entity_tracker = GazeboEntityPoseTracker()
+                self.gazebo_entity_node = GazeboTransportNode()
+                clock_topic = f'/world/{world_name}/clock'
+                pose_topic = f'/world/{world_name}/pose/info'
+                if not self.gazebo_entity_node.subscribe(
+                    GazeboClock,
+                    clock_topic,
+                    self.gazebo_entity_clock_callback,
+                ):
+                    raise RuntimeError(
+                        f'could not subscribe to {clock_topic}'
+                    )
+                if not self.gazebo_entity_node.subscribe(
+                    Pose_V,
+                    pose_topic,
+                    self.gazebo_entity_pose_callback,
+                ):
+                    raise RuntimeError(
+                        f'could not subscribe to {pose_topic}'
+                    )
+            except (ImportError, RuntimeError, TypeError) as error:
+                self.gazebo_entity_tracker = None
+                self.gazebo_entity_node = None
+                self.get_logger().warn(
+                    f'Gazebo entity diagnostics unavailable: {error}'
+                )
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -398,6 +450,44 @@ class InterceptEvaluatorNode(Node):
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
+    @staticmethod
+    def _gazebo_stamp(stamp):
+        return float(stamp.sec) + float(stamp.nsec) * 1e-9
+
+    def gazebo_entity_clock_callback(self, message):
+        """Keep the evaluator-only entity history in ROS system time."""
+        if self.gazebo_entity_tracker is None:
+            return
+        self.gazebo_entity_tracker.add_clock_anchor(
+            self._gazebo_stamp(message.sim),
+            self._gazebo_stamp(message.system),
+            self._now(),
+            time.monotonic(),
+        )
+
+    def gazebo_entity_pose_callback(self, message):
+        """Record the actual rendered target pose at its Gazebo sample time."""
+        if self.gazebo_entity_tracker is None:
+            return
+        sim_stamp = self._gazebo_stamp(message.header.stamp)
+        for pose in message.pose:
+            name = str(pose.name)
+            if (
+                name == self.gazebo_target_entity_name
+                or name.rsplit('::', 1)[-1]
+                == self.gazebo_target_entity_name
+            ):
+                self.gazebo_entity_tracker.add_pose(
+                    sim_stamp,
+                    (
+                        pose.position.x,
+                        pose.position.y,
+                        pose.position.z,
+                    ),
+                    self._now(),
+                )
+                return
+
     def uav_callback(self, message):
         try:
             state = uav_from_message(message)
@@ -565,6 +655,101 @@ class InterceptEvaluatorNode(Node):
                 estimate[index] - truth_position[index]
                 for index in range(3)
             )
+            entity_center = (
+                self.gazebo_entity_tracker.position_at(measurement_stamp)
+                if self.gazebo_entity_tracker is not None
+                and measurement_stamp > 0.0
+                else None
+            )
+            entity_reference = (
+                (
+                    entity_center[0],
+                    entity_center[1],
+                    entity_center[2] + self.gazebo_visual_height_offset,
+                )
+                if entity_center is not None else (math.nan,) * 3
+            )
+            vision_to_entity = tuple(
+                estimate[index] - entity_reference[index]
+                for index in range(3)
+            )
+            entity_to_truth = tuple(
+                entity_reference[index] - truth_position[index]
+                for index in range(3)
+            )
+            entity_tracker = self.gazebo_entity_tracker
+            geometry_residuals = None
+            if (
+                entity_center is not None
+                and bool(message.geometry_diagnostics_enabled)
+            ):
+                try:
+                    geometry_residuals = entity_geometry_residuals(
+                        entity_center_ned=entity_center,
+                        uav_position_ned=(
+                            message.interpolated_uav_x,
+                            message.interpolated_uav_y,
+                            message.interpolated_uav_z,
+                        ),
+                        attitude_quaternion=(
+                            message.interpolated_attitude_w,
+                            message.interpolated_attitude_x,
+                            message.interpolated_attitude_y,
+                            message.interpolated_attitude_z,
+                        ),
+                        camera_translation_flu=(
+                            message.camera_translation_x,
+                            message.camera_translation_y,
+                            message.camera_translation_z,
+                        ),
+                        camera_pitch_down=message.camera_pitch_down,
+                        intrinsics=(
+                            message.camera_fx,
+                            message.camera_fy,
+                            message.camera_cx,
+                            message.camera_cy,
+                        ),
+                        observed_projection_center=(
+                            message.projection_centroid_u,
+                            message.projection_centroid_v,
+                        ),
+                        observed_center_camera=(
+                            message.center_camera_x,
+                            message.center_camera_y,
+                            message.center_camera_z,
+                        ),
+                        observed_body_flu=(
+                            message.target_body_flu_x,
+                            message.target_body_flu_y,
+                            message.target_body_flu_z,
+                        ),
+                    )
+                except ValueError:
+                    geometry_residuals = None
+            expected_projection = (
+                geometry_residuals.expected_projection
+                if geometry_residuals else (math.nan,) * 2
+            )
+            projection_error = (
+                geometry_residuals.pixel_error
+                if geometry_residuals else (math.nan,) * 2
+            )
+            expected_camera = (
+                geometry_residuals.expected_camera
+                if geometry_residuals else (math.nan,) * 3
+            )
+            camera_error = (
+                geometry_residuals.camera_error
+                if geometry_residuals else (math.nan,) * 3
+            )
+            expected_body = (
+                geometry_residuals.expected_body_flu
+                if geometry_residuals else (math.nan,) * 3
+            )
+            body_error = (
+                geometry_residuals.body_error
+                if geometry_residuals else (math.nan,) * 3
+            )
             covariance = list(message.covariance)
             self.writer.append_visual_event({
                 'measurement_stamp': measurement_stamp,
@@ -660,6 +845,128 @@ class InterceptEvaluatorNode(Node):
                 'valid_depth_ratio': float(message.valid_depth_ratio),
                 'target_range': target_range,
                 'view_angle': float(message.view_angle),
+                'geometry_diagnostics_enabled': bool(
+                    message.geometry_diagnostics_enabled
+                ),
+                'mask_centroid_u': float(message.mask_centroid_u),
+                'mask_centroid_v': float(message.mask_centroid_v),
+                'projection_centroid_u': float(
+                    message.projection_centroid_u
+                ),
+                'projection_centroid_v': float(
+                    message.projection_centroid_v
+                ),
+                'mask_bbox_left': int(message.mask_bbox_left),
+                'mask_bbox_top': int(message.mask_bbox_top),
+                'mask_bbox_right': int(message.mask_bbox_right),
+                'mask_bbox_bottom': int(message.mask_bbox_bottom),
+                'valid_depth_count': int(message.valid_depth_count),
+                'depth_min': float(message.depth_min),
+                'depth_median': float(message.depth_median),
+                'depth_mad': float(message.depth_mad),
+                'camera_fx': float(message.camera_fx),
+                'camera_fy': float(message.camera_fy),
+                'camera_cx': float(message.camera_cx),
+                'camera_cy': float(message.camera_cy),
+                'camera_translation_x': float(
+                    message.camera_translation_x
+                ),
+                'camera_translation_y': float(
+                    message.camera_translation_y
+                ),
+                'camera_translation_z': float(
+                    message.camera_translation_z
+                ),
+                'camera_pitch_down': float(message.camera_pitch_down),
+                'surface_camera_x': float(message.surface_camera_x),
+                'surface_camera_y': float(message.surface_camera_y),
+                'surface_camera_z': float(message.surface_camera_z),
+                'center_camera_x': float(message.center_camera_x),
+                'center_camera_y': float(message.center_camera_y),
+                'center_camera_z': float(message.center_camera_z),
+                'target_body_flu_x': float(message.target_body_flu_x),
+                'target_body_flu_y': float(message.target_body_flu_y),
+                'target_body_flu_z': float(message.target_body_flu_z),
+                'interpolated_uav_x': float(message.interpolated_uav_x),
+                'interpolated_uav_y': float(message.interpolated_uav_y),
+                'interpolated_uav_z': float(message.interpolated_uav_z),
+                'interpolated_attitude_w': float(
+                    message.interpolated_attitude_w
+                ),
+                'interpolated_attitude_x': float(
+                    message.interpolated_attitude_x
+                ),
+                'interpolated_attitude_y': float(
+                    message.interpolated_attitude_y
+                ),
+                'interpolated_attitude_z': float(
+                    message.interpolated_attitude_z
+                ),
+                'target_reference_z_offset': float(
+                    message.target_reference_z_offset
+                ),
+                'gazebo_entity_available': entity_center is not None,
+                'gazebo_entity_clock_status': (
+                    entity_tracker.last_status
+                    if entity_tracker else 'DISABLED'
+                ),
+                'gazebo_entity_clock_reset_count': (
+                    entity_tracker.reset_count if entity_tracker else 0
+                ),
+                'gazebo_entity_raw_stamp': (
+                    entity_tracker.last_raw_stamp
+                    if entity_tracker else math.nan
+                ),
+                'gazebo_entity_mapped_stamp': (
+                    entity_tracker.last_mapped_stamp
+                    if entity_tracker else math.nan
+                ),
+                'gazebo_entity_center_x': (
+                    entity_center[0] if entity_center else math.nan
+                ),
+                'gazebo_entity_center_y': (
+                    entity_center[1] if entity_center else math.nan
+                ),
+                'gazebo_entity_center_z': (
+                    entity_center[2] if entity_center else math.nan
+                ),
+                'gazebo_entity_reference_x': entity_reference[0],
+                'gazebo_entity_reference_y': entity_reference[1],
+                'gazebo_entity_reference_z': entity_reference[2],
+                'entity_expected_projection_u': expected_projection[0],
+                'entity_expected_projection_v': expected_projection[1],
+                'projection_error_u': projection_error[0],
+                'projection_error_v': projection_error[1],
+                'entity_expected_camera_x': expected_camera[0],
+                'entity_expected_camera_y': expected_camera[1],
+                'entity_expected_camera_z': expected_camera[2],
+                'camera_center_error_x': camera_error[0],
+                'camera_center_error_y': camera_error[1],
+                'camera_center_error_z': camera_error[2],
+                'camera_center_error_3d': math.sqrt(sum(
+                    value * value for value in camera_error
+                )),
+                'entity_expected_body_flu_x': expected_body[0],
+                'entity_expected_body_flu_y': expected_body[1],
+                'entity_expected_body_flu_z': expected_body[2],
+                'body_flu_error_x': body_error[0],
+                'body_flu_error_y': body_error[1],
+                'body_flu_error_z': body_error[2],
+                'body_flu_error_3d': math.sqrt(sum(
+                    value * value for value in body_error
+                )),
+                'vision_to_entity_x': vision_to_entity[0],
+                'vision_to_entity_y': vision_to_entity[1],
+                'vision_to_entity_z': vision_to_entity[2],
+                'vision_to_entity_3d': math.sqrt(sum(
+                    value * value for value in vision_to_entity
+                )),
+                'entity_to_truth_x': entity_to_truth[0],
+                'entity_to_truth_y': entity_to_truth[1],
+                'entity_to_truth_z': entity_to_truth[2],
+                'entity_to_truth_3d': math.sqrt(sum(
+                    value * value for value in entity_to_truth
+                )),
                 'position_x': estimate[0],
                 'position_y': estimate[1],
                 'position_z': estimate[2],
@@ -932,6 +1239,11 @@ class InterceptEvaluatorNode(Node):
             ),
             'visual_evaluation_enabled': self.visual_evaluation_enabled,
             'visual_observation_topic': self.visual_observation_topic,
+            'gazebo_entity_diagnostics_enabled': (
+                self.gazebo_entity_diagnostics_enabled
+            ),
+            'gazebo_target_entity_name': self.gazebo_target_entity_name,
+            'gazebo_visual_height_offset': self.gazebo_visual_height_offset,
         }
 
     def _start_mission(self, mission_id, now):

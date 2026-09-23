@@ -157,6 +157,31 @@ def _error_summary(values):
     }
 
 
+def _signed_error_summary(values):
+    values = [float(value) for value in values]
+    ordered = sorted(values)
+    return {
+        'count': len(values),
+        'available': bool(values),
+        'mean': sum(values) / len(values) if values else None,
+        'median': (
+            ordered[len(ordered) // 2]
+            if len(ordered) % 2 == 1
+            else 0.5 * (
+                ordered[len(ordered) // 2 - 1]
+                + ordered[len(ordered) // 2]
+            )
+            if ordered else None
+        ),
+        'rmse': (
+            math.sqrt(sum(value * value for value in values) / len(values))
+            if values else None
+        ),
+        'p95_abs': _percentile([abs(value) for value in values], 0.95)
+        if values else None,
+    }
+
+
 class VisionMetricAccumulator:
     """Keep event-based raw RGB-D and current KF errors separate."""
 
@@ -195,6 +220,9 @@ class VisionMetricAccumulator:
             'axis_x': [],
             'axis_y': [],
             'axis_z': [],
+            'signed_axis_x': [],
+            'signed_axis_y': [],
+            'signed_axis_z': [],
             'horizontal': [],
             'position_3d': [],
             'ages': [],
@@ -252,6 +280,9 @@ class VisionMetricAccumulator:
         values['axis_x'].append(abs(error[0]))
         values['axis_y'].append(abs(error[1]))
         values['axis_z'].append(abs(error[2]))
+        values['signed_axis_x'].append(error[0])
+        values['signed_axis_y'].append(error[1])
+        values['signed_axis_z'].append(error[2])
         values['horizontal'].append(math.hypot(error[0], error[1]))
         values['position_3d'].append(_norm(error))
         stratum['position_3d'].append(_norm(error))
@@ -301,6 +332,15 @@ class VisionMetricAccumulator:
                 'raw_position_x': _error_summary(values['axis_x']),
                 'raw_position_y': _error_summary(values['axis_y']),
                 'raw_position_z': _error_summary(values['axis_z']),
+                'raw_signed_position_x': _signed_error_summary(
+                    values['signed_axis_x']
+                ),
+                'raw_signed_position_y': _signed_error_summary(
+                    values['signed_axis_y']
+                ),
+                'raw_signed_position_z': _signed_error_summary(
+                    values['signed_axis_z']
+                ),
                 'raw_position_horizontal': _error_summary(
                     values['horizontal']
                 ),
@@ -927,6 +967,44 @@ class ExperimentArtifactWriter:
         'approach_phase', 'distance_bin', 'motion_regime',
         'confidence', 'red_pixel_count', 'valid_depth_ratio',
         'target_range', 'view_angle',
+        'geometry_diagnostics_enabled',
+        'mask_centroid_u', 'mask_centroid_v',
+        'projection_centroid_u', 'projection_centroid_v',
+        'mask_bbox_left', 'mask_bbox_top',
+        'mask_bbox_right', 'mask_bbox_bottom',
+        'valid_depth_count', 'depth_min', 'depth_median', 'depth_mad',
+        'camera_fx', 'camera_fy', 'camera_cx', 'camera_cy',
+        'camera_translation_x', 'camera_translation_y',
+        'camera_translation_z', 'camera_pitch_down',
+        'surface_camera_x', 'surface_camera_y', 'surface_camera_z',
+        'center_camera_x', 'center_camera_y', 'center_camera_z',
+        'target_body_flu_x', 'target_body_flu_y', 'target_body_flu_z',
+        'interpolated_uav_x', 'interpolated_uav_y',
+        'interpolated_uav_z',
+        'interpolated_attitude_w', 'interpolated_attitude_x',
+        'interpolated_attitude_y', 'interpolated_attitude_z',
+        'target_reference_z_offset',
+        'gazebo_entity_available', 'gazebo_entity_clock_status',
+        'gazebo_entity_clock_reset_count',
+        'gazebo_entity_raw_stamp', 'gazebo_entity_mapped_stamp',
+        'gazebo_entity_center_x', 'gazebo_entity_center_y',
+        'gazebo_entity_center_z',
+        'gazebo_entity_reference_x', 'gazebo_entity_reference_y',
+        'gazebo_entity_reference_z',
+        'entity_expected_projection_u', 'entity_expected_projection_v',
+        'projection_error_u', 'projection_error_v',
+        'entity_expected_camera_x', 'entity_expected_camera_y',
+        'entity_expected_camera_z',
+        'camera_center_error_x', 'camera_center_error_y',
+        'camera_center_error_z', 'camera_center_error_3d',
+        'entity_expected_body_flu_x', 'entity_expected_body_flu_y',
+        'entity_expected_body_flu_z',
+        'body_flu_error_x', 'body_flu_error_y',
+        'body_flu_error_z', 'body_flu_error_3d',
+        'vision_to_entity_x', 'vision_to_entity_y',
+        'vision_to_entity_z', 'vision_to_entity_3d',
+        'entity_to_truth_x', 'entity_to_truth_y',
+        'entity_to_truth_z', 'entity_to_truth_3d',
         'position_x', 'position_y', 'position_z',
         'covariance_xx', 'covariance_yy', 'covariance_zz',
         'truth_x', 'truth_y', 'truth_z',
