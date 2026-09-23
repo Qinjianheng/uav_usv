@@ -6,6 +6,7 @@ from uav_control.evaluation.gazebo_entity_pose import (
     entity_geometry_residuals,
     GazeboEntityPoseTracker,
 )
+from uav_control.evaluation import gazebo_entity_pose
 from uav_control.evaluation.intercept_evaluator_node import (
     InterceptEvaluatorNode,
 )
@@ -56,6 +57,56 @@ def test_entity_pose_clock_reset_clears_old_history():
 
     assert tracker.position_at(1000.05) is None
     assert tracker.reset_count == 1
+
+
+def test_pose_query_reports_its_own_interpolation_bracket_not_latest_pose():
+    history = gazebo_entity_pose.TimedPoseHistory(maximum_age=2.0)
+    assert history.add(10.0, 1000.0, (0.0, 0.0, 0.0))
+    assert history.add(10.1, 1000.1, (10.0, 0.0, 0.0))
+    assert history.add(10.2, 1000.2, (20.0, 0.0, 0.0))
+
+    query = history.query_at(1000.05)
+
+    assert query.status == 'INTERPOLATED'
+    assert query.value == pytest.approx((5.0, 0.0, 0.0))
+    assert query.query_ros_stamp == pytest.approx(1000.05)
+    assert query.left_sim_stamp == pytest.approx(10.0)
+    assert query.right_sim_stamp == pytest.approx(10.1)
+    assert query.left_ros_stamp == pytest.approx(1000.0)
+    assert query.right_ros_stamp == pytest.approx(1000.1)
+    assert query.fraction == pytest.approx(0.5)
+    assert query.interval == pytest.approx(0.1)
+
+    exact = history.query_at(1000.1)
+    assert exact.status == 'EXACT'
+    assert exact.left_sim_stamp == pytest.approx(10.1)
+    assert exact.right_sim_stamp == pytest.approx(10.1)
+    assert exact.fraction == pytest.approx(0.0)
+    assert exact.interval == pytest.approx(0.0)
+    assert history.query_at(999.9).status == 'BEFORE_HISTORY'
+    assert history.query_at(1000.3).status == 'AFTER_HISTORY'
+
+
+def test_entity_query_metadata_is_cleared_with_clock_reset():
+    tracker = GazeboEntityPoseTracker(history_duration=2.0)
+    for sim_stamp, ros_stamp in ((10.0, 1000.0), (10.1, 1000.1),
+                                 (10.2, 1000.2)):
+        assert tracker.add_clock_anchor(
+            sim_stamp, ros_stamp, ros_stamp + 0.01, sim_stamp,
+        )
+    for sim_stamp in (10.0, 10.1, 10.2):
+        assert tracker.add_pose(
+            sim_stamp, (sim_stamp, 0.0, 0.42), 1000.21,
+        )
+
+    query = tracker.query_at(1000.05)
+    assert query.status == 'INTERPOLATED'
+    assert query.left_sim_stamp == pytest.approx(10.0)
+    assert query.right_sim_stamp == pytest.approx(10.1)
+    assert tracker.last_raw_stamp == pytest.approx(10.2)
+
+    assert not tracker.add_clock_anchor(1.0, 1000.3, 1000.31, 10.3)
+    assert tracker.query_at(1000.05).status == 'EMPTY'
 
 
 def test_evaluator_callbacks_select_target_entity_and_keep_sample_time():

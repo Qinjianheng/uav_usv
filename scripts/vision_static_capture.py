@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 import rclpy
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
@@ -20,11 +20,17 @@ from rclpy.qos import (
 from uav_usv_interfaces.msg import TargetObservation, TargetState
 
 from uav_control.evaluation.gazebo_entity_pose import (
-    GazeboEntityPoseTracker, entity_geometry_residuals,
+    GazeboEntityPoseTracker, TimedPoseHistory, entity_geometry_residuals,
+)
+from uav_control.evaluation.pose_frame_diagnostics import (
+    gazebo_model_rotation_ned_frd, interpolate_model_pose,
+    interpolate_px4_attitude, interpolate_px4_position,
+    quaternion_rotation, query_crosses_reset, query_metadata,
+    rotation_angle_between_quaternions, rotation_residual_rpy,
 )
 from uav_control.evaluation.intercept_evaluator import TimestampedStateHistory
 from uav_control.evaluation.intercept_evaluator_node import truth_from_message
-from uav_control.perception.rgbd_target_localizer import TimestampedVectorHistory
+from uav_control.perception.rgbd_target_localizer import Px4RosClockMapper
 
 
 def stamp_seconds(stamp):
@@ -37,20 +43,6 @@ def gazebo_stamp_seconds(stamp):
 
 def norm3(values):
     return math.sqrt(sum(float(value) ** 2 for value in values))
-
-
-def quaternion_rotation(quaternion):
-    w, x, y, z = np.asarray(quaternion, dtype=float) / np.linalg.norm(
-        quaternion
-    )
-    return np.array((
-        (1 - 2 * (y * y + z * z), 2 * (x * y - z * w),
-         2 * (x * z + y * w)),
-        (2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
-         2 * (y * z - x * w)),
-        (2 * (x * z - y * w), 2 * (y * z + x * w),
-         1 - 2 * (x * x + y * y)),
-    ))
 
 
 def physical_camera_geometry(model_pose, entity_center_ned, message):
@@ -87,17 +79,25 @@ def physical_camera_geometry(model_pose, entity_center_ned, message):
         message.interpolated_attitude_z,
     ))
     px4_yaw = math.atan2(attitude_rotation[1, 0], attitude_rotation[0, 0])
-    return camera_world, expected_camera, projection, model_heading_ned, px4_yaw
+    return (
+        camera_world, expected_camera, projection,
+        model_heading_ned, px4_yaw,
+    )
 
 
 class StaticVisionCapture(Node):
-    """Read shadow observations and independent truth; never publish ROS data."""
+    """Read shadow observations and independent truth without publishing."""
 
-    def __init__(self, output_path, visual_height_offset):
+    def __init__(
+        self, output_path, visual_height_offset,
+        px4_timestamp_is_ros_time=True,
+    ):
         super().__init__('vision_static_capture')
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.stream = self.output_path.open('x', newline='', encoding='utf-8', buffering=1)
+        self.stream = self.output_path.open(
+            'x', newline='', encoding='utf-8', buffering=1,
+        )
         self.writer = None
         self.counts = Counter()
         self.pending = deque(maxlen=1024)
@@ -105,7 +105,19 @@ class StaticVisionCapture(Node):
         self.entity_tracker = GazeboEntityPoseTracker(
             history_duration=5.0, clock_history_duration=5.0,
         )
-        self.model_history = TimestampedVectorHistory(maximum_age=5.0)
+        self.model_history = TimedPoseHistory(
+            maximum_age=5.0, interpolator=interpolate_model_pose,
+        )
+        self.px4_clock_mapper = Px4RosClockMapper(
+            source_is_ros_time=px4_timestamp_is_ros_time,
+        )
+        self.px4_timestamp_is_ros_time = bool(px4_timestamp_is_ros_time)
+        self.px4_position_history = TimedPoseHistory(
+            maximum_age=5.0, interpolator=interpolate_px4_position,
+        )
+        self.px4_attitude_history = TimedPoseHistory(
+            maximum_age=5.0, interpolator=interpolate_px4_attitude,
+        )
         self.visual_height_offset = float(visual_height_offset)
         self.latest_uav_velocity = (math.nan,) * 3
         sensor_qos = QoSProfile(
@@ -125,6 +137,10 @@ class StaticVisionCapture(Node):
             VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self.uav_callback, sensor_qos,
         )
+        self.create_subscription(
+            VehicleAttitude, '/fmu/out/vehicle_attitude',
+            self.attitude_callback, sensor_qos,
+        )
         from gz.msgs10.clock_pb2 import Clock
         from gz.msgs10.pose_v_pb2 import Pose_V
         from gz.transport13 import Node as GazeboTransportNode
@@ -143,11 +159,14 @@ class StaticVisionCapture(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def clock_callback(self, message):
+        previous_reset = self.entity_tracker.reset_count
         self.entity_tracker.add_clock_anchor(
             gazebo_stamp_seconds(message.sim),
             gazebo_stamp_seconds(message.system),
             self.now(), time.monotonic(),
         )
+        if self.entity_tracker.reset_count != previous_reset:
+            self.model_history.clear()
 
     def pose_callback(self, message):
         sim_stamp = gazebo_stamp_seconds(message.header.stamp)
@@ -169,7 +188,7 @@ class StaticVisionCapture(Node):
         )
         if accepted and model_pose is not None:
             self.model_history.add(
-                self.entity_tracker.last_mapped_stamp,
+                sim_stamp, self.entity_tracker.last_mapped_stamp,
                 (model_pose.position.x, model_pose.position.y,
                  model_pose.position.z, model_pose.orientation.w,
                  model_pose.orientation.x, model_pose.orientation.y,
@@ -188,30 +207,89 @@ class StaticVisionCapture(Node):
         self.latest_uav_velocity = (
             float(message.vx), float(message.vy), float(message.vz),
         )
+        self.add_px4_sample('position', message, (
+            float(message.x), float(message.y), float(message.z),
+            float(message.heading), int(message.xy_reset_counter),
+            int(message.z_reset_counter),
+            int(message.heading_reset_counter), float(message.delta_heading),
+        ))
+
+    def attitude_callback(self, message):
+        self.add_px4_sample('attitude', message, (
+            *tuple(float(component) for component in message.q),
+            int(message.quat_reset_counter),
+            *tuple(float(component) for component in message.delta_q_reset),
+        ))
+
+    def add_px4_sample(self, stream_name, message, value):
+        if not all(math.isfinite(component) for component in value):
+            self.counts[f'invalid_px4_{stream_name}'] += 1
+            return
+        source = float(
+            message.timestamp_sample or message.timestamp
+        ) * 1e-6
+        before_reset = self.px4_clock_mapper.reset_count
+        mapped = self.px4_clock_mapper.to_ros_time(
+            source, self.now(), stream_name=stream_name,
+        )
+        if self.px4_clock_mapper.reset_count != before_reset:
+            self.px4_position_history.clear()
+            self.px4_attitude_history.clear()
+        if mapped is None:
+            self.counts[f'unmapped_px4_{stream_name}'] += 1
+            return
+        history = (
+            self.px4_position_history if stream_name == 'position'
+            else self.px4_attitude_history
+        )
+        if not history.add(source, mapped, value):
+            self.counts[f'out_of_order_px4_{stream_name}'] += 1
 
     def observation_callback(self, message):
         self.counts['received_observation'] += 1
         if len(self.pending) == self.pending.maxlen:
             self.counts['queue_overflow'] += 1
-        self.pending.append((message, time.monotonic()))
+        self.pending.append((message, time.monotonic(), self.now()))
 
     def drain(self, force=False):
         while self.pending:
-            message, queued_at = self.pending[0]
+            message, queued_at, collector_receipt_stamp = self.pending[0]
             measurement_stamp = stamp_seconds(message.stamp)
             truth = self.truth_history.state_at(measurement_stamp)
-            entity = self.entity_tracker.position_at(measurement_stamp)
-            model = self.model_history.value_at(measurement_stamp)
+            entity_query = self.entity_tracker.query_at(measurement_stamp)
+            model_query = self.model_history.query_at(measurement_stamp)
+            px4_position_query = self.px4_position_history.query_at(
+                measurement_stamp
+            )
+            px4_attitude_query = self.px4_attitude_history.query_at(
+                measurement_stamp
+            )
+            entity = entity_query.value
+            model = model_query.value
             if (
                 not force and message.valid
-                and (truth is None or entity is None or model is None)
+                and (
+                    truth is None or entity is None or model is None
+                    or px4_position_query.value is None
+                    or px4_attitude_query.value is None
+                )
                 and time.monotonic() - queued_at < 0.5
             ):
                 return
             self.pending.popleft()
-            self.write_observation(message, truth, entity, model)
+            self.write_observation(
+                message, truth, entity_query, model_query,
+                px4_position_query, px4_attitude_query,
+                collector_receipt_stamp, time.monotonic() - queued_at,
+            )
 
-    def write_observation(self, message, truth, entity, model):
+    def write_observation(
+        self, message, truth, entity_query, model_query,
+        px4_position_query, px4_attitude_query,
+        collector_receipt_stamp, collector_wait_seconds,
+    ):
+        entity = entity_query.value
+        model = model_query.value
         estimate = (
             float(message.position.x), float(message.position.y),
             float(message.position.z),
@@ -273,7 +351,10 @@ class StaticVisionCapture(Node):
             except ValueError:
                 self.counts['geometry_residual_invalid'] += 1
         physical = None
-        if model and entity and message.valid and message.geometry_diagnostics_enabled:
+        if (
+            model and entity and message.valid
+            and message.geometry_diagnostics_enabled
+        ):
             try:
                 physical = physical_camera_geometry(model, entity, message)
             except (ValueError, ZeroDivisionError):
@@ -293,7 +374,9 @@ class StaticVisionCapture(Node):
             'gazebo_entity_clock_status': self.entity_tracker.last_status,
             'gazebo_entity_clock_reset_count': self.entity_tracker.reset_count,
             'gazebo_entity_raw_stamp': self.entity_tracker.last_raw_stamp,
-            'gazebo_entity_mapped_stamp': self.entity_tracker.last_mapped_stamp,
+            'gazebo_entity_mapped_stamp': (
+                self.entity_tracker.last_mapped_stamp
+            ),
             'rgb_depth_acquisition_skew': message.rgb_depth_acquisition_skew,
             'observation_age': self.now() - stamp_seconds(message.stamp),
             'depth_median': message.depth_median,
@@ -321,6 +404,178 @@ class StaticVisionCapture(Node):
                 math.cos(physical[3] - physical[4]),
             ) if physical else math.nan
         )
+        row.update(query_metadata('entity', entity_query))
+        row.update(query_metadata('model', model_query))
+        for prefix, query in (
+            ('px4_position', px4_position_query),
+            ('px4_attitude', px4_attitude_query),
+        ):
+            metadata = query_metadata(prefix, query)
+            row.update({
+                key.replace('_sim_stamp', '_source_stamp'): value
+                for key, value in metadata.items()
+            })
+        row.update({
+            'entity_clock_reset_count_at_write': (
+                self.entity_tracker.reset_count
+            ),
+            'px4_clock_reset_count_at_write': (
+                self.px4_clock_mapper.reset_count
+            ),
+            'px4_clock_status_at_write': self.px4_clock_mapper.last_status,
+            'px4_clock_offset_at_write': (
+                self.px4_clock_mapper.offset
+                if self.px4_clock_mapper.offset is not None else math.nan
+            ),
+            'px4_clock_offset_online': message.px4_clock_offset,
+            'px4_clock_status_online': str(message.px4_clock_status),
+            'px4_clock_reset_count_online': message.px4_clock_reset_count,
+            'px4_position_reset_crossed': (
+                query_crosses_reset(px4_position_query, 4)
+                or query_crosses_reset(px4_position_query, 5)
+                or query_crosses_reset(px4_position_query, 6)
+            ),
+            'px4_attitude_reset_crossed': query_crosses_reset(
+                px4_attitude_query, 4,
+            ),
+            'image_rgb_raw_stamp': message.rgb_raw_stamp,
+            'image_depth_raw_stamp': message.depth_raw_stamp,
+            'image_rgb_mapped_stamp': message.rgb_mapped_stamp,
+            'image_depth_mapped_stamp': message.depth_mapped_stamp,
+            'image_rgb_receipt_stamp_online': message.rgb_receipt_stamp,
+            'image_depth_receipt_stamp_online': message.depth_receipt_stamp,
+            'observation_received_stamp_online': stamp_seconds(
+                message.received_stamp
+            ),
+            'observation_processed_stamp_online': stamp_seconds(
+                message.processed_stamp
+            ),
+            'observation_published_stamp_online': stamp_seconds(
+                message.published_stamp
+            ),
+            'collector_receipt_stamp': collector_receipt_stamp,
+            'collector_write_stamp': self.now(),
+            'collector_wait_seconds': collector_wait_seconds,
+            'online_processing_seconds': (
+                stamp_seconds(message.processed_stamp)
+                - stamp_seconds(message.stamp)
+            ),
+            'online_publish_seconds': (
+                stamp_seconds(message.published_stamp)
+                - stamp_seconds(message.stamp)
+            ),
+            'collector_transport_seconds': (
+                collector_receipt_stamp
+                - stamp_seconds(message.published_stamp)
+            ),
+        })
+        row['collector_write_age_seconds'] = (
+            row['collector_write_stamp'] - row['measurement_stamp']
+        )
+        position_reference = px4_position_query.value
+        attitude_reference = px4_attitude_query.value
+        if position_reference:
+            row.update({
+                'px4_heading_ned': position_reference[3],
+                'px4_xy_reset_counter': position_reference[4],
+                'px4_z_reset_counter': position_reference[5],
+                'px4_heading_reset_counter': position_reference[6],
+                'px4_delta_heading': position_reference[7],
+            })
+        else:
+            row.update({
+                key: math.nan for key in (
+                    'px4_heading_ned', 'px4_xy_reset_counter',
+                    'px4_z_reset_counter', 'px4_heading_reset_counter',
+                    'px4_delta_heading',
+                )
+            })
+        row['px4_quat_reset_counter'] = (
+            attitude_reference[4] if attitude_reference else math.nan
+        )
+        for prefix, values, axes in (
+            ('px4_position_independent', (
+                position_reference[:3] if position_reference
+                else (math.nan,) * 3
+            ), 'xyz'),
+            ('px4_attitude_independent', (
+                attitude_reference[:4] if attitude_reference
+                else (math.nan,) * 4
+            ), 'wxyz'),
+            ('px4_delta_q_reset', (
+                attitude_reference[5:9] if attitude_reference
+                else (math.nan,) * 4
+            ), 'wxyz'),
+        ):
+            for axis, value in zip(axes, values):
+                row[f'{prefix}_{axis}'] = value
+        if model and position_reference and attitude_reference:
+            model_rotation_ned = gazebo_model_rotation_ned_frd(model[3:])
+            px4_rotation_ned = quaternion_rotation(attitude_reference[:4])
+            roll, pitch, yaw = rotation_residual_rpy(
+                model_rotation_ned, px4_rotation_ned,
+            )
+            rotation_delta = model_rotation_ned @ px4_rotation_ned.T
+            row.update({
+                'model_px4_roll_residual': roll,
+                'model_px4_pitch_residual': pitch,
+                'model_px4_yaw_residual': yaw,
+                'model_px4_rotation_angle': math.acos(float(np.clip(
+                    (np.trace(rotation_delta) - 1.0) / 2.0,
+                    -1.0, 1.0,
+                ))),
+                'px4_attitude_yaw_independent': math.atan2(
+                    px4_rotation_ned[1, 0], px4_rotation_ned[0, 0],
+                ),
+            })
+            row['px4_heading_attitude_difference'] = math.atan2(
+                math.sin(
+                    row['px4_heading_ned']
+                    - row['px4_attitude_yaw_independent']
+                ),
+                math.cos(
+                    row['px4_heading_ned']
+                    - row['px4_attitude_yaw_independent']
+                ),
+            )
+            row['online_independent_px4_rotation_angle'] = (
+                rotation_angle_between_quaternions((
+                    message.interpolated_attitude_w,
+                    message.interpolated_attitude_x,
+                    message.interpolated_attitude_y,
+                    message.interpolated_attitude_z,
+                ), attitude_reference[:4])
+            )
+        else:
+            for field in (
+                'model_px4_roll_residual', 'model_px4_pitch_residual',
+                'model_px4_yaw_residual', 'model_px4_rotation_angle',
+                'px4_attitude_yaw_independent',
+                'px4_heading_attitude_difference',
+                'online_independent_px4_rotation_angle',
+            ):
+                row[field] = math.nan
+        for prefix, values in (
+            ('model_px4_position_error', (
+                tuple(
+                    a - b for a, b in zip(
+                        (model[1], model[0], -model[2]),
+                        position_reference[:3],
+                    )
+                ) if model and position_reference else (math.nan,) * 3
+            )),
+            ('online_independent_px4_position_error', (
+                tuple(
+                    a - b for a, b in zip((
+                        message.interpolated_uav_x,
+                        message.interpolated_uav_y,
+                        message.interpolated_uav_z,
+                    ), position_reference[:3])
+                ) if position_reference else (math.nan,) * 3
+            )),
+        ):
+            for axis, value in zip('xyz', values):
+                row[f'{prefix}_{axis}'] = value
         for prefix, values in (
             ('position', estimate), ('truth', truth_position),
             ('truth_velocity', truth_velocity),
@@ -423,6 +678,9 @@ class StaticVisionCapture(Node):
                 'csv': str(self.output_path),
                 'counts': dict(self.counts),
                 'visual_height_offset': self.visual_height_offset,
+                'px4_timestamp_is_ros_time': (
+                    self.px4_timestamp_is_ros_time
+                ),
                 'collection_mode': 'evaluation_only_no_publish',
             }, stream, indent=2)
 
@@ -431,6 +689,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=float, default=30.0)
     parser.add_argument('--visual-height-offset', type=float, default=0.42)
+    parser.add_argument(
+        '--px4-timestamp-is-ros-time',
+        action=argparse.BooleanOptionalAction, default=True,
+    )
     parser.add_argument('--output-directory', type=Path, default=Path(
         'data/experiments/current'
     ))
@@ -438,7 +700,10 @@ def main():
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     output = arguments.output_directory / f'vision_static_capture_{stamp}.csv'
     rclpy.init()
-    node = StaticVisionCapture(output, arguments.visual_height_offset)
+    node = StaticVisionCapture(
+        output, arguments.visual_height_offset,
+        arguments.px4_timestamp_is_ros_time,
+    )
     try:
         deadline = time.monotonic() + arguments.seconds
         while rclpy.ok() and time.monotonic() < deadline:

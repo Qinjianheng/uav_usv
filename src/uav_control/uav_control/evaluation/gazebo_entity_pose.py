@@ -2,6 +2,7 @@
 
 import math
 import threading
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -10,7 +11,6 @@ from uav_control.perception.rgbd_target_localizer import (
     camera_target_to_body_flu,
     GazeboImageClockMapper,
     local_ned_target_to_camera_flu,
-    TimestampedVectorHistory,
 )
 
 
@@ -20,6 +20,93 @@ def gazebo_enu_to_ned(position):
     if not all(math.isfinite(value) for value in (x, y, z)):
         raise ValueError('Gazebo entity position must be finite')
     return y, x, -z
+
+
+@dataclass(frozen=True)
+class TimedPoseQuery:
+    """One value and the exact source samples used to obtain it."""
+
+    value: tuple | None
+    status: str
+    query_ros_stamp: float
+    left_sim_stamp: float = math.nan
+    right_sim_stamp: float = math.nan
+    left_ros_stamp: float = math.nan
+    right_ros_stamp: float = math.nan
+    fraction: float = math.nan
+    interval: float = math.nan
+    left_value: object = None
+    right_value: object = None
+
+
+class TimedPoseHistory:
+    """Bounded sampled values with query-specific raw and mapped timestamps."""
+
+    def __init__(self, maximum_age=1.0, interpolator=None):
+        self.maximum_age = max(float(maximum_age), 1e-3)
+        self.interpolator = interpolator
+        self._samples = deque()
+        self._lock = threading.Lock()
+
+    def clear(self):
+        with self._lock:
+            self._samples.clear()
+
+    def add(self, sim_stamp, ros_stamp, value):
+        sim_stamp = float(sim_stamp)
+        ros_stamp = float(ros_stamp)
+        if not all(math.isfinite(x) for x in (sim_stamp, ros_stamp)):
+            return False
+        with self._lock:
+            if self._samples and ros_stamp < self._samples[-1][1] - 1e-9:
+                return False
+            sample = (sim_stamp, ros_stamp, value)
+            if self._samples and abs(ros_stamp - self._samples[-1][1]) <= 1e-9:
+                self._samples[-1] = sample
+            else:
+                self._samples.append(sample)
+            cutoff = ros_stamp - self.maximum_age
+            while len(self._samples) > 2 and self._samples[1][1] < cutoff:
+                self._samples.popleft()
+        return True
+
+    def query_at(self, ros_stamp):
+        ros_stamp = float(ros_stamp)
+        with self._lock:
+            samples = tuple(self._samples)
+        if not math.isfinite(ros_stamp):
+            return TimedPoseQuery(None, 'INVALID_QUERY', ros_stamp)
+        if not samples:
+            return TimedPoseQuery(None, 'EMPTY', ros_stamp)
+        if ros_stamp < samples[0][1] - 1e-9:
+            return TimedPoseQuery(None, 'BEFORE_HISTORY', ros_stamp)
+        if ros_stamp > samples[-1][1] + 1e-9:
+            return TimedPoseQuery(None, 'AFTER_HISTORY', ros_stamp)
+        for index, (sim_time, mapped_time, value) in enumerate(samples):
+            if abs(ros_stamp - mapped_time) <= 1e-9:
+                return TimedPoseQuery(
+                    value, 'EXACT', ros_stamp, sim_time, sim_time,
+                    mapped_time, mapped_time, 0.0, 0.0, value, value,
+                )
+            if mapped_time > ros_stamp and index > 0:
+                left_sim, left_ros, left_value = samples[index - 1]
+                interval = mapped_time - left_ros
+                fraction = (ros_stamp - left_ros) / interval
+                if self.interpolator is None:
+                    interpolated = tuple(
+                        left + fraction * (right - left)
+                        for left, right in zip(left_value, value)
+                    )
+                else:
+                    interpolated = self.interpolator(
+                        left_value, value, fraction,
+                    )
+                return TimedPoseQuery(
+                    interpolated, 'INTERPOLATED', ros_stamp,
+                    left_sim, sim_time, left_ros, mapped_time,
+                    fraction, interval, left_value, value,
+                )
+        return TimedPoseQuery(None, 'QUERY_GAP', ros_stamp)
 
 
 @dataclass(frozen=True)
@@ -104,7 +191,7 @@ class GazeboEntityPoseTracker:
             history_duration=clock_history_duration,
             maximum_system_clock_step=maximum_system_clock_step,
         )
-        self.history = TimestampedVectorHistory(history_duration)
+        self.history = TimedPoseHistory(history_duration)
         self.lock = threading.Lock()
         self.last_raw_stamp = math.nan
         self.last_mapped_stamp = math.nan
@@ -149,12 +236,15 @@ class GazeboEntityPoseTracker:
             except ValueError:
                 self.last_status = 'ENTITY_POSITION_INVALID'
                 return False
-            if not self.history.add(mapped, position):
+            if not self.history.add(sim_stamp, mapped, position):
                 self.last_status = 'ENTITY_POSE_OUT_OF_ORDER'
                 return False
             self.last_mapped_stamp = mapped
             return True
 
     def position_at(self, ros_stamp):
+        return self.query_at(ros_stamp).value
+
+    def query_at(self, ros_stamp):
         with self.lock:
-            return self.history.value_at(ros_stamp)
+            return self.history.query_at(ros_stamp)
