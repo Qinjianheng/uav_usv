@@ -13,8 +13,10 @@ data/datasets/raw/*
 !data/datasets/raw/.gitkeep
 data/datasets/processed/*
 !data/datasets/processed/.gitkeep
-data/experiments/current/*
-!data/experiments/current/.gitkeep
+data/experiments/current/*.db3
+data/experiments/current/*.mcap
+data/experiments/current/*.bag
+data/experiments/current/*.mp4
 data/models/*
 !data/models/.gitkeep
 *.bak
