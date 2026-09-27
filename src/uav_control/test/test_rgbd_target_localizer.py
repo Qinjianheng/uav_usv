@@ -263,7 +263,11 @@ def test_default_camera_translation_uses_px4_model_origin():
     assert tuple(
         parameters[f'camera_translation_{axis}'] for axis in 'xyz'
     ) == pytest.approx(mount)
-    assert parameters['maximum_depth_mad'] == pytest.approx(0.25)
+    # This independent gate has a radius-derived physical meaning; changing
+    # the configured sphere radius must update the ceiling as well.
+    assert parameters['maximum_depth_mad'] == pytest.approx(
+        parameters['target_radius']
+    )
 
 
 def test_body_to_ned_rotation_applies_yaw():
