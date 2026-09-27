@@ -121,3 +121,51 @@ def test_invalid_online_attitude_has_no_rotation_comparison():
     assert diagnostics.rotation_angle_between_quaternions(
         (1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0),
     ) == pytest.approx(0.0)
+
+
+def test_reconstructed_model_orientation_preserves_full_rpy_residual():
+    diagnostics = importlib.import_module(
+        'uav_control.evaluation.pose_frame_diagnostics'
+    )
+    px4_quaternion = _quaternion_from_gazebo_euler(0.04, -0.03, 0.1)
+    residual = (0.07, -0.05, 0.2)
+
+    model_quaternion = diagnostics.model_quaternion_from_residual(
+        px4_quaternion, residual,
+    )
+    px4_rotation = diagnostics.quaternion_rotation(px4_quaternion)
+    model_rotation = diagnostics.quaternion_rotation(model_quaternion)
+    assert diagnostics.rotation_residual_rpy(
+        model_rotation, px4_rotation,
+    ) == pytest.approx(residual, abs=1e-12)
+
+
+def test_four_pose_counterfactuals_use_online_camera_transform():
+    diagnostics = importlib.import_module(
+        'uav_control.evaluation.pose_frame_diagnostics'
+    )
+    px4_quaternion = (1.0, 0.0, 0.0, 0.0)
+    model_quaternion = _quaternion_from_gazebo_euler(
+        0.0, 0.0, math.pi / 2,
+    )
+    camera_vector = (10.0, 0.0, 0.0)
+    px4_position = np.array((0.0, 0.0, 0.0))
+    model_position = np.array((1.0, 2.0, 0.0))
+    positions = diagnostics.four_pose_counterfactuals(
+        camera_vector, px4_position, model_position,
+        px4_quaternion, model_quaternion,
+        (0.35, 0.0, 0.19), 0.20944, 0.42,
+    )
+    for key, position, attitude in (
+        ('A', px4_position, px4_quaternion),
+        ('B', model_position, model_quaternion),
+        ('C', model_position, px4_quaternion),
+        ('D', px4_position, model_quaternion),
+    ):
+        assert positions[key] == pytest.approx(
+            diagnostics.camera_target_to_local_ned(
+                camera_vector, position, attitude,
+                (0.35, 0.0, 0.19), 0.20944, 0.42,
+            )
+        )
+    assert positions['C'] - positions['A'] == pytest.approx(model_position)

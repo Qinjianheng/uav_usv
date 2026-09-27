@@ -3,8 +3,11 @@
 import math
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from uav_control.perception.rgbd_target_localizer import quaternion_slerp
+from uav_control.perception.rgbd_target_localizer import (
+    camera_target_to_local_ned, quaternion_slerp,
+)
 
 
 def interpolate_model_pose(left, right, fraction):
@@ -109,3 +112,37 @@ def rotation_angle_between_quaternions(actual, reference):
     return math.acos(float(np.clip(
         (np.trace(delta) - 1.0) / 2.0, -1.0, 1.0,
     )))
+
+
+def model_quaternion_from_residual(px4_quaternion, residual_rpy):
+    """Recover model NED/FRD quaternion from logged full rotation residual."""
+    residual = np.asarray(residual_rpy, dtype=float)
+    if residual.shape != (3,) or not np.all(np.isfinite(residual)):
+        raise ValueError('rotation residual must be a finite 3-vector')
+    model_rotation = (
+        Rotation.from_euler('xyz', residual).as_matrix()
+        @ quaternion_rotation(px4_quaternion)
+    )
+    x, y, z, w = Rotation.from_matrix(model_rotation).as_quat()
+    return (w, x, y, z)
+
+
+def four_pose_counterfactuals(
+    camera_vector, px4_position, model_position,
+    px4_quaternion, model_quaternion,
+    camera_translation, camera_pitch_down, target_reference_z_offset,
+):
+    """Run the online camera-to-NED function with four offline poses."""
+    poses = {
+        'A': (px4_position, px4_quaternion),
+        'B': (model_position, model_quaternion),
+        'C': (model_position, px4_quaternion),
+        'D': (px4_position, model_quaternion),
+    }
+    return {
+        key: camera_target_to_local_ned(
+            camera_vector, position, quaternion, camera_translation,
+            camera_pitch_down, target_reference_z_offset,
+        )
+        for key, (position, quaternion) in poses.items()
+    }
