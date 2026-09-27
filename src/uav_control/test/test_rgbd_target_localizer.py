@@ -256,12 +256,14 @@ def test_default_camera_translation_uses_px4_model_origin():
     # is z=-0.05 m relative to that link, hence z=+0.19 m from model origin.
     mount = rgbd_target_localizer.DEFAULT_CAMERA_TRANSLATION_FLU
     assert mount == pytest.approx((0.35, 0.0, 0.19))
-    baseline = Path(__file__).parents[2] / 'uav_usv_bringup/config/baseline.yaml'
+    baseline = (Path(__file__).parents[2]
+                / 'uav_usv_bringup/config/baseline.yaml')
     parameters = yaml.safe_load(baseline.read_text())[
         'rgbd_target_localizer']['ros__parameters']
     assert tuple(
         parameters[f'camera_translation_{axis}'] for axis in 'xyz'
     ) == pytest.approx(mount)
+    assert parameters['maximum_depth_mad'] == pytest.approx(0.25)
 
 
 def test_body_to_ned_rotation_applies_yaw():
@@ -1041,6 +1043,7 @@ def test_synthetic_synchronized_red_rgbd_produces_valid_observation():
     node.minimum_depth = 0.2
     node.maximum_depth = 25.0
     node.minimum_depth_ratio = 0.5
+    node.maximum_depth_mad = 0.25
     node.camera_translation_flu = (0.0, 0.0, 0.0)
     node.camera_pitch_down = 0.0
     node.target_radius = 0.0
@@ -1127,6 +1130,7 @@ def _make_synthetic_localizer(now):
     node.minimum_depth = 0.2
     node.maximum_depth = 25.0
     node.minimum_depth_ratio = 0.5
+    node.maximum_depth_mad = 0.25
     node.camera_translation_flu = (0.0, 0.0, 0.0)
     node.camera_pitch_down = 0.0
     node.target_radius = 0.0
@@ -1174,6 +1178,41 @@ def _enqueue_rgbd(node, now, stamp, color_delay, depth_delay):
     node.color_callback(color)
     now[0] = stamp + depth_delay
     node.depth_callback(depth)
+
+
+def test_large_depth_mad_rejects_observation_with_quality_evidence():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    positions = []
+    node.target_position_pub = SimpleNamespace(
+        publish=lambda message: positions.append(message)
+    )
+    node.position_history.add(100.0, (0.0, 0.0, -5.0))
+    node.position_history.add(100.5, (0.0, 0.0, -5.0))
+    node.attitude_history.add(100.0, (1.0, 0.0, 0.0, 0.0))
+    node.attitude_history.add(100.5, (1.0, 0.0, 0.0, 0.0))
+    color, depth = _rgbd_messages(100.10)
+    depth_array = np.full((4, 4), 5.0, dtype='<f4')
+    depth_array[1:3, 1:3] = np.array(((4.0, 4.0), (5.0, 5.0)))
+    depth.data = depth_array.tobytes()
+    now[0] = 100.12
+    node.color_callback(color)
+    now[0] = 100.13
+    node.depth_callback(depth)
+    node.localize()
+
+    assert len(observations) == 1
+    message = observations[0]
+    assert not message.valid
+    assert message.rejection_reason == 'DEPTH_MAD_HIGH'
+    assert message.confidence == 0.0
+    assert math.isnan(message.position.x)
+    assert message.red_pixel_count == 4
+    assert message.valid_depth_count == 4
+    assert message.valid_depth_ratio == pytest.approx(1.0)
+    assert message.depth_median == pytest.approx(4.5)
+    assert message.depth_mad == pytest.approx(0.5)
+    assert not positions
 
 
 def test_localizer_processes_latest_complete_pair_instead_of_fifo_backlog():

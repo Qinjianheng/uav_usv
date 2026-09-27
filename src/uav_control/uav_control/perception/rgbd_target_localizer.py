@@ -1022,6 +1022,7 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('minimum_depth', 0.2)
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('minimum_depth_ratio', 0.5)
+        self.declare_parameter('maximum_depth_mad', 0.25)
         self.declare_parameter('maximum_rgb_depth_skew', 0.1)
         self.declare_parameter('data_timeout', 0.5)
         self.declare_parameter('state_history_duration', 1.0)
@@ -1038,9 +1039,15 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('time_pair_diagnostics_enabled', False)
         self.declare_parameter('localization_rate_hz', 20.0)
         self.declare_parameter('camera_pitch_down', 0.20944)
-        self.declare_parameter('camera_translation_x', DEFAULT_CAMERA_TRANSLATION_FLU[0])
-        self.declare_parameter('camera_translation_y', DEFAULT_CAMERA_TRANSLATION_FLU[1])
-        self.declare_parameter('camera_translation_z', DEFAULT_CAMERA_TRANSLATION_FLU[2])
+        self.declare_parameter(
+            'camera_translation_x', DEFAULT_CAMERA_TRANSLATION_FLU[0],
+        )
+        self.declare_parameter(
+            'camera_translation_y', DEFAULT_CAMERA_TRANSLATION_FLU[1],
+        )
+        self.declare_parameter(
+            'camera_translation_z', DEFAULT_CAMERA_TRANSLATION_FLU[2],
+        )
         self.declare_parameter('target_radius', 0.25)
         self.declare_parameter('target_reference_z_offset', 0.42)
         self.declare_parameter('geometry_diagnostics_enabled', False)
@@ -1066,6 +1073,10 @@ class RgbdTargetLocalizer(Node):
             float(self.get_parameter('minimum_depth_ratio').value),
             0.0,
         ), 1.0)
+        self.maximum_depth_mad = max(
+            float(self.get_parameter('maximum_depth_mad').value),
+            0.0,
+        )
         self.maximum_rgb_depth_skew = max(
             float(self.get_parameter('maximum_rgb_depth_skew').value),
             0.0,
@@ -1496,6 +1507,7 @@ class RgbdTargetLocalizer(Node):
         reason='INVALID_OBSERVATION',
         measurement_stamp=None,
         received_stamp=None,
+        geometry=None,
     ):
         """Publish an explicit invalid observation without updating the KF."""
         message = TargetObservation()
@@ -1515,6 +1527,16 @@ class RgbdTargetLocalizer(Node):
         self._fill_time_diagnostic(message)
         message.red_pixel_count = 0
         message.valid_depth_ratio = 0.0
+        if geometry is not None:
+            message.red_pixel_count = geometry.red_pixel_count
+            message.valid_depth_count = geometry.valid_depth_count
+            message.valid_depth_ratio = (
+                geometry.valid_depth_count / geometry.red_pixel_count
+            )
+            message.depth_min = geometry.depth_min
+            message.depth_median = geometry.depth_median
+            message.depth_mad = geometry.depth_mad
+            message.geometry_diagnostics_enabled = True
         message.target_range = math.nan
         message.view_angle = math.nan
         message.valid = False
@@ -1942,6 +1964,15 @@ class RgbdTargetLocalizer(Node):
         if geometry is None:
             self.publish_invalid_observation(
                 'TARGET_VECTOR_INVALID', measurement_stamp, received_stamp
+            )
+            return
+        # For one sphere, camera-X depths lie within center X +/- radius,
+        # so their median absolute deviation cannot exceed the radius.
+        # Reject broad depth mixtures before publishing a pose.
+        if geometry.depth_mad > self.maximum_depth_mad:
+            self.publish_invalid_observation(
+                'DEPTH_MAD_HIGH', measurement_stamp, received_stamp,
+                geometry=geometry,
             )
             return
         camera_vector = np.asarray(geometry.center_camera, dtype=float)
