@@ -128,12 +128,25 @@ def analyze_capture(directory, scenario):
     projection_depth = []
     surface = []
     online_reconstruction_differences = []
+    online_b_differences = []
     invalid_roi_diagnostics = []
     counts = {'saved': len(records), 'online_valid': 0,
               'complete_pose': 0, 'mad_high': 0}
     for item in records:
         counts['mad_high'] += item['rejection_reason'] == 'DEPTH_MAD_HIGH'
         if not item['valid']:
+            if (item['intrinsics_fx_fy_cx_cy'][0] <= 0
+                    or item['intrinsics_fx_fy_cx_cy'][1] <= 0
+                    or item['mask_bbox_ltrb_inclusive'] == [0, 0, 0, 0]):
+                invalid_roi_diagnostics.append({
+                    'file': item['file'],
+                    'rejection_reason': item['rejection_reason'],
+                    'usable': False,
+                    'reason': (
+                        'historical_invalid_observation_missing_geometry'
+                    ),
+                })
+                continue
             with np.load(directory / item['file']) as roi:
                 bad_mask, bad_depth = roi['mask'], roi['depth']
             bad_entity = item['entity_at_depth']['value']
@@ -192,17 +205,27 @@ def analyze_capture(directory, scenario):
         elapsed = time.perf_counter() - start
         if geom is None:
             continue
-        old = np.asarray(geom.center_camera)
+        u, v = geom.projection_center
+        fx, fy, cx, cy = intrinsics
+        ray = np.array((1.0, -(u - cx) / fx, -(v - cy) / fy))
+        # Keep the historical online A baseline explicit after the live
+        # localizer changes to B; both use the same decoded ROI and pixels.
+        old_forward = geom.depth_median + radius
+        old = np.array((
+            old_forward,
+            -(u - cx) * old_forward / fx,
+            -(v - cy) * old_forward / fy,
+        ))
         online_reconstruction_differences.append(float(np.linalg.norm(
             old - np.asarray(item['online_center_camera_flu'])
         )))
         errors['A_median_radius'].append(old - true_r)
         timings['A_median_radius'].append(elapsed)
         start = time.perf_counter()
-        u, v = geom.projection_center
-        fx, fy, cx, cy = intrinsics
-        ray = np.array((1.0, -(u - cx) / fx, -(v - cy) / fy))
         candidate = (geom.depth_median + radius / np.linalg.norm(ray)) * ray
+        online_b_differences.append(float(np.linalg.norm(
+            candidate - np.asarray(item['online_center_camera_flu'])
+        )))
         timings['B_ray_radius'].append(time.perf_counter() - start)
         errors['B_ray_radius'].append(candidate - true_r)
         points, pixels = roi_points(roi_mask, roi_depth,
@@ -287,6 +310,10 @@ def analyze_capture(directory, scenario):
                'max_online_A_reconstruction_difference_m': (
                    max(online_reconstruction_differences)
                    if online_reconstruction_differences else None
+               ),
+               'max_online_B_reconstruction_difference_m': (
+                   max(online_b_differences)
+                   if online_b_differences else None
                ),
                'skew_per_frame': skew}
     return summary

@@ -38,10 +38,11 @@ def evaluate(center):
     geometry = target_geometry_from_rgbd(
         mask, depth, FOV, 0.2, 25.0, RADIUS,
     )
-    old = np.asarray(geometry.center_camera)
     fx, fy, cx, cy = geometry.intrinsics
     u, v = geometry.projection_center
     central_ray = np.array((1.0, -(u - cx) / fx, -(v - cy) / fy))
+    # Reproduce P4's historical A independently of the current online rule.
+    old = (geometry.depth_median + RADIUS) * central_ray
     ray_corrected_forward = (
         geometry.depth_median + RADIUS / np.linalg.norm(central_ray)
     )

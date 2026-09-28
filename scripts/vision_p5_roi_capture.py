@@ -220,6 +220,12 @@ class P5Capture(StaticVisionCapture):
         if (mask is None or depths is None or mask.shape != depths.shape):
             self.counts['roi_decode_failed'] += 1
             return
+        if (message.camera_fx <= 0 or message.camera_fy <= 0
+                or (message.mask_bbox_left, message.mask_bbox_top,
+                    message.mask_bbox_right, message.mask_bbox_bottom)
+                == (0, 0, 0, 0)):
+            self.counts['roi_geometry_unavailable'] += 1
+            return
         bounds = roi_bounds(message, color.width, color.height)
         if bounds is None:
             self.counts['roi_bbox_missing'] += 1

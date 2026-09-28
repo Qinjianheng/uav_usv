@@ -845,9 +845,9 @@ def target_geometry_from_rgbd(
     Return the current estimator inputs and intermediate camera vectors.
 
     Gazebo Rendering's RGB-D depth image contains the camera-forward X
-    component.  This helper intentionally preserves the existing
-    ``median(depth) + radius`` estimator; the extra values make its sphere
-    approximation independently auditable before any formula is replaced.
+    component.  Recover a representative surface point from that X depth,
+    then add the known radius along its camera ray.  The extra values keep
+    the approximation independently auditable.
     """
     if target_mask is None or depth is None:
         return None
@@ -869,14 +869,17 @@ def target_geometry_from_rgbd(
     fx, fy, cx, cy = camera_intrinsics(width, height, horizontal_fov)
     valid_depths = np.asarray(depth[valid], dtype=float)
     surface_forward = float(np.median(valid_depths))
-    forward = surface_forward + max(
-        float(target_radius),
-        0.0,
-    )
     mask_center_x = float(np.median(mask_columns))
     mask_center_y = float(np.median(mask_rows))
     image_x = float(np.median(columns))
     image_y = float(np.median(rows))
+    # Depth is the camera-X component, so the surface point is
+    # surface_forward * ray.  A Euclidean radius adds R / |ray| in X.
+    ray_length = math.sqrt(
+        1.0 + ((image_x - cx) / fx) ** 2
+        + ((image_y - cy) / fy) ** 2
+    )
+    forward = surface_forward + max(float(target_radius), 0.0) / ray_length
 
     # Gazebo's camera optical axis is +X. Image right is camera -Y and
     # image down is camera -Z for the FLU camera-link convention.
@@ -1537,6 +1540,26 @@ class RgbdTargetLocalizer(Node):
             message.depth_median = geometry.depth_median
             message.depth_mad = geometry.depth_mad
             message.geometry_diagnostics_enabled = True
+            message.mask_centroid_u, message.mask_centroid_v = (
+                geometry.mask_center
+            )
+            (message.projection_centroid_u,
+             message.projection_centroid_v) = geometry.projection_center
+            (message.mask_bbox_left, message.mask_bbox_top,
+             message.mask_bbox_right,
+             message.mask_bbox_bottom) = geometry.mask_bbox
+            (message.camera_fx, message.camera_fy,
+             message.camera_cx, message.camera_cy) = geometry.intrinsics
+            (message.surface_camera_x, message.surface_camera_y,
+             message.surface_camera_z) = geometry.surface_camera
+            (message.center_camera_x, message.center_camera_y,
+             message.center_camera_z) = geometry.center_camera
+            (message.camera_translation_x, message.camera_translation_y,
+             message.camera_translation_z) = self.camera_translation_flu
+            message.camera_pitch_down = self.camera_pitch_down
+            message.target_reference_z_offset = (
+                self.target_reference_z_offset
+            )
         message.target_range = math.nan
         message.view_angle = math.nan
         message.valid = False

@@ -152,7 +152,11 @@ def test_rgbd_geometry_exposes_bounded_mask_and_depth_diagnostics():
     assert geometry.depth_median == pytest.approx(4.85)
     assert geometry.depth_mad == pytest.approx(0.05)
     assert geometry.surface_camera[0] == pytest.approx(4.85)
-    assert geometry.center_camera[0] == pytest.approx(5.10)
+    fx, fy, cx, cy = geometry.intrinsics
+    u, v = geometry.projection_center
+    length = math.sqrt(1 + ((u - cx) / fx) ** 2
+                       + ((v - cy) / fy) ** 2)
+    assert geometry.center_camera[0] == pytest.approx(4.85 + 0.25 / length)
 
 
 def test_off_axis_depth_is_forward_axis_not_euclidean_range():
@@ -174,13 +178,37 @@ def test_off_axis_depth_is_forward_axis_not_euclidean_range():
     # component in the depth image.  Therefore pinhole Y/Z use the same
     # forward depth; treating 4.75 as a slant range would under-project Y.
     fx = geometry.intrinsics[0]
-    expected_left = -(5.0 - geometry.intrinsics[2]) * 5.0 / fx
-    assert geometry.center_camera[0] == pytest.approx(5.0)
+    ray_length = math.sqrt(
+        1.0 + ((5.0 - geometry.intrinsics[2]) / fx) ** 2
+        + ((2.0 - geometry.intrinsics[3]) / fx) ** 2
+    )
+    forward = 4.75 + 0.25 / ray_length
+    expected_left = -(5.0 - geometry.intrinsics[2]) * forward / fx
+    assert geometry.center_camera[0] == pytest.approx(forward)
     assert geometry.center_camera[1] == pytest.approx(expected_left)
     assert np.linalg.norm(geometry.center_camera) > 5.0
 
 
-def test_median_depth_plus_radius_is_not_claimed_as_exact_for_partial_sphere():
+def test_off_axis_radius_is_added_along_unit_observation_ray():
+    mask = np.zeros((5, 7), dtype=bool)
+    mask[2, 5] = True
+    depth = np.full((5, 7), math.inf, dtype=float)
+    depth[2, 5] = 4.75
+    geometry = target_geometry_from_rgbd(
+        mask, depth, math.pi / 2.0, 0.2, 25.0, 0.25,
+    )
+    fx, fy, cx, cy = geometry.intrinsics
+    ray = np.array((1.0, -(5.0 - cx) / fx, -(2.0 - cy) / fy))
+    expected = (4.75 + 0.25 / np.linalg.norm(ray)) * ray
+    assert geometry.surface_camera == pytest.approx(4.75 * ray)
+    assert geometry.center_camera == pytest.approx(expected)
+    assert np.linalg.norm(
+        np.asarray(geometry.center_camera)
+        - np.asarray(geometry.surface_camera)
+    ) == pytest.approx(0.25)
+
+
+def test_ray_radius_is_not_claimed_as_exact_for_partial_sphere():
     mask = np.zeros((5, 7), dtype=bool)
     mask[1:4, 3:6] = True
     depth = np.full((5, 7), math.inf, dtype=float)
@@ -203,7 +231,11 @@ def test_median_depth_plus_radius_is_not_claimed_as_exact_for_partial_sphere():
     )
 
     assert geometry.depth_median == pytest.approx(7.86)
-    assert geometry.center_camera[0] == pytest.approx(8.11)
+    fx, fy, cx, cy = geometry.intrinsics
+    u, v = geometry.projection_center
+    length = math.sqrt(1 + ((u - cx) / fx) ** 2
+                       + ((v - cy) / fy) ** 2)
+    assert geometry.center_camera[0] == pytest.approx(7.86 + 0.25 / length)
     assert geometry.depth_mad > 0.0
 
 
@@ -1216,6 +1248,27 @@ def test_large_depth_mad_rejects_observation_with_quality_evidence():
     assert message.valid_depth_ratio == pytest.approx(1.0)
     assert message.depth_median == pytest.approx(4.5)
     assert message.depth_mad == pytest.approx(0.5)
+    assert message.geometry_diagnostics_enabled
+    assert (message.mask_bbox_left, message.mask_bbox_top,
+            message.mask_bbox_right, message.mask_bbox_bottom) == (
+                1, 1, 2, 2,
+            )
+    assert (message.mask_centroid_u, message.mask_centroid_v) == (
+        1.5, 1.5,
+    )
+    assert (message.projection_centroid_u,
+            message.projection_centroid_v) == (1.5, 1.5)
+    assert message.camera_fx > 0.0
+    assert message.camera_fy > 0.0
+    assert all(math.isfinite(value) for value in (
+        message.surface_camera_x, message.surface_camera_y,
+        message.surface_camera_z, message.center_camera_x,
+        message.center_camera_y, message.center_camera_z,
+    ))
+    assert message.camera_translation_x == pytest.approx(0.0)
+    assert message.camera_pitch_down == pytest.approx(0.0)
+    assert message.target_reference_z_offset == pytest.approx(0.0)
+    assert all(math.isnan(value) for value in message.covariance)
     assert not positions
 
 
