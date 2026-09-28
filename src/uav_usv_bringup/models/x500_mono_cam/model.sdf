@@ -65,7 +65,8 @@
         </camera>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <visualize>true</visualize>
+        <!-- GUI only: sensor rendering and image/depth output remain on. -->
+        <visualize>false</visualize>
         <enable_metrics>true</enable_metrics>
       </sensor>
     </link>
@@ -119,7 +120,8 @@
         </camera>
         <always_on>true</always_on>
         <update_rate>20</update_rate>
-        <visualize>true</visualize>
+        <!-- GUI only: sensor rendering and image/depth output remain on. -->
+        <visualize>false</visualize>
         <enable_metrics>true</enable_metrics>
       </sensor>
     </link>

@@ -7,6 +7,8 @@ from datetime import datetime
 import json
 import math
 from pathlib import Path
+from queue import Full, Queue
+from threading import Thread
 import random
 import time
 
@@ -19,7 +21,7 @@ from sensor_msgs.msg import Image
 from uav_usv_interfaces.msg import TargetState
 
 from uav_control.perception.front_tof_monitor import (
-    decode_float32_depth, red_pixel_mask,
+    COLOR_PIXEL_FORMATS, red_pixel_mask,
 )
 from vision_static_capture import (
     StaticVisionCapture, gazebo_stamp_seconds, norm3,
@@ -62,6 +64,109 @@ def roi_bounds(message, width, height, padding=8):
     return left, top, right, bottom
 
 
+def roi_packed_bytes(data, width, height, step, bounds, bytes_per_pixel):
+    """Copy only bounded rows/pixels from a padded packed image."""
+    width, height, step = int(width), int(height), int(step)
+    left, top, right, bottom = bounds
+    if (width <= 0 or height <= 0
+            or step < width * bytes_per_pixel
+            or not (0 <= left < right <= width and
+                    0 <= top < bottom <= height)):
+        return None
+    raw = np.frombuffer(data, dtype=np.uint8)
+    if raw.size < height * step:
+        return None
+    rows = raw[:height * step].reshape(height, step)
+    return np.ascontiguousarray(
+        rows[top:bottom, left * bytes_per_pixel:right * bytes_per_pixel])
+
+
+def red_pixel_mask_roi(data, width, height, step, encoding, bounds):
+    """Match the full-frame red mask for one half-open ROI."""
+    formats = {value[0]: value[1] for value in COLOR_PIXEL_FORMATS.values()}
+    channels = formats.get(encoding)
+    if channels is None:
+        return None
+    packed = roi_packed_bytes(data, width, height, step, bounds, channels)
+    if packed is None:
+        return None
+    left, top, right, bottom = bounds
+    roi_width, roi_height = right - left, bottom - top
+    return red_pixel_mask(packed.tobytes(), roi_width, roi_height,
+                          roi_width * channels, encoding)
+
+
+def decode_float32_depth_roi(data, width, height, step, bounds):
+    """Match full-frame little-endian float32 decode for one ROI."""
+    packed = roi_packed_bytes(data, width, height, step, bounds, 4)
+    if packed is None:
+        return None
+    left, top, right, bottom = bounds
+    return packed.view('<f4').reshape(bottom - top, right - left)
+
+
+class RoiWriter:
+    """Bounded evaluation writer; never touches ROS node state."""
+
+    def __init__(self, directory, maximum_pending=12):
+        if maximum_pending <= 0:
+            raise ValueError('maximum_pending must be positive')
+        self.directory = Path(directory)
+        self.queue = Queue(maxsize=maximum_pending)
+        self.metadata = (self.directory / 'roi.jsonl').open(
+            'x', encoding='utf-8', buffering=1)
+        self.written = 0
+        self.error = None
+        self.closed = False
+        self.thread = Thread(target=self._run, name='p5-roi-writer')
+        self.thread.start()
+
+    def submit(self, index, mask, depth, item):
+        if self.closed or self.error is not None:
+            return False
+        filename = f'roi_{index:04d}.npz'
+        metadata = dict(item, file=filename)
+        work = (filename, mask.copy(), depth.copy(), metadata)
+        try:
+            self.queue.put_nowait(work)
+        except Full:
+            return False
+        return True
+
+    def _run(self):
+        while True:
+            work = self.queue.get()
+            try:
+                if work is None:
+                    return
+                filename, mask, depth, item = work
+                path = self.directory / filename
+                before = self.metadata.tell()
+                try:
+                    with path.open('xb') as stream:
+                        np.savez_compressed(stream, mask=mask, depth=depth)
+                    self.metadata.write(
+                        json.dumps(item, allow_nan=True) + '\n')
+                    self.written += 1
+                except Exception as exc:
+                    self.metadata.seek(before)
+                    self.metadata.truncate()
+                    path.unlink(missing_ok=True)
+                    if self.error is None:
+                        self.error = exc
+            finally:
+                self.queue.task_done()
+
+    def close(self):
+        self.closed = True
+        self.queue.join()
+        self.queue.put(None)
+        self.thread.join()
+        self.metadata.close()
+        if self.error is not None:
+            raise RuntimeError('ROI writer failed') from self.error
+
+
 def pose_metadata(query):
     return {
         'status': query.status,
@@ -81,8 +186,8 @@ class P5Capture(StaticVisionCapture):
         self.maximum_roi = int(maximum_roi)
         self.roi_directory = output_path.with_suffix('')
         self.roi_directory.mkdir(exist_ok=False)
-        self.metadata = (self.roi_directory / 'roi.jsonl').open(
-            'x', encoding='utf-8', buffering=1)
+        self.roi_writer = RoiWriter(self.roi_directory)
+        self.next_roi_index = 0
         self.pose_stream = (self.roi_directory / 'pose_receipt.jsonl').open(
             'x', encoding='utf-8', buffering=1)
         self.truth_stream = (self.roi_directory / 'truth.jsonl').open(
@@ -213,13 +318,6 @@ class P5Capture(StaticVisionCapture):
         if color is None or depth is None:
             self.counts['roi_pair_missing'] += 1
             return
-        mask = red_pixel_mask(color.data, color.width, color.height,
-                              color.step, color.encoding)
-        depths = decode_float32_depth(depth.data, depth.width, depth.height,
-                                      depth.step)
-        if (mask is None or depths is None or mask.shape != depths.shape):
-            self.counts['roi_decode_failed'] += 1
-            return
         if (message.camera_fx <= 0 or message.camera_fy <= 0
                 or (message.mask_bbox_left, message.mask_bbox_top,
                     message.mask_bbox_right, message.mask_bbox_bottom)
@@ -230,14 +328,14 @@ class P5Capture(StaticVisionCapture):
         if bounds is None:
             self.counts['roi_bbox_missing'] += 1
             return
-        left, top, right, bottom = bounds
-        index = sum(self.trigger_counts.values())
-        filename = f'roi_{index:04d}.npz'
-        np.savez_compressed(
-            self.roi_directory / filename,
-            mask=mask[top:bottom, left:right],
-            depth=depths[top:bottom, left:right],
-        )
+        mask = red_pixel_mask_roi(
+            color.data, color.width, color.height, color.step,
+            color.encoding, bounds)
+        depths = decode_float32_depth_roi(
+            depth.data, depth.width, depth.height, depth.step, bounds)
+        if mask is None or depths is None or mask.shape != depths.shape:
+            self.counts['roi_decode_failed'] += 1
+            return
         rgb_time = float(message.rgb_mapped_stamp)
         depth_time = float(message.depth_mapped_stamp)
         entity_rgb = self.entity_tracker.query_at(rgb_time)
@@ -245,7 +343,7 @@ class P5Capture(StaticVisionCapture):
         model_rgb = self.model_history.query_at(rgb_time)
         model_depth = self.model_history.query_at(depth_time)
         item = {
-            'file': filename, 'trigger': trigger,
+            'trigger': trigger,
             'valid': bool(message.valid),
             'rejection_reason': str(message.rejection_reason),
             'rgb_raw_stamp': message.rgb_raw_stamp,
@@ -276,16 +374,24 @@ class P5Capture(StaticVisionCapture):
             'model_at_rgb': pose_metadata(model_rgb),
             'model_at_depth': pose_metadata(model_depth),
         }
-        self.metadata.write(json.dumps(item, allow_nan=True) + '\n')
+        if not self.roi_writer.submit(
+                self.next_roi_index, mask, depths, item):
+            self.counts['roi_writer_queue_drop'] += 1
+            return
+        self.next_roi_index += 1
         self.trigger_counts[trigger] += 1
-        self.counts['roi_saved'] += 1
+        self.counts['roi_queued'] += 1
 
     def close(self):
-        super().close()
-        for stream in (self.metadata, self.pose_stream,
-                       self.truth_stream, self.kf_stream,
-                       self.observation_stream):
-            stream.close()
+        self.drain(force=True)
+        try:
+            self.roi_writer.close()
+        finally:
+            self.counts['roi_saved'] = self.roi_writer.written
+            super().close()
+            for stream in (self.pose_stream, self.truth_stream,
+                           self.kf_stream, self.observation_stream):
+                stream.close()
 
 
 def main():
