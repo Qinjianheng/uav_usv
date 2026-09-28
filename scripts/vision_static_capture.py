@@ -45,6 +45,22 @@ def norm3(values):
     return math.sqrt(sum(float(value) ** 2 for value in values))
 
 
+def pose_history_diagnostics(message):
+    """Copy online pose-history timestamps without changing their meaning."""
+    return {
+        name: float(getattr(message, name))
+        for name in (
+            'pose_history_start_stamp', 'pose_history_end_stamp',
+            'position_history_start_stamp',
+            'position_history_end_stamp',
+            'attitude_history_start_stamp',
+            'attitude_history_end_stamp',
+            'position_source_stamp', 'position_mapped_stamp',
+            'attitude_source_stamp', 'attitude_mapped_stamp',
+        )
+    }
+
+
 def physical_camera_geometry(model_pose, entity_center_ned, message):
     """Project using Gazebo model pose and SDF camera link, independently."""
     model_world = np.asarray(model_pose[:3], dtype=float)
@@ -469,6 +485,7 @@ class StaticVisionCapture(Node):
                 - stamp_seconds(message.published_stamp)
             ),
         })
+        row.update(pose_history_diagnostics(message))
         row['collector_write_age_seconds'] = (
             row['collector_write_stamp'] - row['measurement_stamp']
         )
