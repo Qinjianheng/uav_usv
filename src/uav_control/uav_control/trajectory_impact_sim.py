@@ -1266,6 +1266,9 @@ class TrajectoryImpactSim(Node):
         self.vehicle_status_time_ns = None
         self.offboard_active = False
         self.vehicle_armed = False
+        self.pre_flight_checks_pass = False
+        self.preflight_wait_announced = False
+        self.preflight_checks_announced = False
 
         self.sim_x = 0.0
         self.sim_y = 0.0
@@ -1708,6 +1711,7 @@ class TrajectoryImpactSim(Node):
         self.vehicle_armed = (
             msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
         )
+        self.pre_flight_checks_pass = bool(msg.pre_flight_checks_pass)
         if self.offboard_active and not previous_offboard:
             self.get_logger().info('PX4 confirmed OFFBOARD mode.')
         if self.vehicle_armed and not previous_armed:
@@ -1856,10 +1860,20 @@ class TrajectoryImpactSim(Node):
                 - self.vehicle_status_time_ns
             ) * 1e-9
             status_fresh = status_age <= self.vehicle_status_timeout
+        if not self.pre_flight_checks_pass:
+            if not self.preflight_wait_announced:
+                self.get_logger().info(
+                    'PREPARING | waiting for PX4 preflight checks'
+                )
+                self.preflight_wait_announced = True
+        elif not self.preflight_checks_announced:
+            self.get_logger().info('PX4 preflight checks passed')
+            self.preflight_checks_announced = True
         self.publish_flight_ready(
             self.offboard_active
             and not self.vehicle_armed
             and status_fresh
+            and self.pre_flight_checks_pass
         )
 
     def publish_gazebo_setpoint(

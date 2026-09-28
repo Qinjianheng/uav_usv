@@ -4,7 +4,7 @@ import math
 import textwrap
 
 import pytest
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleLocalPosition, VehicleStatus
 from uav_usv_interfaces.msg import (
     InterceptTrajectory,
     MissionState,
@@ -29,6 +29,30 @@ from uav_control.control.trajectory_tracking import TrackingCommand
 from uav_control.control.trajectory_tracking import PolynomialTrajectory
 from uav_control.control.trajectory_tracking import TrackerKinematicState
 from uav_control.control.trajectory_tracking import TrajectoryTrackerCore
+
+
+def test_ground_readiness_tracks_px4_preflight_reversal():
+    ready = trajectory_tracker_node.ground_flight_ready
+    assert not ready(True, False, True, False)
+    assert ready(True, False, True, True)
+    assert not ready(True, False, True, False)
+    assert not ready(True, False, False, True)
+
+
+def test_tracker_vehicle_status_records_px4_preflight_state():
+    node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
+    node._ros_seconds = lambda: 12.0
+    status = VehicleStatus()
+    status.nav_state = VehicleStatus.NAVIGATION_STATE_OFFBOARD
+    status.arming_state = VehicleStatus.ARMING_STATE_DISARMED
+    status.pre_flight_checks_pass = False
+    node.vehicle_status_callback(status)
+    assert not node.pre_flight_checks_pass
+    status.pre_flight_checks_pass = True
+    node.vehicle_status_callback(status)
+    assert node.pre_flight_checks_pass
+    assert node.offboard_active
+    assert not node.vehicle_armed
 
 
 def make_trajectory_message():

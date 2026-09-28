@@ -243,6 +243,15 @@ def prediction_endpoint_from_message(message, contact_stamp):
     return float(point.x), float(point.y), float(point.z)
 
 
+def ground_flight_ready(offboard_active, vehicle_armed, status_fresh,
+                        pre_flight_checks_pass):
+    """Require PX4 preflight approval before exposing the X gate."""
+    return bool(
+        offboard_active and not vehicle_armed and status_fresh
+        and pre_flight_checks_pass
+    )
+
+
 class TrajectoryTrackerNode(Node):
     """Track accepted plans while keeping optimization out of control."""
 
@@ -570,6 +579,9 @@ class TrajectoryTrackerNode(Node):
         self.vehicle_status_stamp = None
         self.offboard_active = False
         self.vehicle_armed = False
+        self.pre_flight_checks_pass = False
+        self.preflight_wait_announced = False
+        self.preflight_checks_announced = False
         self.mission_id = 0
         self.mission_state = MissionState.INIT
         self.mission_state_name = 'INIT'
@@ -614,6 +626,7 @@ class TrajectoryTrackerNode(Node):
         self.vehicle_armed = (
             message.arming_state == VehicleStatus.ARMING_STATE_ARMED
         )
+        self.pre_flight_checks_pass = bool(message.pre_flight_checks_pass)
 
     def target_state_callback(self, message):
         if message.frame_id != self.expected_frame_id:
@@ -1047,10 +1060,18 @@ class TrajectoryTrackerNode(Node):
                 and now - self.vehicle_status_stamp
                 <= self.vehicle_status_timeout
             )
-            ready = (
-                self.offboard_active
-                and not self.vehicle_armed
-                and status_fresh
+            if not self.pre_flight_checks_pass:
+                if not self.preflight_wait_announced:
+                    self.get_logger().info(
+                        'PREPARING | waiting for PX4 preflight checks'
+                    )
+                    self.preflight_wait_announced = True
+            elif not self.preflight_checks_announced:
+                self.get_logger().info('PX4 preflight checks passed')
+                self.preflight_checks_announced = True
+            ready = ground_flight_ready(
+                self.offboard_active, self.vehicle_armed,
+                status_fresh, self.pre_flight_checks_pass,
             )
             self._publish_bool(self.flight_ready_pub, ready)
             if ready and not self.flight_ready:

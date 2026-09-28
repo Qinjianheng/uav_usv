@@ -1226,6 +1226,9 @@ def test_ground_preparation_holds_position_and_requests_offboard():
         px4_command_retry_cycles=20,
         offboard_active=False,
         vehicle_armed=False,
+        pre_flight_checks_pass=False,
+        preflight_wait_announced=False,
+        preflight_checks_announced=False,
         vehicle_status_time_ns=None,
         vehicle_status_timeout=2.0,
         publish_offboard_mode=lambda: actions.append('stream'),
@@ -1269,12 +1272,16 @@ def test_ground_preparation_reports_ready_only_after_px4_confirmation():
         px4_command_retry_cycles=20,
         offboard_active=True,
         vehicle_armed=False,
+        pre_flight_checks_pass=False,
+        preflight_wait_announced=False,
+        preflight_checks_announced=False,
         vehicle_status_time_ns=900_000_000,
         vehicle_status_timeout=2.0,
         publish_offboard_mode=lambda: None,
         publish_gazebo_setpoint=lambda x, y, z, **kwargs: None,
         publish_vehicle_command=lambda command, param1, param2=0.0: None,
         publish_flight_ready=readiness.append,
+        get_logger=lambda: SimpleNamespace(info=lambda message: None),
         get_clock=lambda: SimpleNamespace(
             now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)
         ),
@@ -1282,7 +1289,15 @@ def test_ground_preparation_reports_ready_only_after_px4_confirmation():
 
     TrajectoryImpactSim.prepare_flight_on_ground(controller)
 
-    assert readiness == [True]
+    assert readiness == [False]
+
+    controller.pre_flight_checks_pass = True
+    TrajectoryImpactSim.prepare_flight_on_ground(controller)
+    assert readiness == [False, True]
+
+    controller.pre_flight_checks_pass = False
+    TrajectoryImpactSim.prepare_flight_on_ground(controller)
+    assert readiness == [False, True, False]
 
 
 def test_ground_preparation_disarms_unexpected_pre_x_arming():
@@ -1296,6 +1311,9 @@ def test_ground_preparation_disarms_unexpected_pre_x_arming():
         px4_command_retry_cycles=20,
         offboard_active=True,
         vehicle_armed=True,
+        pre_flight_checks_pass=False,
+        preflight_wait_announced=False,
+        preflight_checks_announced=False,
         vehicle_status_time_ns=900_000_000,
         vehicle_status_timeout=2.0,
         publish_offboard_mode=lambda: None,
