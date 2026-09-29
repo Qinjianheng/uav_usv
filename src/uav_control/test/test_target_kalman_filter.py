@@ -84,3 +84,50 @@ def test_kf_projection_keeps_last_real_observation_as_source_stamp():
         for message in states
     ]
     assert source_stamps == pytest.approx([10.0, 10.0])
+
+
+def test_measurement_update_predicts_by_acquisition_dt_before_update():
+    """An observation's image stamp, never receipt time, drives KF dt."""
+    class RecordingFilter:
+        initialized = False
+
+        def __init__(self):
+            self.events = []
+
+        def initialize(self, position, covariance):
+            self.events.append(('initialize', tuple(position)))
+            self.initialized = True
+
+        def predict(self, dt):
+            self.events.append(('predict', dt))
+
+        def update(self, position, covariance):
+            self.events.append(('update', tuple(position)))
+
+    node = object.__new__(target_kalman_filter.TargetKalmanFilterNode)
+    node.frame_id = 'local_ned'
+    node.filter = RecordingFilter()
+    node.filter_time_ns = None
+    node.last_measurement_time_ns = None
+
+    def observation(nanoseconds, x):
+        message = TargetObservation()
+        message.valid = True
+        message.frame_id = 'local_ned'
+        message.stamp.sec = nanoseconds // 1_000_000_000
+        message.stamp.nanosec = nanoseconds % 1_000_000_000
+        message.position.x = x
+        message.covariance = [
+            0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+        return message
+
+    node.measurement_callback(observation(10_000_000_000, 1.0))
+    node.measurement_callback(observation(10_100_000_000, 2.0))
+    node.measurement_callback(observation(10_050_000_000, 99.0))
+    assert node.filter.events == [
+        ('initialize', (1.0, 0.0, 0.0)),
+        ('predict', pytest.approx(0.1)),
+        ('update', (2.0, 0.0, 0.0)),
+    ]
+    assert node.filter_time_ns == 10_100_000_000
+    assert node.last_measurement_time_ns == 10_100_000_000
