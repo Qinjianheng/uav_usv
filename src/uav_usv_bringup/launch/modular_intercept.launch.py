@@ -41,7 +41,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_shadow_perception',
             default_value='true',
-            description='Run camera/KF shadow diagnostics (never control).',
+            description=(
+                'Run camera/KF required by tracking prediction, '
+                'plus diagnostics.'
+            ),
         ),
         Node(
             package='uav_control',

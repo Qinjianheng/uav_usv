@@ -107,7 +107,7 @@ class TargetPredictorNode(Node):
 
     def __init__(self):
         super().__init__('target_predictor_node')
-        self.declare_parameter('target_state_source', 'simulation_truth')
+        self.declare_parameter('target_state_source', 'tracking')
         self.declare_parameter('simulation_truth_topic', '/target/state')
         self.declare_parameter('tracking_topic', '/tracking/target_state')
         self.declare_parameter(

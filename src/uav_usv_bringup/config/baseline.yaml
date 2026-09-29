@@ -154,8 +154,9 @@ moving_target:
 
 target_predictor_node:
   ros__parameters:
-    # Keep simulation truth explicit while the camera/KF chain stays shadow-only.
-    target_state_source: simulation_truth
+    # Main BCTRA now consumes KF position/velocity (explicit user opt-in).
+    # This affects planning; direct tracker state and evaluation retain truth.
+    target_state_source: tracking
     simulation_truth_topic: /target/state
     tracking_topic: /tracking/target_state
     prediction_topic: /planning/target_prediction
@@ -184,7 +185,7 @@ target_predictor_node:
 
 shadow_target_predictor_node:
   ros__parameters:
-    # Camera/KF BCTRA stays shadow-only and never feeds the planner.
+    # Diagnostic copy of KF BCTRA; its output never feeds the planner.
     target_state_source: tracking
     simulation_truth_topic: /target/state
     tracking_topic: /tracking/target_state

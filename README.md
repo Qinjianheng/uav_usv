@@ -4,6 +4,8 @@
 
 项目目标、当前链路、主要参数和已知边界的简要说明见 [`docs/project_introduction.md`](docs/project_introduction.md)。
 
+2026-09-29 更新：主 BCTRA 已按用户确认切到 `/tracking/target_state`（KF 位置和速度），其输出进入规划；不再是视觉/KF 全链路 shadow-only。tracker 的直接目标状态与评价仍使用 `/target/state`，所以这是混合输入阶段，并非完整的视觉闭环。姿态/时钟归因及限制见 [P7.4 离线审计](docs/tracking/attitude_clock_audit_p7_4.md)。本次没有启动仿真验证新接线的飞行效果。
+
 ## 快速使用
 
 执行一键启动脚本：
@@ -59,7 +61,7 @@ Gazebo RGB-D输出属于理想化几何深度，尚未模拟真实ToF在强日�
 - `/perception/camera_frame_change`：相邻分析帧的归一化内容变化量；
 - `/perception/target_truth_in_fov`、`/perception/target_horizontal_angle`、`/perception/target_vertical_angle`：真值评价得到的目标视场状态和水平/垂直角（弧度），只用于排障和评价。
 
-当前阶段验证双ToF能否在完整航迹中互补覆盖USV。截击控制和成功/失败判定仍使用 `/target/*` 真值；前视RGB-D位置已经进入卡尔曼滤波影子链路，但不会改变控制指令。选择器只影响诊断输出。可用以下命令检查：
+当前阶段验证双ToF能否在完整航迹中互补覆盖USV。主预测使用前视 RGB-D→KF 状态，因此会影响规划和控制；tracker 的直接目标状态与成功/失败判定仍使用 `/target/*` 真值。选择器只影响诊断输出。可用以下命令检查：
 
 ```bash
 ros2 topic echo /perception/usv_visible
@@ -79,7 +81,7 @@ ros2 topic echo /perception/front/target_observation
 ros2 topic echo /tracking/target_state
 ```
 
-查看实时画面时应运行 `ros2 run rqt_image_view rqt_image_view`，跟随/接近阶段选择 `/camera/front/image_raw`，末端阶段同时观察 `/camera/down/image_raw`。图像由独立的 `ros_gz_image` 桥接器直接以传感器频率发布；RGB-D定位以10 Hz运行，前/下视诊断分析以5 Hz运行，图像QoS为BEST_EFFORT、KEEP_LAST、depth=1。可用 `enable_shadow_perception:=false` 关闭图像桥、定位、KF和相机诊断，进行同场景A/B测试；这一参数不会关闭20 Hz真值预测、控制或评价。海面和天空纹理近似均匀，若目标在视场外，飞机只做平移时画面可能肉眼近似不变；此时应结合每台相机的帧变化量、Gazebo real-time factor和真值视场话题判断。
+查看实时画面时应运行 `ros2 run rqt_image_view rqt_image_view`，跟随/接近阶段选择 `/camera/front/image_raw`，末端阶段同时观察 `/camera/down/image_raw`。图像由独立的 `ros_gz_image` 桥接器直接以传感器频率发布；RGB-D定位以10 Hz运行，前/下视诊断分析以5 Hz运行，图像QoS为BEST_EFFORT、KEEP_LAST、depth=1。保留的 `enable_shadow_perception:=false` 参数会关闭图像桥、定位和 KF；当前主预测依赖 KF，关闭后预测会因缺输入而无效，不能再作为不影响控制的诊断开关。需要真值 A/B 时，应先在独立配置中显式设 `target_predictor_node.ros__parameters.target_state_source: simulation_truth`。海面和天空纹理近似均匀，若目标在视场外，飞机只做平移时画面可能肉眼近似不变；此时应结合每台相机的帧变化量、Gazebo real-time factor和真值视场话题判断。
 
 先用完整起飞、跟随和截击实验比较前视、下视最近5秒可见率、ToF有效率和切换时刻。后续取消全局信息时，红球颜色检测必须替换为非合作目标检测/分割；真值只保留在评价链路中，不能继续作为跟踪或规划输入。
 
@@ -137,7 +139,7 @@ Gazebo控制还会在5米/平方秒实际水平加速度硬限制下保留0.5米
 
 ## 目标状态估计
 
-统一launch同时启动RGB-D定位和恒速度卡尔曼滤波节点。定位器对仿真红球做颜色分割，在掩膜内关联深度，利用相机内参、安装外参和PX4姿态把目标恢复到本地NED；有效观测发布到 `/perception/front/target_position`。卡尔曼滤波器据此估计位置和速度，在 `/tracking/target_state` 发布 `uav_usv_interfaces/TargetState`，并在 `/tracking/predicted_position` 发布默认0.5秒后的预测位置。当前截击控制仍使用真值状态输入，滤波输出处于影子验证阶段。
+统一launch同时启动RGB-D定位和恒速度卡尔曼滤波节点。定位器对仿真红球做颜色分割，在掩膜内关联深度，利用相机内参、安装外参和PX4姿态把目标恢复到本地NED；有效观测发布到 `/perception/front/target_position`。卡尔曼滤波器据此估计位置和速度，在 `/tracking/target_state` 发布 `uav_usv_interfaces/TargetState`，并在 `/tracking/predicted_position` 发布默认0.5秒后的预测位置。当前主 BCTRA 从 `/tracking/target_state` 读取 KF 位置和速度；KF 状态已外推到 `stamp`，预测器使用该状态时刻，不把 `source_stamp` 再当成状态时刻。诊断副本仍发布到 `/planning/shadow_target_prediction`，不供 planner 使用。
 
 实验CSV会同步记录相机位置、卡尔曼位置/速度及其相对真值误差。制导预测器和卡尔曼滤波器分别生成0.5、1.0和2.0秒预测；相应时域到期后，日志把历史预测与当时USV真值配对并记录误差。完成实验后运行：
 

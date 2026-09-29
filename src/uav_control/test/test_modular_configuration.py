@@ -178,13 +178,15 @@ def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
     assert tracker['maximum_plan_age'] <= derived_maximum_age
 
 
-def test_truth_control_source_is_explicit_and_shared_by_launch_parameters():
+def test_main_prediction_uses_kf_while_direct_tracker_truth_is_explicit():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     predictor = parameters(config, 'target_predictor_node')
     tracker = parameters(config, 'trajectory_tracker_node')
     evaluator = parameters(config, 'intercept_evaluator_node')
 
-    assert predictor['target_state_source'] == 'simulation_truth'
+    assert predictor['target_state_source'] == 'tracking'
+    assert predictor['tracking_topic'] == parameters(
+        config, 'target_kalman_filter')['state_topic']
     assert predictor['simulation_truth_topic'] == tracker['target_state_topic']
     assert evaluator['truth_topic'] == tracker['target_state_topic']
 
@@ -204,7 +206,7 @@ def test_prediction_horizon_covers_vertical_intercept_duration():
     )
 
 
-def test_shadow_camera_prediction_chain_is_isolated_from_truth_control():
+def test_diagnostic_prediction_output_is_isolated_from_main_prediction():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
 
     control = parameters(config, 'target_predictor_node')
@@ -213,7 +215,8 @@ def test_shadow_camera_prediction_chain_is_isolated_from_truth_control():
     localizer = parameters(config, 'rgbd_target_localizer')
     evaluator = parameters(config, 'intercept_evaluator_node')
 
-    assert control['target_state_source'] == 'simulation_truth'
+    assert control['target_state_source'] == 'tracking'
+    assert control['tracking_topic'] == kalman['state_topic']
     assert control['prediction_topic'] == '/planning/target_prediction'
 
     assert shadow['target_state_source'] == 'tracking'
