@@ -16,7 +16,11 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import Point
-from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
+from px4_msgs.msg import (
+    TimesyncStatus,
+    VehicleAttitude,
+    VehicleLocalPosition,
+)
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -1195,6 +1199,12 @@ class RgbdTargetLocalizer(Node):
             self.attitude_callback,
             sensor_qos,
         )
+        self.timesync_sub = self.create_subscription(
+            TimesyncStatus,
+            '/fmu/out/timesync_status',
+            self.timesync_callback,
+            sensor_qos,
+        )
         self.observation_pub = self.create_publisher(
             TargetObservation,
             str(self.get_parameter('observation_topic').value),
@@ -1241,6 +1251,19 @@ class RgbdTargetLocalizer(Node):
         self.last_time_diagnostic = {}
         self.last_time_diagnostic_log = -math.inf
         self._pending_pose_samples = deque(maxlen=8)
+
+        # P8.1: keep a causal history of the uXRCE-DDS PX4->Agent
+        # time offset.  PX4 outgoing timestamps have already had this
+        # conversion applied by uXRCE.  Undo it first, then map the recovered
+        # PX4/Gazebo simulation time through the same Gazebo clock mapper used
+        # by camera acquisition timestamps.
+        self.timesync_history = deque(maxlen=16)
+        self._pending_raw_pose_samples = deque(maxlen=32)
+        self.latest_timesync_stamp = math.nan
+        self.latest_timesync_offset = math.nan
+        self.position_raw_sim_stamp = math.nan
+        self.attitude_raw_sim_stamp = math.nan
+
         self.position_history = TimestampedVectorHistory(
             self.state_history_duration
         )
@@ -1301,6 +1324,9 @@ class RgbdTargetLocalizer(Node):
         )
         if self.image_clock_mapper.reset_count != reset_count:
             self._image_clock_reset_pending = True
+            self._reset_pose_time_state()
+
+        self._flush_pending_raw_pose_samples()
 
     def _apply_pending_image_clock_reset(self):
         if not getattr(self, '_image_clock_reset_pending', False):
@@ -1380,80 +1406,212 @@ class RgbdTargetLocalizer(Node):
             self.pending_image_pairs.append((color, depth))
             self.last_pair_rejection = ''
 
-    def position_callback(self, message):
-        """Store the latest finite UAV local-NED position."""
-        values = (message.x, message.y, message.z)
-        if all(math.isfinite(value) for value in values):
-            receipt = self._ros_seconds()
-            source_timestamp = (
-                getattr(message, 'timestamp_sample', 0)
-                or getattr(message, 'timestamp', 0)
+    def timesync_callback(self, message):
+        """Cache causal uXRCE PX4->Agent time offsets."""
+        stamp_us = int(getattr(message, 'timestamp', 0))
+        offset_us = int(getattr(message, 'estimated_offset', 0))
+
+        if stamp_us <= 0:
+            return
+
+        stamp = stamp_us * 1e-6
+        offset = offset_us * 1e-6
+
+        if not math.isfinite(stamp) or not math.isfinite(offset):
+            return
+
+        if (
+            self.timesync_history
+            and stamp < self.timesync_history[-1][0] - 1e-6
+        ):
+            # New DDS/PX4 time epoch.  Never interpolate pose across it.
+            self.timesync_history.clear()
+            self._pending_raw_pose_samples.clear()
+            self._reset_pose_time_state()
+
+        if (
+            self.timesync_history
+            and abs(stamp - self.timesync_history[-1][0]) <= 1e-9
+        ):
+            self.timesync_history[-1] = (stamp, offset)
+        else:
+            self.timesync_history.append((stamp, offset))
+
+        self.latest_timesync_stamp = stamp
+        self.latest_timesync_offset = offset
+
+    def _causal_timesync_offset(self, source_stamp):
+        """Return the newest timesync sample not later than the pose stamp."""
+        source_stamp = float(source_stamp)
+
+        for stamp, offset in reversed(self.timesync_history):
+            if stamp <= source_stamp + 1e-9:
+                return offset, stamp
+
+        return None, None
+
+    def _map_px4_pose_stamp(self, source_stamp, receipt):
+        """
+        Recover PX4/Gazebo simulation sample time and map it to ROS time.
+
+        uXRCE publishes:
+            ros_stamp = raw_px4_stamp - estimated_offset
+
+        therefore:
+            raw_px4_stamp = ros_stamp + estimated_offset
+        """
+        offset, timesync_stamp = self._causal_timesync_offset(source_stamp)
+
+        if offset is None:
+            return None, None, None
+
+        raw_sim_stamp = float(source_stamp) + float(offset)
+
+        if (
+            not math.isfinite(raw_sim_stamp)
+            or raw_sim_stamp <= 0.0
+        ):
+            return None, None, timesync_stamp
+
+        mapped_stamp = self.image_clock_mapper.to_ros_time(
+            raw_sim_stamp,
+            receipt,
+        )
+
+        return mapped_stamp, raw_sim_stamp, timesync_stamp
+
+    def _queue_raw_pose_sample(
+        self,
+        kind,
+        raw_sim_stamp,
+        values,
+    ):
+        self._pending_raw_pose_samples.append((
+            str(kind),
+            float(raw_sim_stamp),
+            tuple(float(value) for value in values),
+        ))
+
+    def _flush_pending_raw_pose_samples(self):
+        """Retry poses once Gazebo clock interpolation brackets them."""
+        if not self._pending_raw_pose_samples:
+            return
+
+        now = self._ros_seconds()
+        remaining = deque(maxlen=self._pending_raw_pose_samples.maxlen)
+
+        while self._pending_raw_pose_samples:
+            kind, raw_sim_stamp, values = (
+                self._pending_raw_pose_samples.popleft()
             )
-            source_stamp = float(source_timestamp) * 1e-6
-            self.position_source_stamp = source_stamp
-            reset_count = self.px4_clock_mapper.reset_count
-            stamp = self.px4_clock_mapper.to_ros_time(
-                source_stamp,
-                receipt,
-                stream_name='position',
+
+            stamp = self.image_clock_mapper.to_ros_time(
+                raw_sim_stamp,
+                now,
             )
-            clock_reset = (
-                self.px4_clock_mapper.reset_count != reset_count
-            )
-            if clock_reset:
-                self._reset_pose_time_state()
+
             if stamp is None:
+                anchor_range = self.image_clock_mapper.anchor_range
+
+                # Keep only samples that may still receive a future right
+                # bracket. Samples older than the clock history are obsolete.
                 if (
-                    clock_reset
-                    or self.px4_clock_mapper.last_status == 'UNCALIBRATED'
+                    anchor_range is None
+                    or raw_sim_stamp > anchor_range[1] + 1e-9
                 ):
-                    self._pending_pose_samples_for_node().append((
-                        'position',
-                        source_stamp,
-                        tuple(float(v) for v in values),
+                    remaining.append((
+                        kind,
+                        raw_sim_stamp,
+                        values,
                     ))
-                return
-            self._flush_pending_pose_samples()
-            self.position_mapped_stamp = stamp
-            position = tuple(float(value) for value in values)
-            if self.position_history.add(stamp, position):
-                self.uav_position = position
-                self.uav_position_time = stamp
+                continue
+
+            if kind == 'position':
+                if self.position_history.add(stamp, values):
+                    self.uav_position = values
+                    self.uav_position_time = stamp
+                    self.position_mapped_stamp = stamp
+                    self.position_raw_sim_stamp = raw_sim_stamp
+            else:
+                self._add_attitude_sample(stamp, values)
+                self.attitude_mapped_stamp = stamp
+                self.attitude_raw_sim_stamp = raw_sim_stamp
+
+        self._pending_raw_pose_samples = remaining
+
+    def position_callback(self, message):
+        """Store UAV position using recovered physical PX4 sample time."""
+        values = (message.x, message.y, message.z)
+
+        if not all(math.isfinite(value) for value in values):
+            return
+
+        receipt = self._ros_seconds()
+        source_timestamp = (
+            getattr(message, 'timestamp_sample', 0)
+            or getattr(message, 'timestamp', 0)
+        )
+        source_stamp = float(source_timestamp) * 1e-6
+        self.position_source_stamp = source_stamp
+
+        stamp, raw_sim_stamp, _timesync_stamp = (
+            self._map_px4_pose_stamp(source_stamp, receipt)
+        )
+
+        if raw_sim_stamp is None:
+            return
+
+        self.position_raw_sim_stamp = raw_sim_stamp
+        position = tuple(float(value) for value in values)
+
+        if stamp is None:
+            self._queue_raw_pose_sample(
+                'position',
+                raw_sim_stamp,
+                position,
+            )
+            return
+
+        self.position_mapped_stamp = stamp
+
+        if self.position_history.add(stamp, position):
+            self.uav_position = position
+            self.uav_position_time = stamp
 
     def attitude_callback(self, message):
-        """Store the latest finite PX4 body-to-NED quaternion."""
+        """Store attitude using recovered physical PX4 sample time."""
         quaternion = tuple(float(value) for value in message.q)
-        if all(math.isfinite(value) for value in quaternion):
-            receipt = self._ros_seconds()
-            source_timestamp = (
-                getattr(message, 'timestamp_sample', 0)
-                or getattr(message, 'timestamp', 0)
+
+        if not all(math.isfinite(value) for value in quaternion):
+            return
+
+        receipt = self._ros_seconds()
+        source_timestamp = (
+            getattr(message, 'timestamp_sample', 0)
+            or getattr(message, 'timestamp', 0)
+        )
+        source_stamp = float(source_timestamp) * 1e-6
+        self.attitude_source_stamp = source_stamp
+
+        stamp, raw_sim_stamp, _timesync_stamp = (
+            self._map_px4_pose_stamp(source_stamp, receipt)
+        )
+
+        if raw_sim_stamp is None:
+            return
+
+        self.attitude_raw_sim_stamp = raw_sim_stamp
+
+        if stamp is None:
+            self._queue_raw_pose_sample(
+                'attitude',
+                raw_sim_stamp,
+                quaternion,
             )
-            source_stamp = float(source_timestamp) * 1e-6
-            self.attitude_source_stamp = source_stamp
-            reset_count = self.px4_clock_mapper.reset_count
-            stamp = self.px4_clock_mapper.to_ros_time(
-                source_stamp,
-                receipt,
-                stream_name='attitude',
-            )
-            clock_reset = (
-                self.px4_clock_mapper.reset_count != reset_count
-            )
-            if clock_reset:
-                self._reset_pose_time_state()
-            if stamp is None:
-                if (
-                    clock_reset
-                    or self.px4_clock_mapper.last_status == 'UNCALIBRATED'
-                ):
-                    self._pending_pose_samples_for_node().append(
-                        ('attitude', source_stamp, quaternion)
-                    )
-                return
-            self._flush_pending_pose_samples()
-            self.attitude_mapped_stamp = stamp
-            self._add_attitude_sample(stamp, quaternion)
+            return
+
+        self.attitude_mapped_stamp = stamp
+        self._add_attitude_sample(stamp, quaternion)
 
     def _pending_pose_samples_for_node(self):
         if not hasattr(self, '_pending_pose_samples'):
@@ -1476,6 +1634,8 @@ class RgbdTargetLocalizer(Node):
 
     def _reset_pose_time_state(self):
         self._pending_pose_samples_for_node().clear()
+        if hasattr(self, '_pending_raw_pose_samples'):
+            self._pending_raw_pose_samples.clear()
         self.waiting_image_pair = None
         self.position_history.clear()
         self.attitude_history.clear()
