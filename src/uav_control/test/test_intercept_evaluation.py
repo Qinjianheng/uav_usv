@@ -1108,23 +1108,10 @@ def test_terminal_event_returns_sea_contact_for_missed_target():
     assert fraction == pytest.approx(0.5)
 
 
-def test_failure_result_freezes_target_and_requests_gazebo_pause():
-    pause_requests = []
-    evaluator = SimpleNamespace(
-        gazebo_world_paused=False,
-        hit=False,
-        pause_gazebo_on_hit=True,
-        get_logger=lambda: SimpleNamespace(info=lambda message: None),
-        pause_gazebo_world=lambda: pause_requests.append(True),
-    )
-
-    MovingTarget.result_callback(
-        evaluator,
-        SimpleNamespace(outcome='FAILURE'),
-    )
-
-    assert evaluator.hit is True
-    assert pause_requests == [True]
+def test_evaluation_result_cannot_freeze_target_or_pause_world():
+    # Result/hit transport is now evaluation-only, with no target callbacks.
+    assert not hasattr(MovingTarget, 'result_callback')
+    assert not hasattr(MovingTarget, 'hit_callback')
 
 
 def test_moving_target_rejects_x_until_flight_is_ready():

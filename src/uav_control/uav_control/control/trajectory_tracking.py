@@ -105,6 +105,7 @@ class PolynomialTrajectory:
     terminal_mode: bool = False
     planned_capture_margin: float = 0.0
     capture_execution_margin: float = 0.0
+    observation_stamp: float = 0.0
 
     @property
     def duration(self):
@@ -581,7 +582,7 @@ class TrajectoryTrackerCore:
             safety_margin=safety.response_margin,
         )
 
-    def recovery_command(self, state):
+    def recovery_command(self, state, recovery_clearance=None):
         """
         Return a continuous, bounded command after the active plan is lost.
 
@@ -604,12 +605,16 @@ class TrajectoryTrackerCore:
         if previous_velocity is None:
             previous_velocity = (0.0, 0.0, 0.0)
         clearance = self.sea_surface_z - self.recovery_position[2]
+        desired_clearance = (self.recovery_clearance
+                             if recovery_clearance is None
+                             else max(float(recovery_clearance),
+                                      self.recovery_clearance))
         vertical_target = 0.0
-        if clearance < self.recovery_clearance:
+        if clearance < desired_clearance:
             # Brake-to-target climb: never command more upward speed than the
             # vertical acceleration limit can arrest before reaching the
             # recovery clearance, so the hold settles instead of overshooting.
-            remaining = self.recovery_clearance - clearance
+            remaining = desired_clearance - clearance
             vertical_target = -min(
                 self.recovery_climb_speed,
                 math.sqrt(

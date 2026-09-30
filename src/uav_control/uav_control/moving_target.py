@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Bool, String
 from uav_control.figure_eight_trajectory import FigureEightTrajectory
-from uav_usv_interfaces.msg import InterceptResult, MissionState, TargetState
+from uav_usv_interfaces.msg import MissionState, TargetState
 
 
 def measured_motion_step(previous_time_ns, current_time_ns, nominal_step):
@@ -87,18 +87,6 @@ class MovingTarget(Node):
             10,
         )
 
-        self.hit_sub = self.create_subscription(
-            Bool,
-            '/simulation/impact/hit',
-            self.hit_callback,
-            10
-        )
-        self.result_sub = self.create_subscription(
-            InterceptResult,
-            '/simulation/impact/result',
-            self.result_callback,
-            10,
-        )
         self.command_sub = self.create_subscription(
             String,
             '/simulation/impact/command',
@@ -321,28 +309,6 @@ class MovingTarget(Node):
 
     def flight_ready_callback(self, msg):
         self.flight_ready = bool(msg.data)
-
-    def hit_callback(self, msg):
-
-        if msg.data and not self.hit:
-            self.hit = True
-            self.get_logger().info(
-                'Virtual impact received. Target motion frozen.'
-            )
-            if self.pause_gazebo_on_hit:
-                self.pause_gazebo_world()
-
-    def result_callback(self, msg):
-        if self.gazebo_world_paused:
-            return
-
-        self.hit = True
-        self.get_logger().info(
-            f'Interception finished with {msg.outcome}; '
-            'target motion frozen.'
-        )
-        if self.pause_gazebo_on_hit:
-            self.pause_gazebo_world()
 
     def timer_callback(self):
 

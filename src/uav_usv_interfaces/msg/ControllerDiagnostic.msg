@@ -29,6 +29,20 @@ bool terminal_mode
 float64 planned_capture_margin
 float64 target_yaw
 
+bool target_visible
+bool target_locked
+string search_state
+int8 search_direction
+float64 last_valid_observation_age
+float64 last_valid_image_bearing
+float64 search_yaw_rate_command
+uint32 consecutive_valid_frames
+uint32 consecutive_lost_frames
+float64 kf_state_age
+float64 prediction_sample_age
+float64 planner_source_age
+string yaw_owner
+
 string safety_state
 float64 safety_margin
 

@@ -26,6 +26,9 @@ from px4_msgs.msg import (
 class PredictiveIntercept(Node):
 
     def __init__(self):
+        raise RuntimeError(
+            'Retired truth-control entry point; use modular_intercept.launch.py'
+        )
         super().__init__('predictive_intercept')
 
         # ============================================================

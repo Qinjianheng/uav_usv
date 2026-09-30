@@ -8,12 +8,14 @@ def start_intercept(core):
     assert core.handle_command('X', now=1.0)
     assert core.phase == MissionPhase.TAKEOFF
     assert core.mark_takeoff_complete(now=3.0)
-    assert core.phase == MissionPhase.FOLLOW
+    assert core.phase == MissionPhase.TARGET_ACQUIRE
+    core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 3.1)
+    assert core.phase == MissionPhase.TARGET_LOCK
     assert core.handle_command('Y', now=4.0)
     assert core.phase == MissionPhase.FAR_GUIDANCE
 
 
-def test_x_then_y_produces_explicit_takeoff_follow_intercept_sequence():
+def test_x_then_y_requires_visual_lock_before_intercept():
     core = MissionManagerCore()
 
     start_intercept(core)

@@ -3,6 +3,7 @@
 import ast
 import inspect
 from collections import deque
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -102,7 +103,7 @@ def make_publish_test_prediction(sequence_id, shifted_at_candidate=False):
                 (0.0, 0.0, 0.0),
             ),
         ),
-        source='simulation_truth',
+        source='tracking',
     )
 
 
@@ -115,9 +116,13 @@ def run_publish_test(
     committed_contact=True,
     diagnostics=None,
     uav_position=(0.0, 0.0, -1.0),
+    observation_stamp=10.0,
 ):
     """Run one completed planner job through the real publication gate."""
-    prediction = make_publish_test_prediction(sequence_id=4)
+    prediction = replace(
+        make_publish_test_prediction(sequence_id=4),
+        observation_stamp=observation_stamp,
+    )
     schedule = ContactTimeSchedule()
     if committed_contact:
         schedule.accept_plan(source_stamp=10.0, selected_t_go=1.0)
@@ -380,7 +385,8 @@ def test_candidate_reject_then_accept_commits_only_real_tracker_acceptance():
             trajectory_start_stamp=10.0,
             planning_started_stamp=10.01,
             generated_stamp=10.03,
-            target_state_source='simulation_truth',
+            target_state_source='tracking',
+            observation_stamp=10.0,
             contact_stamp=11.2,
             remaining_t_go=1.2,
         ))
@@ -575,9 +581,10 @@ def test_planner_input_conversion_preserves_prediction_source_stamp():
     message.sequence_id = 5
     message.source_stamp.sec = 12
     message.source_stamp.nanosec = 100_000_000
+    message.observation_stamp.sec = 12
     message.valid_until.sec = 12
     message.valid_until.nanosec = 225_000_000
-    message.source = 'simulation_truth'
+    message.source = 'tracking'
 
     sample = PredictedTargetPoint()
     sample.relative_time.sec = 1
@@ -589,6 +596,7 @@ def test_planner_input_conversion_preserves_prediction_source_stamp():
     prediction = prediction_from_message(message)
 
     assert prediction.source_stamp == pytest.approx(12.1)
+    assert prediction.observation_stamp == pytest.approx(12.0)
     assert prediction.valid_until == pytest.approx(12.225)
     assert prediction.samples[0].relative_time == pytest.approx(1.0)
     assert prediction.samples[0].position == pytest.approx(
@@ -662,7 +670,7 @@ def test_planner_request_uses_latest_uav_stamp_as_minco_start():
                 (0.0, 0.0, 0.0),
             ),
         ),
-        source='simulation_truth',
+        source='tracking',
     )
     uav = UavKinematicState(
         stamp=10.10,
@@ -761,7 +769,7 @@ def test_planner_queries_prediction_at_absolute_minco_contact_time():
                 (0.0, 0.0, 0.0),
             ),
         ),
-        source='simulation_truth',
+        source='tracking',
     )
     request = PlannerRequest(
         mission_id=2,
@@ -833,7 +841,7 @@ def test_terminal_locked_contact_does_not_cap_available_search_horizon():
                 (0.0, 0.0, 0.0),
             ),
         ),
-        source='simulation_truth',
+        source='tracking',
     )
     request = PlannerRequest(
         mission_id=2,
@@ -976,7 +984,8 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
         trajectory_start_stamp=10.10,
         planning_started_stamp=10.02,
         generated_stamp=10.04,
-        target_state_source='simulation_truth',
+        target_state_source='tracking',
+        observation_stamp=10.0,
         contact_stamp=12.0,
         remaining_t_go=1.96,
         terminal_mode=False,
@@ -1002,3 +1011,144 @@ def test_minco_plan_message_contains_reconstructable_coefficients():
     assert message.remaining_t_go == pytest.approx(1.96)
     assert not message.terminal_mode
     assert message.planned_capture_margin == pytest.approx(0.20)
+
+
+def callback_prediction(stamp=10.1, observation_stamp=10.0, sequence_id=1):
+    return SimpleNamespace(
+        mission_id=2,
+        sequence_id=sequence_id,
+        source_stamp=planner_node_module.seconds_to_time(stamp),
+        observation_stamp=planner_node_module.seconds_to_time(
+            observation_stamp,
+        ),
+        valid_until=planner_node_module.seconds_to_time(
+            observation_stamp + 0.125,
+        ),
+        samples=[PredictedTargetPoint()],
+        source='tracking',
+        frame_id='local_ned',
+        valid=True,
+    )
+
+
+@pytest.mark.parametrize(
+    'failure', (
+        'invalid', 'frame', 'future', 'zero', 'stale', 'truth',
+        'nonfinite', 'sample_order', 'sample_time', 'empty',
+    ),
+)
+def test_invalid_prediction_revokes_planner_cached_snapshot(failure):
+    node = SimpleNamespace(
+        latest_prediction=None,
+        frame_id='local_ned',
+        maximum_input_age=0.125,
+        _ros_seconds=lambda: 10.11,
+    )
+    planner_node_module.InterceptPlannerNode.prediction_callback(
+        node, callback_prediction(),
+    )
+    assert node.latest_prediction is not None
+    bad = callback_prediction(stamp=10.11, sequence_id=2)
+    if failure == 'invalid':
+        bad.valid = False
+    elif failure == 'frame':
+        bad.frame_id = 'world_enu'
+    elif failure == 'future':
+        bad.observation_stamp = planner_node_module.seconds_to_time(10.12)
+    elif failure == 'zero':
+        bad.observation_stamp = planner_node_module.seconds_to_time(0.0)
+    elif failure == 'stale':
+        bad.observation_stamp = planner_node_module.seconds_to_time(9.5)
+    elif failure == 'truth':
+        bad.source = 'simulation_truth'
+    elif failure == 'nonfinite':
+        bad.samples[0].position.x = float('nan')
+    elif failure == 'sample_order':
+        bad.samples.append(PredictedTargetPoint())
+    elif failure == 'sample_time':
+        bad.samples[0].relative_time.sec = -1
+    elif failure == 'empty':
+        bad.samples = []
+
+    planner_node_module.InterceptPlannerNode.prediction_callback(node, bad)
+
+    assert node.latest_prediction is None
+
+
+def test_older_prediction_packet_does_not_poison_newer_valid_snapshot():
+    node = SimpleNamespace(
+        latest_prediction=None,
+        frame_id='local_ned',
+        maximum_input_age=0.125,
+        _ros_seconds=lambda: 10.11,
+    )
+    planner_node_module.InterceptPlannerNode.prediction_callback(
+        node, callback_prediction(),
+    )
+    planner_node_module.InterceptPlannerNode.prediction_callback(
+        node, callback_prediction(stamp=9.5, observation_stamp=9.4),
+    )
+    assert node.latest_prediction.source_stamp == pytest.approx(10.1)
+    assert node.latest_prediction.observation_stamp == pytest.approx(10.0)
+
+
+def test_older_worker_result_keeps_its_image_provenance_on_publish():
+    latest = replace(
+        make_publish_test_prediction(sequence_id=5),
+        observation_stamp=10.0,
+    )
+    _, _, trajectories, _ = run_publish_test(
+        terminal_mode=True, latest_prediction=latest,
+        observation_stamp=9.98,
+    )
+    assert len(trajectories.messages) == 1
+    trajectory = trajectories.messages[0]
+    assert (
+        trajectory.observation_stamp.sec
+        + trajectory.observation_stamp.nanosec * 1e-9
+    ) == pytest.approx(9.98)
+    assert trajectory.prediction_sequence_id == 4
+    assert trajectory.source_stamp.sec == 10
+
+
+def test_new_prediction_cannot_rescue_stale_worker_measurement():
+    latest = replace(
+        make_publish_test_prediction(sequence_id=5),
+        observation_stamp=10.0,
+    )
+    _, _, trajectories, diagnostics = run_publish_test(
+        terminal_mode=True, latest_prediction=latest,
+        observation_stamp=9.9,
+    )
+    assert trajectories.messages == []
+    assert diagnostics.messages[-1].rejection_stage == 'INPUT_AGE_AT_PUBLISH'
+
+
+@pytest.mark.parametrize('search_state', (13, 14, 15, 16))
+def test_visual_search_recovery_invalidates_pending_planner_cycle(
+    search_state,
+):
+    node = object.__new__(planner_node_module.InterceptPlannerNode)
+    node.mission_id = 2
+    node.mission_state = MissionState.TERMINAL_MINCO
+    node.intercept_requested = True
+    node.planning_cycle_id = 4
+    node.request_slot = LatestRequestSlot()
+    node.request_slot.submit(object())
+    node.last_submitted_key = ('old',)
+    node.contact_schedule = ContactTimeSchedule()
+    node.contact_schedule.accept_plan(10.0, 1.0)
+    node.contact_schedule.propose(8, 11.2, 4, 10.03)
+    node.active_plan_reference = object()
+    message = MissionState()
+    message.mission_id = 2
+    message.state = search_state
+    message.intercept_requested = True
+
+    node.mission_callback(message)
+
+    assert node.planning_cycle_id == 5
+    assert node.request_slot.take() is None
+    assert not node.contact_schedule.has_pending
+    assert node.active_plan_reference is None
+    assert node.contact_schedule.contact_stamp == pytest.approx(11.0)

@@ -179,6 +179,9 @@ class TrajectoryImpactSim(Node):
     ]
 
     def __init__(self):
+        raise RuntimeError(
+            'Retired truth-control entry point; use modular_intercept.launch.py'
+        )
         super().__init__('trajectory_impact_sim')
 
         self.declare_parameter('control_rate_hz', 20.0)

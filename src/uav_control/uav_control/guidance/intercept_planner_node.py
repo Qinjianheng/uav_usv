@@ -72,7 +72,17 @@ def _stamp_seconds(stamp):
 
 
 def prediction_from_message(message):
-    """Convert a valid prediction message without changing source time."""
+    """Keep sample epoch and require the original image acquisition time."""
+    source_stamp = _stamp_seconds(message.source_stamp)
+    observation_stamp = _stamp_seconds(message.observation_stamp)
+    if (
+        not math.isfinite(source_stamp)
+        or not math.isfinite(observation_stamp)
+        or observation_stamp <= 0.0
+        or source_stamp < observation_stamp
+        or message.source != 'tracking'
+    ):
+        raise ValueError('prediction lacks valid tracking acquisition time')
     samples = tuple(PredictionSample(
         relative_time=_stamp_seconds(sample.relative_time),
         position=(
@@ -91,10 +101,23 @@ def prediction_from_message(message):
             float(sample.acceleration.z),
         ),
     ) for sample in message.samples)
+    previous_time = -1.0
+    for sample in samples:
+        if (
+            sample.relative_time < 0.0
+            or sample.relative_time <= previous_time
+            or not all(math.isfinite(value) for value in (
+                sample.relative_time,
+                *sample.position, *sample.velocity, *sample.acceleration,
+            ))
+        ):
+            raise ValueError('prediction contains invalid samples')
+        previous_time = sample.relative_time
     return PredictionSeries(
         mission_id=int(message.mission_id),
         sequence_id=int(message.sequence_id),
-        source_stamp=_stamp_seconds(message.source_stamp),
+        source_stamp=source_stamp,
+        observation_stamp=observation_stamp,
         valid_until=_stamp_seconds(message.valid_until),
         samples=samples,
         source=str(message.source),
@@ -131,6 +154,7 @@ def plan_to_message(
     planned_capture_margin=0.0,
     capture_entry_stamp=None,
     capture_execution_margin=0.0,
+    observation_stamp=None,
 ):
     """Serialize a MINCO polynomial using its true execution start time."""
     message = InterceptTrajectory()
@@ -138,6 +162,9 @@ def plan_to_message(
     message.plan_id = int(plan_id)
     message.prediction_sequence_id = int(prediction_sequence_id)
     message.source_stamp = seconds_to_time(trajectory_start_stamp)
+    message.observation_stamp = seconds_to_time(
+        0.0 if observation_stamp is None else observation_stamp
+    )
     message.planning_started_stamp = seconds_to_time(
         planning_started_stamp
     )
@@ -249,6 +276,12 @@ class InterceptPlannerNode(Node):
     RECOVERY_STATES = {
         MissionState.PLAN_RECOVERY,
         MissionState.SAFE_WAIT,
+    } | {
+        getattr(MissionState, name)
+        for name in (
+            'TARGET_ACQUIRE', 'TARGET_LOCK', 'REACQUIRE', 'SAFE_RECOVERY',
+        )
+        if hasattr(MissionState, name)
     }
 
     def __init__(self):
@@ -518,8 +551,43 @@ class InterceptPlannerNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def prediction_callback(self, message):
-        if message.valid and message.samples:
-            self.latest_prediction = prediction_from_message(message)
+        if (
+            not message.valid
+            or not message.samples
+            or message.frame_id != self.frame_id
+        ):
+            self.latest_prediction = None
+            return
+        try:
+            prediction = prediction_from_message(message)
+        except (AttributeError, TypeError, ValueError):
+            self.latest_prediction = None
+            return
+        if (
+            self.latest_prediction is not None
+            and prediction.mission_id == self.latest_prediction.mission_id
+            and (
+                prediction.source_stamp < self.latest_prediction.source_stamp
+                or (
+                    prediction.source_stamp
+                    == self.latest_prediction.source_stamp
+                    and prediction.sequence_id
+                    <= self.latest_prediction.sequence_id
+                )
+            )
+        ):
+            return
+        now = self._ros_seconds()
+        age = now - prediction.observation_stamp
+        if (
+            prediction.source_stamp > now
+            or age < 0.0
+            or age > self.maximum_input_age
+            or now > prediction.valid_until
+        ):
+            self.latest_prediction = None
+            return
+        self.latest_prediction = prediction
 
     def uav_callback(self, message):
         self.latest_uav = uav_state_from_message(
@@ -1222,6 +1290,7 @@ class InterceptPlannerNode(Node):
                 planning_started_stamp=job.planning_started_stamp,
                 generated_stamp=job.generated_stamp,
                 target_state_source=job.request.prediction.source,
+                observation_stamp=job.request.observation_stamp,
                 frame_id=self.frame_id,
                 contact_stamp=contact_stamp,
                 remaining_t_go=remaining_t_go,

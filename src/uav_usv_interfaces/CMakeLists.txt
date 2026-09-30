@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PolynomialSegment.msg"
   "msg/PredictedTargetPoint.msg"
   "msg/TargetObservation.msg"
+  "msg/TargetBearing.msg"
   "msg/TargetPrediction.msg"
   "msg/TargetState.msg"
   "msg/TrajectoryPoint.msg"

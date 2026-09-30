@@ -21,6 +21,7 @@ def generate_launch_description():
         'experiments',
         'current',
     )
+    enable_evaluator = LaunchConfiguration('enable_evaluator')
     config_file = LaunchConfiguration('config_file')
     log_directory = LaunchConfiguration('log_directory')
     enable_shadow_perception = LaunchConfiguration(
@@ -42,9 +43,12 @@ def generate_launch_description():
             'enable_shadow_perception',
             default_value='true',
             description=(
-                'Run camera/KF required by tracking prediction, '
-                'plus diagnostics.'
+                'Run optional shadow prediction and image diagnostics.'
             ),
+        ),
+        DeclareLaunchArgument(
+            'enable_evaluator', default_value='true',
+            description='Record evaluation-only truth; never affects control.',
         ),
         Node(
             package='uav_control',
@@ -94,6 +98,7 @@ def generate_launch_description():
             executable='intercept_evaluator_node',
             name='intercept_evaluator_node',
             output='screen',
+            condition=IfCondition(enable_evaluator),
             parameters=[
                 config_file,
                 {'log_directory': log_directory},
@@ -105,7 +110,6 @@ def generate_launch_description():
             name='target_kalman_filter',
             output='screen',
             parameters=[config_file],
-            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='ros_gz_image',
@@ -130,7 +134,13 @@ def generate_launch_description():
                     '/camera/down/depth/image_raw',
                 ),
             ],
-            condition=IfCondition(enable_shadow_perception),
+        ),
+        Node(
+            package='uav_control',
+            executable='target_bearing_node',
+            name='target_bearing_node',
+            output='screen',
+            parameters=[config_file],
         ),
         Node(
             package='uav_control',
@@ -146,7 +156,6 @@ def generate_launch_description():
             name='rgbd_target_localizer',
             output='screen',
             parameters=[config_file],
-            condition=IfCondition(enable_shadow_perception),
         ),
         Node(
             package='uav_control',

@@ -66,7 +66,9 @@ def make_trajectory_message():
     message.generated_stamp.nanosec = 300_000_000
     message.valid_until.sec = 102
     message.valid_until.nanosec = 250_000_000
-    message.target_state_source = 'simulation_truth'
+    message.target_state_source = 'tracking'
+    message.observation_stamp.sec = 100
+    message.observation_stamp.nanosec = 150_000_000
     message.terminal_position.x = 4.0
     message.terminal_position.y = 5.0
     message.terminal_position.z = -0.1
@@ -129,6 +131,8 @@ def test_controller_diagnostic_separates_prediction_and_trajectory_age():
     prediction = TargetPrediction()
     prediction.source_stamp.sec = 100
     prediction.source_stamp.nanosec = 400_000_000
+    prediction.observation_stamp.sec = 100
+    prediction.observation_stamp.nanosec = 350_000_000
     node = object.__new__(trajectory_tracker_node.TrajectoryTrackerNode)
     node.mission_id = 3
     node.tracker = TrajectoryTrackerCore()
@@ -148,7 +152,8 @@ def test_controller_diagnostic_separates_prediction_and_trajectory_age():
 
     node._publish_diagnostic(100.5, None, 'TRACKING', 0.001)
 
-    assert published[0].prediction_age == pytest.approx(0.10)
+    assert published[0].prediction_age == pytest.approx(0.15)
+    assert published[0].prediction_sample_age == pytest.approx(0.10)
     assert published[0].trajectory_age == pytest.approx(0.25)
     assert published[0].source_age == pytest.approx(0.25)
 
@@ -357,6 +362,24 @@ def _pending_test_node(now=100.20):
     node.terminal_mode_latched = False
     node.pending_trajectory = None
     node._ros_seconds = lambda: now
+    node.maximum_state_age = .125
+    node.visibility_decision = type('Visibility', (), {
+        'locked': True, 'visible': True, 'search_direction': 0,
+    })()
+    node.safe_recovery_latched = False
+    node.expected_frame_id = 'local_ned'
+    node.visibility = trajectory_tracker_node.TargetVisibilityState()
+    from types import SimpleNamespace
+    node.latest_kf_message = SimpleNamespace(
+        valid=True, frame_id='local_ned', stamp=prediction.source_stamp,
+        source_stamp=prediction.observation_stamp,
+        position=type('Point', (), {'x': 2., 'y': 0., 'z': -1.})(),
+        velocity=type('Velocity', (), {'x': 1., 'y': 0., 'z': 0.})(),
+    )
+    prediction.source = 'tracking'
+    prediction.observation_stamp.sec = 100
+    prediction.observation_stamp.nanosec = 150_000_000
+    node.latest_kf_message.stamp = trajectory_tracker_node._seconds_to_time(100.2)
     published = []
     node.diagnostic_pub = type(
         'Publisher', (),

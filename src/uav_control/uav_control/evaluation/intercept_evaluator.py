@@ -18,6 +18,30 @@ from pathlib import Path
 DEFAULT_BODY_LOWER_EXTENT = 0.23
 
 
+def image_pose_diagnostics(observation):
+    """Log bearing and PX4 heading from the existing image-time geometry."""
+    values = {'image_bearing': math.nan, 'px4_heading': math.nan}
+    if not observation.geometry_diagnostics_enabled:
+        return values
+    u, cx, fx = (
+        float(getattr(observation, name))
+        for name in ('mask_centroid_u', 'camera_cx', 'camera_fx')
+    )
+    if all(math.isfinite(value) for value in (u, cx, fx)) and fx > 0.0:
+        values['image_bearing'] = math.atan((u - cx) / fx)
+    quaternion = tuple(float(getattr(observation, name)) for name in (
+        'interpolated_attitude_w', 'interpolated_attitude_x',
+        'interpolated_attitude_y', 'interpolated_attitude_z',
+    ))
+    norm = math.hypot(*quaternion)
+    if all(math.isfinite(value) for value in quaternion) and 0.0 < norm < math.inf:
+        w, x, y, z = (value / norm for value in quaternion)
+        values['px4_heading'] = math.atan2(
+            2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z),
+        )
+    return values
+
+
 @dataclass(frozen=True)
 class KinematicState:
     """Three-dimensional position and velocity in local NED coordinates."""
@@ -919,6 +943,12 @@ class ExperimentArtifactWriter:
         'approach_phase', 'first_terminal_approach',
         'controller_status', 'plan_id',
         'prediction_age', 'trajectory_age',
+        'target_visible', 'target_locked', 'search_state', 'search_direction',
+        'last_valid_observation_age', 'last_valid_image_bearing',
+        'search_yaw_rate_command',
+        'consecutive_valid_frames', 'consecutive_lost_frames',
+        'kf_state_age', 'prediction_sample_age', 'planner_source_age',
+        'yaw_owner',
         'tracker_rejection_reason',
         'planner_event_id', 'planner_result', 'planner_failure_reason',
         'planner_source_age_at_publish',
@@ -966,7 +996,7 @@ class ExperimentArtifactWriter:
         'px4_clock_recalibration_count', 'px4_clock_status',
         'approach_phase', 'distance_bin', 'motion_regime',
         'confidence', 'red_pixel_count', 'valid_depth_ratio',
-        'target_range', 'view_angle',
+        'target_range', 'view_angle', 'image_bearing', 'px4_heading',
         'geometry_diagnostics_enabled',
         'mask_centroid_u', 'mask_centroid_v',
         'projection_centroid_u', 'projection_centroid_v',

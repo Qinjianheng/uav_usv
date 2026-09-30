@@ -6,7 +6,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from std_msgs.msg import Bool, String
-from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptResult
+from uav_usv_interfaces.msg import ControllerDiagnostic
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
 
 from .mission_manager import MissionManagerCore
@@ -115,12 +115,6 @@ class MissionManagerNode(Node):
             self.planner_callback,
             event_qos,
         )
-        self.result_sub = self.create_subscription(
-            InterceptResult,
-            '/simulation/impact/result',
-            self.result_callback,
-            state_qos,
-        )
         self.state_pub = self.create_publisher(
             MissionState,
             '/mission/state',
@@ -169,6 +163,13 @@ class MissionManagerNode(Node):
         self.far_guidance_available = bool(message.data)
 
     def controller_callback(self, message):
+        stamp = message.stamp.sec + message.stamp.nanosec * 1e-9
+        if not 0.0 <= self._now() - stamp <= self.core.maximum_tracker_age:
+            return
+        changed = self.core.observe_visibility(
+            message.mission_id, message.search_state,
+            message.target_locked, self._now(),
+        )
         accepted = self.core.observe_tracker(
             mission_id=message.mission_id,
             plan_id=message.plan_id,
@@ -178,7 +179,7 @@ class MissionManagerNode(Node):
             now=self._now(),
             target_distance=message.target_distance,
         )
-        if accepted:
+        if accepted or changed:
             self._publish()
 
     def planner_callback(self, message):
@@ -190,17 +191,6 @@ class MissionManagerNode(Node):
             plan_id=message.plan_id,
             now=self._now(),
         )
-
-    def result_callback(self, message):
-        if not message.outcome:
-            return
-        if message.mission_id not in (0, self.core.mission_id):
-            return
-        if message.success:
-            self.core.mark_capture(self._now())
-        else:
-            self.core.mark_failure(self._now())
-        self._publish()
 
     def timer_callback(self):
         self.core.tick(

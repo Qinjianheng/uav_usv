@@ -15,6 +15,9 @@ from px4_msgs.msg import (
 class PurePursuit(Node):
 
     def __init__(self):
+        raise RuntimeError(
+            'Retired truth-control entry point; use modular_intercept.launch.py'
+        )
         super().__init__('pure_pursuit')
 
         # =========================

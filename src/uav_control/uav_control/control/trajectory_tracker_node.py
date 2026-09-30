@@ -15,6 +15,9 @@ from std_msgs.msg import Bool
 from uav_usv_interfaces.msg import ControllerDiagnostic, InterceptTrajectory
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
 from uav_usv_interfaces.msg import TargetPrediction, TargetState
+from uav_usv_interfaces.msg import TargetBearing, TargetObservation
+
+from ..mission.target_visibility import TargetVisibilityState, VisibilityConfig
 
 from .flight_guidance import FlightGuidanceCore, FlightKinematicState
 from .trajectory_tracking import PolynomialSegmentData
@@ -88,6 +91,7 @@ def trajectory_from_message(message):
         terminal_mode=bool(message.terminal_mode),
         planned_capture_margin=float(message.planned_capture_margin),
         capture_execution_margin=float(message.capture_execution_margin),
+        observation_stamp=_stamp_seconds(message.observation_stamp),
     )
 
 
@@ -124,6 +128,43 @@ def flight_target_from_message(message):
     if not message.valid or not all(math.isfinite(value) for value in values):
         raise ValueError('target state is invalid')
     return FlightKinematicState(values[:3], values[3:])
+
+
+def measurement_age(now, stamp):
+    """Return true acquisition age; missing/future clocks fail closed."""
+    value = float(stamp)
+    age = float(now) - value
+    return age if math.isfinite(age) and value > 0.0 and age >= 0.0 else math.inf
+
+
+def fresh_flight_target(message, now, maximum_age, frame_id='local_ned'):
+    """Convert KF state only when its originating image remains fresh."""
+    if message is None or str(message.frame_id) != frame_id:
+        return None
+    source_age = measurement_age(now, _stamp_seconds(message.source_stamp))
+    state_age = measurement_age(now, _stamp_seconds(message.stamp))
+    if (source_age > maximum_age or state_age > maximum_age
+            or source_age < state_age):
+        return None
+    try:
+        return flight_target_from_message(message)
+    except (TypeError, ValueError):
+        return None
+
+
+def anchored_search_hold(anchor, position, sea_surface_z, search_height):
+    """Capture one XYZ reference on search entry rather than chasing drift."""
+    if anchor is not None:
+        return tuple(anchor)
+    return (float(position[0]), float(position[1]),
+            min(float(position[2]), float(sea_surface_z) - search_height))
+
+
+def image_yaw_rate(bearing, gain, deadband, maximum_rate):
+    """Positive image-right bearing requests positive NED yaw."""
+    if not math.isfinite(float(bearing)) or abs(bearing) < deadband:
+        return 0.0
+    return max(-maximum_rate, min(maximum_rate, gain * bearing))
 
 
 def _wrap_angle(angle):
@@ -296,7 +337,7 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('maximum_state_age', 0.125)
         self.declare_parameter('use_velocity_control', True)
         self.declare_parameter('frame_id', 'local_ned')
-        self.declare_parameter('target_state_topic', '/target/state')
+        self.declare_parameter('target_state_topic', '/tracking/target_state')
         self.declare_parameter('offboard_prestream_time', 2.0)
         self.declare_parameter('px4_command_retry_time', 1.0)
         self.declare_parameter('vehicle_status_timeout', 2.0)
@@ -317,6 +358,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('approach_response_delay', 0.15)
         self.declare_parameter('terminal_replacement_position_error', 0.15)
         self.declare_parameter('max_observation_yaw_rate', 1.0)
+        for name, value in vars(VisibilityConfig()).items():
+            self.declare_parameter(name, value)
 
         control_rate = float(self.get_parameter('control_rate_hz').value)
         if not math.isfinite(control_rate) or control_rate <= 0.0:
@@ -336,6 +379,14 @@ class TrajectoryTrackerNode(Node):
         self.target_state_topic = str(
             self.get_parameter('target_state_topic').value
         )
+        if self.target_state_topic != '/tracking/target_state':
+            raise ValueError('strict tracker requires /tracking/target_state')
+        if self.resolve_topic_name(self.target_state_topic) != '/tracking/target_state':
+            raise ValueError('strict tracker forbids target state remapping')
+        self.visibility = TargetVisibilityState(VisibilityConfig(**{
+            name: self.get_parameter(name).value
+            for name in vars(VisibilityConfig())
+        }))
         self.offboard_prestream_cycles = max(
             int(round(
                 self.get_parameter('offboard_prestream_time').value
@@ -506,6 +557,14 @@ class TrajectoryTrackerNode(Node):
             self.target_state_callback,
             state_qos,
         )
+        self.bearing_sub = self.create_subscription(
+            TargetBearing, '/perception/front/target_bearing',
+            self.bearing_callback, 10,
+        )
+        self.observation_sub = self.create_subscription(
+            TargetObservation, '/perception/front/target_observation',
+            self.observation_callback, 10,
+        )
         self.trajectory_sub = self.create_subscription(
             InterceptTrajectory,
             '/planning/intercept_trajectory',
@@ -575,6 +634,14 @@ class TrajectoryTrackerNode(Node):
         self.latest_state = None
         self.latest_prediction = None
         self.latest_target_state = None
+        self.latest_kf_message = None
+        self.visibility_decision = None
+        self.search_state = 'GROUND_HOLD'
+        self.search_hold_position = None
+        self.safe_recovery_latched = False
+        self.yaw_owner = 'HOLD'
+        self.search_yaw_rate_command = 0.0
+        self.current_heading = 0.0
         self.latest_planner_diagnostic = None
         self.vehicle_status_stamp = None
         self.offboard_active = False
@@ -616,6 +683,9 @@ class TrajectoryTrackerNode(Node):
             message,
             self._ros_seconds(),
         )
+        heading = float(getattr(message, 'heading', math.nan))
+        if math.isfinite(heading):
+            self.current_heading = heading
         self._process_pending_trajectory()
 
     def vehicle_status_callback(self, message):
@@ -629,16 +699,62 @@ class TrajectoryTrackerNode(Node):
         self.pre_flight_checks_pass = bool(message.pre_flight_checks_pass)
 
     def target_state_callback(self, message):
-        if message.frame_id != self.expected_frame_id:
-            return
-        try:
-            self.latest_target_state = flight_target_from_message(message)
-        except ValueError:
+        if message.valid and message.frame_id == self.expected_frame_id:
+            previous = self.latest_kf_message
+            stamp = _stamp_seconds(message.stamp)
+            source = _stamp_seconds(message.source_stamp)
+            now = self._ros_seconds()
+            if (0.0 < source <= stamp <= now and previous is not None
+                    and (stamp < _stamp_seconds(previous.stamp)
+                         or source < _stamp_seconds(previous.source_stamp))):
+                return
+        converted = fresh_flight_target(
+            message, self._ros_seconds(), self.maximum_state_age,
+            self.expected_frame_id,
+        )
+        if converted is None:
+            self.latest_kf_message = None
             self.latest_target_state = None
+            return
+        previous = self.latest_kf_message
+        if (previous is not None and _stamp_seconds(message.stamp)
+                < _stamp_seconds(previous.stamp)):
+            return
+        self.latest_kf_message = message
+        self.latest_target_state = converted
+
+    def bearing_callback(self, message):
+        stamp = _stamp_seconds(message.stamp)
+        if stamp <= 0.0 and _stamp_seconds(message.raw_stamp) > 0.0:
+            return
+        if stamp <= 0.0:
+            self.visibility.reset()
+            self.latest_kf_message = None
+            self.latest_target_state = None
+            self.latest_prediction = None
+            return
+        self.visibility.observe(
+            stamp, float(message.bearing), bool(message.valid),
+            self._ros_seconds(),
+        )
+
+    def observation_callback(self, message):
+        self.visibility.mark_observation(
+            _stamp_seconds(message.stamp),
+            bool(message.valid and message.frame_id == self.expected_frame_id),
+            self._ros_seconds(),
+        )
 
     def prediction_callback(self, message):
-        if message.valid and message.frame_id == self.expected_frame_id:
-            self.latest_prediction = message
+        if not (message.valid and message.frame_id == self.expected_frame_id
+                and message.source == 'tracking' and message.samples):
+            self.latest_prediction = None
+            return
+        previous = self.latest_prediction
+        if (previous is not None and message.mission_id == previous.mission_id
+                and message.sequence_id < previous.sequence_id):
+            return
+        self.latest_prediction = message
 
     def planner_diagnostic_callback(self, message):
         self.latest_planner_diagnostic = message
@@ -655,6 +771,13 @@ class TrajectoryTrackerNode(Node):
             self.last_target_yaw = None
             self.terminal_hold_position = None
             self.terminal_mode_latched = False
+            self.visibility.reset()
+            self.visibility_decision = None
+            self.latest_kf_message = None
+            self.latest_target_state = None
+            self.latest_prediction = None
+            self.search_hold_position = None
+            self.safe_recovery_latched = False
         self.mission_id = new_mission_id
         self.mission_state = int(message.state)
         self.mission_state_name = str(message.state_name) or 'INIT'
@@ -681,6 +804,10 @@ class TrajectoryTrackerNode(Node):
             raise ValueError('prediction unavailable')
         if int(self.latest_prediction.mission_id) != self.mission_id:
             raise ValueError('prediction mission mismatch')
+        if (measurement_age(self._ros_seconds(), _stamp_seconds(
+                self.latest_prediction.observation_stamp))
+                > self.maximum_state_age):
+            raise ValueError('prediction measurement is stale')
         return prediction_endpoint_from_message(
             self.latest_prediction,
             (
@@ -691,6 +818,22 @@ class TrajectoryTrackerNode(Node):
         )
 
     def _evaluate_trajectory(self, trajectory):
+        now = self._ros_seconds()
+        if now - trajectory.source_stamp > self.tracker.maximum_plan_age:
+            return TrajectoryRejectReason.SOURCE_STALE
+        if (trajectory.target_state_source != 'tracking'
+                or measurement_age(now, trajectory.observation_stamp)
+                > self.maximum_state_age
+                or fresh_flight_target(
+                    self.latest_kf_message, now, self.maximum_state_age,
+                    self.expected_frame_id,
+                ) is None
+                or self.visibility.consecutive_lost_frames
+                >= self.visibility.config.target_loss_frames
+                or not self.visibility_decision
+                or not self.visibility_decision.locked
+                or self.safe_recovery_latched):
+            return TrajectoryRejectReason.PREDICTION_MISMATCH
         if self.latest_state is None or self.latest_prediction is None:
             return TrajectoryRejectReason.PREDICTION_MISMATCH
         if int(self.latest_prediction.mission_id) != self.mission_id:
@@ -871,6 +1014,7 @@ class TrajectoryTrackerNode(Node):
         candidate=None,
     ):
         message = ControllerDiagnostic()
+        message.target_distance = math.inf
         message.stamp = _seconds_to_time(now)
         message.mission_id = self.mission_id
         message.attempted_plan_id = int(attempted_plan_id)
@@ -887,10 +1031,15 @@ class TrajectoryTrackerNode(Node):
             message.terminal_mode = active.terminal_mode
             message.planned_capture_margin = active.planned_capture_margin
         if self.latest_prediction is not None:
-            message.prediction_age = max(
-                now - _stamp_seconds(self.latest_prediction.source_stamp),
-                0.0,
+            message.prediction_age = measurement_age(
+                now, _stamp_seconds(self.latest_prediction.observation_stamp),
             )
+            message.prediction_sample_age = measurement_age(
+                now, _stamp_seconds(self.latest_prediction.source_stamp),
+            )
+        else:
+            message.prediction_age = math.inf
+            message.prediction_sample_age = math.inf
         message.terminal_mode = bool(
             message.terminal_mode or self.terminal_mode_latched
         )
@@ -913,6 +1062,42 @@ class TrajectoryTrackerNode(Node):
             if self.last_target_yaw is not None
             else math.nan
         )
+        visibility = getattr(self, 'visibility', None)
+        decision = getattr(self, 'visibility_decision', None)
+        message.target_visible = bool(decision and decision.visible)
+        message.target_locked = bool(
+            decision and decision.locked
+            and not getattr(self, 'safe_recovery_latched', False)
+        )
+        message.search_state = getattr(self, 'search_state', 'SAFE_WAIT')
+        message.search_direction = decision.search_direction if decision else 0
+        message.last_valid_observation_age = (
+            measurement_age(now, visibility.last_valid_observation_stamp)
+            if visibility and visibility.last_valid_observation_stamp is not None
+            else math.inf
+        )
+        message.last_valid_image_bearing = (
+            visibility.last_valid_image_bearing if visibility else math.nan
+        )
+        message.search_yaw_rate_command = getattr(
+            self, 'search_yaw_rate_command', 0.0,
+        )
+        message.consecutive_valid_frames = (
+            visibility.consecutive_valid_frames if visibility else 0
+        )
+        message.consecutive_lost_frames = (
+            visibility.consecutive_lost_frames if visibility else 0
+        )
+        kf = getattr(self, 'latest_kf_message', None)
+        message.kf_state_age = (
+            measurement_age(now, _stamp_seconds(kf.source_stamp))
+            if kf is not None else math.inf
+        )
+        message.planner_source_age = (
+            measurement_age(now, active.observation_stamp)
+            if active is not None else math.inf
+        )
+        message.yaw_owner = getattr(self, 'yaw_owner', 'HOLD')
         message.status = str(status)
         message.rejection_reason = self.last_rejection.value
         message.rejection_subreason = str(getattr(
@@ -971,6 +1156,104 @@ class TrajectoryTrackerNode(Node):
             message.safety_state = 'HOLD'
         self.diagnostic_pub.publish(message)
 
+    def _update_visibility(self, current, now, dt):
+        """Compute visual authority before selecting XYZ or yaw commands."""
+        self.latest_target_state = fresh_flight_target(
+            self.latest_kf_message, now, self.maximum_state_age,
+            self.expected_frame_id,
+        )
+        height = self.tracker.sea_surface_z - current.position[2]
+        search_height = self.visibility.config.target_search_enable_height
+        if self.safe_recovery_latched and (
+            height >= max(search_height, self.tracker.recovery_clearance)
+            and abs(current.velocity[2]) <= self.flight_guidance.takeoff_tolerance
+        ):
+            self.safe_recovery_latched = False
+            self.terminal_mode_latched = False
+            self.search_hold_position = None
+        terminal = (self.terminal_mode_latched
+                    or self.mission_state == MissionState.TERMINAL_MINCO
+                    or self.safe_recovery_latched)
+        decision = self.visibility.update(
+            now, self.current_heading, height, dt,
+            self.latest_target_state is not None,
+            terminal=terminal,
+        )
+        if (terminal and not decision.locked) or (
+            self.mission_state == MissionState.SAFE_RECOVERY
+            and height < max(search_height, self.tracker.recovery_clearance)
+        ):
+            self.safe_recovery_latched = True
+        if self.safe_recovery_latched:
+            decision = replace(decision, state='SAFE_RECOVERY', locked=False,
+                               yaw_rate=0.0, search_direction=0)
+        self.visibility_decision = decision
+        self.search_state = decision.state
+        return decision
+
+    def _search_or_recovery_command(self, current):
+        """Preempt stale descent and capture a fixed search XYZ anchor."""
+        self.pending_trajectory = None
+        self.tracker.active_trajectory = None
+        search_height = self.visibility.config.target_search_enable_height
+        height = self.tracker.sea_surface_z - current.position[2]
+        if self.terminal_mode_latched or (
+            self.mission_state == MissionState.TERMINAL_MINCO
+        ):
+            self.safe_recovery_latched = True
+        if self.safe_recovery_latched or height < max(
+            search_height, self.tracker.recovery_clearance,
+        ):
+            self.safe_recovery_latched = True
+            self.search_state = 'SAFE_RECOVERY'
+            self.search_hold_position = None
+            return self.tracker.recovery_command(
+                current, recovery_clearance=max(
+                    search_height, self.tracker.recovery_clearance,
+                ),
+            )
+        self.search_hold_position = anchored_search_hold(
+            self.search_hold_position, current.position,
+            self.tracker.sea_surface_z, search_height,
+        )
+        return self.flight_guidance._hold(FlightKinematicState(
+            self.search_hold_position, (0.0, 0.0, 0.0),
+        ))
+
+    def _final_yaw(self, setpoint, current, dt):
+        """One arbiter owns yaw for every final PX4 setpoint."""
+        decision = self.visibility_decision
+        height = self.tracker.sea_surface_z - current.position[2]
+        inhibited = (
+            self.mission_state in (
+                MissionState.INIT, MissionState.GROUND_HOLD,
+                *self.TERMINAL_STATES,
+            ) or self.safe_recovery_latched
+            or height < self.visibility.config.target_search_enable_height
+        )
+        rate = 0.0
+        self.yaw_owner = 'HOLD'
+        if not inhibited and decision is not None:
+            if decision.visible:
+                rate = image_yaw_rate(
+                    self.visibility.last_valid_image_bearing,
+                    self.visibility.config.vision_yaw_gain,
+                    self.visibility.config.target_center_deadband_rad,
+                    (self.max_observation_yaw_rate if decision.locked
+                     else self.visibility.config.maximum_search_yaw_rate),
+                )
+                self.yaw_owner = 'VISION' if decision.locked else 'SEARCH'
+            else:
+                rate = decision.yaw_rate
+                self.yaw_owner = 'SEARCH'
+        self.search_yaw_rate_command = rate
+        if self.last_target_yaw is None or inhibited:
+            self.last_target_yaw = self.current_heading
+        # Do not accumulate a reference faster than the vehicle can follow.
+        self.last_target_yaw = _wrap_angle(self.current_heading + rate * dt)
+        setpoint.yaw = self.last_target_yaw
+        setpoint.yawspeed = rate
+
     def timer_callback(self):
         started = time.perf_counter()
         now = self._ros_seconds()
@@ -1007,25 +1290,16 @@ class TrajectoryTrackerNode(Node):
         self.last_timer_stamp = now
         self.control_counter += 1
 
-        target_yaw = self.last_target_yaw
-        if self.latest_target_state is not None:
-            desired_yaw = target_facing_yaw(
-                current.position,
-                self.latest_target_state.position,
-            )
-            target_yaw = rate_limited_target_yaw(
-                self.last_target_yaw,
-                desired_yaw,
-                self.max_observation_yaw_rate,
-                dt,
-            )
-            self.last_target_yaw = target_yaw
+        dt = min(dt, self.tracker.maximum_command_dt)
+        decision = self._update_visibility(current, now, dt)
+        target_yaw = self.current_heading
 
         if self.mission_state in (MissionState.INIT, MissionState.GROUND_HOLD):
             flight_command = self.flight_guidance.command(
                 self.mission_state_name,
                 flight_state,
-                self.latest_target_state,
+                (None if self.mission_state == MissionState.TAKEOFF
+                 else self.latest_target_state),
                 dt,
             )
             self._publish_offboard_mode(timestamp_us, velocity_control=False)
@@ -1081,17 +1355,35 @@ class TrajectoryTrackerNode(Node):
             self.flight_ready = ready
             status = self.mission_state_name
             command = flight_command
+        elif (self.mission_state in (
+            MissionState.TARGET_ACQUIRE, MissionState.TARGET_LOCK,
+            MissionState.REACQUIRE, MissionState.SAFE_RECOVERY,
+        ) or (not decision.locked and self.mission_state not in (
+            MissionState.TAKEOFF, *self.TERMINAL_STATES,
+        ))):
+            self._publish_bool(self.flight_ready_pub, False)
+            self._request_flight_mode()
+            command = self._search_or_recovery_command(current)
+            self._publish_offboard_mode(timestamp_us, velocity_control=False)
+            if hasattr(command, 'mode'):
+                setpoint = flight_command_to_setpoint(command, timestamp_us)
+            else:
+                setpoint = command_to_setpoint(command, timestamp_us)
+            self._publish_bool(self.far_guidance_pub, False)
+            status = self.search_state
         elif self.mission_state in (
             MissionState.TAKEOFF,
             MissionState.FOLLOW,
             MissionState.FAR_GUIDANCE,
         ):
+            self.search_hold_position = None
             self._publish_bool(self.flight_ready_pub, False)
             self._request_flight_mode()
             flight_command = self.flight_guidance.command(
                 self.mission_state_name,
                 flight_state,
-                self.latest_target_state,
+                (None if self.mission_state == MissionState.TAKEOFF
+                 else self.latest_target_state),
                 dt,
             )
             velocity_control = flight_command.mode == 'VELOCITY'
@@ -1117,12 +1409,33 @@ class TrajectoryTrackerNode(Node):
                 and not self.takeoff_complete_sent
             ):
                 self.takeoff_complete_sent = True
-                self.get_logger().info('TAKEOFF COMPLETE | entering FOLLOW')
+                self.get_logger().info('TAKEOFF COMPLETE | entering TARGET_ACQUIRE')
             status = self.mission_state_name
             command = flight_command
         elif self.mission_state in self.CONTROL_STATES:
             self._publish_bool(self.flight_ready_pub, False)
             self._request_flight_mode()
+            prediction = self.latest_prediction
+            prediction_fresh = (
+                prediction is not None and prediction.valid
+                and int(prediction.mission_id) == self.mission_id
+                and measurement_age(now, _stamp_seconds(
+                    prediction.observation_stamp)) <= self.maximum_state_age
+            )
+            if not prediction_fresh:
+                command = self._search_or_recovery_command(current)
+                self._publish_offboard_mode(timestamp_us, velocity_control=False)
+                setpoint = (flight_command_to_setpoint(command, timestamp_us)
+                            if hasattr(command, 'mode')
+                            else command_to_setpoint(command, timestamp_us))
+                status = 'NO_VALID_PLAN'
+                self._final_yaw(setpoint, current, dt)
+                self.setpoint_pub.publish(setpoint)
+                self.reference_pub.publish(setpoint)
+                self._publish_diagnostic(now, command, status,
+                                         time.perf_counter() - started)
+                return
+            self.search_hold_position = None
             command = self.tracker.command(current, self.mission_id)
             velocity_mode = self.use_velocity_control
             if command is None:
@@ -1170,6 +1483,7 @@ class TrajectoryTrackerNode(Node):
             )
             status = self.mission_state_name
             command = None
+        self._final_yaw(setpoint, current, dt)
         self.setpoint_pub.publish(setpoint)
         self.reference_pub.publish(setpoint)
         self._publish_diagnostic(

@@ -29,6 +29,11 @@ class PredictionSeries:
     valid_until: float
     samples: tuple
     source: str
+    observation_stamp: float = None
+
+    def __post_init__(self):
+        if self.observation_stamp is None:
+            object.__setattr__(self, 'observation_stamp', self.source_stamp)
 
     @property
     def end_stamp(self):
@@ -121,7 +126,12 @@ class PlannerRequest:
             if self.uav_source_stamp is None
             else float(self.uav_source_stamp)
         )
-        return min(self.prediction.source_stamp, state_stamp)
+        return min(self.observation_stamp, state_stamp)
+
+    @property
+    def observation_stamp(self):
+        """Return immutable acquisition time of this request's prediction."""
+        return self.prediction.observation_stamp
 
     @property
     def state_source_stamp(self):
@@ -565,11 +575,25 @@ def validate_input(request, now, maximum_age):
     """Classify stale planner inputs before any MINCO computation."""
     now = float(now)
     maximum_age = float(maximum_age)
-    prediction_age = now - request.prediction.source_stamp
+    observation_stamp = float(request.observation_stamp)
+    prediction_age = now - observation_stamp
+    if (
+        not math.isfinite(observation_stamp)
+        or observation_stamp <= 0.0
+        or not math.isfinite(now)
+        or not math.isfinite(request.prediction.source_stamp)
+        or request.prediction.source_stamp < observation_stamp
+        or request.prediction.source_stamp > now
+    ):
+        return FastPlanningFailure.PREDICTION_STALE
     state_age = now - request.state_source_stamp
     if prediction_age < 0.0 or prediction_age > maximum_age:
         return FastPlanningFailure.PREDICTION_STALE
-    if state_age < 0.0 or state_age > maximum_age:
+    if (
+        not math.isfinite(state_age)
+        or state_age < 0.0
+        or state_age > maximum_age
+    ):
         return FastPlanningFailure.STATE_STALE
     if request.prediction.mission_id != request.mission_id:
         return FastPlanningFailure.PREDICTION_STALE
@@ -578,8 +602,9 @@ def validate_input(request, now, maximum_age):
 
 def validate_plan_arrival(request, generated_stamp, maximum_age):
     """Reject a result whose oldest source was already stale on arrival."""
-    oldest_age = float(generated_stamp) - request.source_stamp
-    if oldest_age > float(maximum_age) or oldest_age < 0.0:
+    if validate_input(request, generated_stamp, maximum_age) != (
+        FastPlanningFailure.NONE
+    ):
         return FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
     return FastPlanningFailure.NONE
 

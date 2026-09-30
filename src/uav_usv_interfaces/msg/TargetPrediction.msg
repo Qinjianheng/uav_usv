@@ -1,6 +1,8 @@
 uint64 mission_id
 uint64 sequence_id
 builtin_interfaces/Time source_stamp
+# Original image acquisition time; source_stamp remains sample/execution epoch.
+builtin_interfaces/Time observation_stamp
 builtin_interfaces/Time generated_stamp
 builtin_interfaces/Time valid_until
 string frame_id

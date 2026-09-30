@@ -32,6 +32,7 @@ def begin_intercept(manager):
     manager.set_flight_ready(True)
     manager.handle_command('X', 1.0)
     manager.mark_takeoff_complete(2.0)
+    manager.observe_visibility(manager.mission_id, 'TARGET_LOCK', True, 2.1)
     manager.handle_command('Y', 3.0)
 
 
@@ -55,7 +56,7 @@ def request(prediction_stamp=10.0, uav_stamp=10.02):
                 (0.0, 0.0, 0.0),
             ),
         ),
-        source='simulation_truth',
+        source='tracking',
     )
     uav = UavKinematicState(
         stamp=uav_stamp,
@@ -86,7 +87,7 @@ def trajectory(mission_id=1, source_stamp=10.0, plan_id=7):
         )),),
         terminal_position=(2.0, 0.0, -0.6),
         terminal_velocity=(1.0, 0.0, 0.2),
-        target_state_source='simulation_truth',
+        target_state_source='tracking',
     )
 
 
@@ -237,7 +238,8 @@ def test_forward_contact_minco_message_is_safe_and_tracker_accepts_it():
         trajectory_start_stamp=10.0,
         planning_started_stamp=10.0,
         generated_stamp=10.05,
-        target_state_source='simulation_truth',
+        target_state_source='tracking',
+        observation_stamp=10.0,
         contact_stamp=10.0 + outcome.plan.duration,
         remaining_t_go=outcome.plan.duration,
         terminal_mode=True,
@@ -349,7 +351,7 @@ def test_async_20_5_20_hz_pipeline_accepts_completed_older_prediction():
             source_stamp=source_stamp,
             valid_until=source_stamp + 4.0,
             samples=samples,
-            source='simulation_truth',
+            source='tracking',
         )
 
     first = PlannerRequest(

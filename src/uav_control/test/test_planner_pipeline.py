@@ -551,3 +551,40 @@ def test_replan_starts_from_old_reference_at_expected_handover_time():
     assert selected.position == pytest.approx((10.08, 1.0, -5.0))
     assert selected.velocity == pytest.approx((4.0, 0.0, 0.0))
     assert selected.acceleration == pytest.approx((0.2, 0.0, 0.0))
+
+
+def test_planner_freshness_uses_image_stamp_without_reanchoring_geometry():
+    from dataclasses import replace
+    request = make_request(prediction_stamp=10.5, uav_stamp=10.5)
+    request = replace(request, prediction=replace(
+        request.prediction, observation_stamp=10.0,
+    ))
+
+    assert request.observation_stamp == pytest.approx(10.0)
+    assert request.prediction.state_at_absolute_time(10.75)[0][0] == (
+        pytest.approx(1.5)
+    )
+    assert validate_input(request, 10.51, 0.125) == (
+        FastPlanningFailure.PREDICTION_STALE
+    )
+    assert validate_plan_arrival(request, 10.51, 0.125) == (
+        FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+    )
+
+
+@pytest.mark.parametrize('observation_stamp', (0.0, -1.0, float('nan'), 10.1))
+def test_planner_rejects_missing_invalid_and_future_image_stamp(
+    observation_stamp,
+):
+    from dataclasses import replace
+    request = make_request(prediction_stamp=10.0, uav_stamp=10.0)
+    request = replace(request, prediction=replace(
+        request.prediction, observation_stamp=observation_stamp,
+    ))
+
+    assert validate_input(request, 10.05, 0.125) == (
+        FastPlanningFailure.PREDICTION_STALE
+    )
+    assert validate_plan_arrival(request, 10.05, 0.125) == (
+        FastPlanningFailure.PLAN_STALE_ON_ARRIVAL
+    )

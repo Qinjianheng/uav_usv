@@ -28,7 +28,7 @@ from .intercept_evaluator import RuntimePerformanceAccumulator
 from .intercept_evaluator import TimestampedStateHistory
 from .intercept_evaluator import VisionMetricAccumulator
 from .intercept_evaluator import synchronize_histories
-from .gazebo_terminal import GazeboTerminalPauser, GazeboWorldPauseClient
+from .intercept_evaluator import image_pose_diagnostics
 from .gazebo_entity_pose import entity_geometry_residuals
 from .gazebo_entity_pose import GazeboEntityPoseTracker
 from uav_control.common.runtime_performance import RateMeter
@@ -169,6 +169,7 @@ class InterceptEvaluatorNode(Node):
             'data/experiments/current',
         )
         self.declare_parameter('truth_topic', '/target/state')
+        self.declare_parameter('truth_role', 'evaluation_only')
         self.declare_parameter(
             'shadow_prediction_topic',
             '/planning/shadow_target_prediction',
@@ -211,6 +212,9 @@ class InterceptEvaluatorNode(Node):
             self.get_parameter('visual_observation_topic').value
         )
         self.truth_topic = str(self.get_parameter('truth_topic').value)
+        self.truth_role = str(self.get_parameter('truth_role').value)
+        if self.truth_role != 'evaluation_only':
+            raise ValueError('truth_role must be evaluation_only')
         self.shadow_prediction_topic = str(
             self.get_parameter('shadow_prediction_topic').value
         )
@@ -226,26 +230,6 @@ class InterceptEvaluatorNode(Node):
         world_name = str(
             self.get_parameter('gazebo_world_name').value
         ).strip().strip('/')
-        try:
-            pause_client = GazeboWorldPauseClient(
-                world_name=self.get_parameter('gazebo_world_name').value,
-                request_timeout_ms=self.get_parameter(
-                    'gazebo_pause_timeout_ms'
-                ).value,
-            )
-            self.gazebo_pauser = GazeboTerminalPauser(
-                pause_client.pause_world,
-                maximum_attempts=self.get_parameter(
-                    'gazebo_pause_maximum_attempts'
-                ).value,
-                retry_delay=self.get_parameter(
-                    'gazebo_pause_retry_delay'
-                ).value,
-            )
-        except (ImportError, RuntimeError, TypeError, ValueError) as error:
-            self.get_logger().warn(
-                f'Independent Gazebo pause client unavailable: {error}'
-            )
         self.gazebo_entity_diagnostics_enabled = bool(self.get_parameter(
             'gazebo_entity_diagnostics_enabled'
         ).value)
@@ -844,6 +828,7 @@ class InterceptEvaluatorNode(Node):
                 'red_pixel_count': int(message.red_pixel_count),
                 'valid_depth_ratio': float(message.valid_depth_ratio),
                 'target_range': target_range,
+                **image_pose_diagnostics(message),
                 'view_angle': float(message.view_angle),
                 'geometry_diagnostics_enabled': bool(
                     message.geometry_diagnostics_enabled
@@ -1230,7 +1215,7 @@ class InterceptEvaluatorNode(Node):
             'body_contact_z': self.evaluator.body_contact_z,
             'maximum_duration': self.evaluator.maximum_duration,
             'truth_topic': self.truth_topic,
-            'truth_role': 'evaluation_only',
+            'truth_role': self.truth_role,
             'shadow_prediction_topic': (
                 self.shadow_prediction_topic
             ),
@@ -1367,6 +1352,21 @@ class InterceptEvaluatorNode(Node):
             'approach_phase': self.approach_phase,
             'first_terminal_approach': self.terminal_approach_count == 1,
             'controller_status': controller.status if controller else '',
+            **{
+                name: getattr(controller, name, default)
+                for name, default in (
+                    ('target_visible', False), ('target_locked', False),
+                    ('search_state', ''), ('search_direction', 0),
+                    ('last_valid_observation_age', math.inf),
+                    ('last_valid_image_bearing', math.nan),
+                    ('search_yaw_rate_command', 0.0),
+                    ('consecutive_valid_frames', 0),
+                    ('consecutive_lost_frames', 0),
+                    ('kf_state_age', math.inf),
+                    ('prediction_sample_age', math.inf),
+                    ('planner_source_age', math.inf), ('yaw_owner', ''),
+                )
+            },
             'tracker_rejection_reason': (
                 self.latest_tracker_rejection_reason
                 if controller and controller.status == 'PLAN_REJECTED'
@@ -1630,7 +1630,7 @@ class InterceptEvaluatorNode(Node):
             ),
             'max_vertical_acceleration': result.maximum_vertical_acceleration,
             'truth_topic': self.truth_topic,
-            'truth_role': 'evaluation_only',
+            'truth_role': self.truth_role,
             'controller_callback_p95': 0.0,
         }
         if self.terminal_pause_result is not None:
@@ -1705,18 +1705,14 @@ class InterceptEvaluatorNode(Node):
         hit = Bool()
         hit.data = bool(result.success)
         self.hit_pub.publish(hit)
-        if self.gazebo_pauser is not None:
-            self.terminal_pause_result = self.gazebo_pauser.pause(
-                result.reason
-            )
-        else:
-            from .gazebo_terminal import GazeboPauseResult
-            self.terminal_pause_result = GazeboPauseResult(
-                terminal_event=result.reason,
-                gazebo_pause_requested=False,
-                gazebo_pause_succeeded=False,
-                attempts=0,
-            )
+        # Results are recorded only; evaluation never pauses the world.
+        from .gazebo_terminal import GazeboPauseResult
+        self.terminal_pause_result = GazeboPauseResult(
+            terminal_event=result.reason,
+            gazebo_pause_requested=False,
+            gazebo_pause_succeeded=False,
+            attempts=0,
+        )
         if self.writer is not None:
             self.writer.append_detail_event(
                 'run_detail',

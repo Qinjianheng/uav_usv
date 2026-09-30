@@ -178,7 +178,7 @@ def test_plan_age_bound_matches_four_mps_endpoint_tolerance():
     assert tracker['maximum_plan_age'] <= derived_maximum_age
 
 
-def test_main_prediction_uses_kf_while_direct_tracker_truth_is_explicit():
+def test_main_prediction_and_tracker_use_kf_truth_is_evaluation_only():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     predictor = parameters(config, 'target_predictor_node')
     tracker = parameters(config, 'trajectory_tracker_node')
@@ -187,8 +187,10 @@ def test_main_prediction_uses_kf_while_direct_tracker_truth_is_explicit():
     assert predictor['target_state_source'] == 'tracking'
     assert predictor['tracking_topic'] == parameters(
         config, 'target_kalman_filter')['state_topic']
-    assert predictor['simulation_truth_topic'] == tracker['target_state_topic']
-    assert evaluator['truth_topic'] == tracker['target_state_topic']
+    assert 'simulation_truth_topic' not in predictor
+    assert tracker['target_state_topic'] == predictor['tracking_topic']
+    assert evaluator['truth_topic'] == '/target/state'
+    assert evaluator['truth_role'] == 'evaluation_only'
 
 
 def test_prediction_horizon_covers_vertical_intercept_duration():

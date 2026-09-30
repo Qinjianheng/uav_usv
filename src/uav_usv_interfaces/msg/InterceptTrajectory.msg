@@ -2,6 +2,8 @@ uint64 mission_id
 uint64 plan_id
 uint64 prediction_sequence_id
 builtin_interfaces/Time source_stamp
+# Original image acquisition time; source_stamp remains sample/execution epoch.
+builtin_interfaces/Time observation_stamp
 builtin_interfaces/Time planning_started_stamp
 builtin_interfaces/Time generated_stamp
 builtin_interfaces/Time published_stamp

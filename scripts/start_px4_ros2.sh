@@ -23,6 +23,8 @@ PX4_VERTICAL_SPEED_LIMIT="${PX4_VERTICAL_SPEED_LIMIT:-4.0}"
 EXPERIMENT_LAUNCH="${UAV_USV_EXPERIMENT_LAUNCH:-modular_intercept.launch.py}"
 EXPERIMENT_CONFIG_FILE="${UAV_USV_EXPERIMENT_CONFIG_FILE:-}"
 EXPERIMENT_CONFIG_ARG=""
+EXPERIMENT_ENABLE_EVALUATOR="${UAV_USV_ENABLE_EVALUATOR:-true}"
+EXPERIMENT_ENABLE_SHADOW="${UAV_USV_ENABLE_SHADOW_PERCEPTION:-true}"
 
 if [[ "${1:-}" == "--no-build" ]]; then
     BUILD_WORKSPACE=false
@@ -62,6 +64,12 @@ if ! [[ "${EXPERIMENT_LAUNCH}" =~ ^[A-Za-z0-9_.-]+[.]launch[.]py$ ]]; then
     echo "UAV_USV_EXPERIMENT_LAUNCH must be a launch filename." >&2
     exit 2
 fi
+for experiment_boolean in "${EXPERIMENT_ENABLE_EVALUATOR}" "${EXPERIMENT_ENABLE_SHADOW}"; do
+    if [[ "${experiment_boolean}" != "true" && "${experiment_boolean}" != "false" ]]; then
+        echo "UAV_USV_ENABLE_EVALUATOR and UAV_USV_ENABLE_SHADOW_PERCEPTION must be true or false." >&2
+        exit 2
+    fi
+done
 if [[ -n "${EXPERIMENT_CONFIG_FILE}" ]]; then
     if [[ ! -f "${EXPERIMENT_CONFIG_FILE}" ]]; then
         echo "Experiment config file not found: ${EXPERIMENT_CONFIG_FILE}" >&2
@@ -386,7 +394,8 @@ source /opt/ros/humble/setup.bash &&
 source '${WS_ROOT}/install/setup.bash' &&
 cd '${WS_ROOT}' &&
 ros2 launch uav_usv_bringup '${EXPERIMENT_LAUNCH}' \
-    enable_shadow_perception:=true${EXPERIMENT_CONFIG_ARG};
+    enable_evaluator:=${EXPERIMENT_ENABLE_EVALUATOR} \
+    enable_shadow_perception:=${EXPERIMENT_ENABLE_SHADOW}${EXPERIMENT_CONFIG_ARG};
 component_status=\$?;
 if [[ ! -f '${LAB_RESTART_MARKER}' ]]; then exec bash; fi;
 exit \${component_status}"
@@ -428,7 +437,7 @@ fi
 
 publish_command()
 {
-    # Both moving_target and trajectory_impact_sim must receive X.  The ROS 2
+    # Both moving_target and mission_manager_node must receive X.  The ROS 2
     # CLI otherwise publishes as soon as it discovers the first subscriber,
     # so a short-lived publisher can start the UAV while the target misses the
     # same command.  Wait for both subscribers and repeat the reliable sample
@@ -452,7 +461,7 @@ publish_command()
 echo
 echo "Two-stage control is ready; PX4 is disarmed in OFFBOARD ground hold."
 echo "  X: start UAV takeoff and USV motion simultaneously"
-echo "  Y: start interception after FOLLOW MODE"
+echo "  Y: start interception after stable TARGET_LOCK"
 echo "  R: stop this simulation and restart a clean session"
 echo "  Q: leave this command console"
 

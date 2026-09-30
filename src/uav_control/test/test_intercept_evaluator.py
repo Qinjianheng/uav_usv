@@ -1,5 +1,7 @@
+import csv
 import json
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +11,48 @@ from uav_control.evaluation.intercept_evaluator import InterceptEvaluatorCore
 from uav_control.evaluation.intercept_evaluator import KinematicState
 from uav_control.evaluation.intercept_evaluator import PlannerEventAccumulator
 from uav_control.evaluation.intercept_evaluator import VisionMetricAccumulator
+
+
+def test_visual_log_heading_and_bearing_use_image_time_geometry():
+    observation = SimpleNamespace(
+        geometry_diagnostics_enabled=True,
+        mask_centroid_u=330., camera_cx=320., camera_fx=100.,
+        interpolated_attitude_w=math.cos(.4),
+        interpolated_attitude_x=0., interpolated_attitude_y=0.,
+        interpolated_attitude_z=math.sin(.4),
+    )
+    values = intercept_evaluator.image_pose_diagnostics(observation)
+    assert values['image_bearing'] == pytest.approx(math.atan(.1))
+    assert values['px4_heading'] == pytest.approx(.8)
+    observation.geometry_diagnostics_enabled = False
+    assert all(math.isnan(value) for value in (
+        intercept_evaluator.image_pose_diagnostics(observation).values()
+    ))
+    observation.geometry_diagnostics_enabled = True
+    observation.camera_fx = 0.
+    observation.interpolated_attitude_w = math.nan
+    assert all(math.isnan(value) for value in (
+        intercept_evaluator.image_pose_diagnostics(observation).values()
+    ))
+
+
+def test_visibility_diagnostics_survive_csv_serialization(tmp_path):
+    writer = ExperimentArtifactWriter(tmp_path, mission_id=1, config={})
+    expected = {
+        'target_visible': True, 'target_locked': False,
+        'search_state': 'REACQUIRE', 'search_direction': -1,
+        'last_valid_observation_age': .1, 'last_valid_image_bearing': -.2,
+        'search_yaw_rate_command': -.35, 'consecutive_valid_frames': 0,
+        'consecutive_lost_frames': 3, 'kf_state_age': .1,
+        'prediction_sample_age': .05, 'planner_source_age': .12,
+        'yaw_owner': 'SEARCH',
+    }
+    writer.append_sample(expected)
+    writer.finalize({'outcome': 'TEST'})
+    with writer.paths.csv_path.open(newline='') as stream:
+        row = next(csv.DictReader(stream))
+    for key, value in expected.items():
+        assert row[key] == str(value)
 
 
 def state(position, velocity=(0.0, 0.0, 0.0)):

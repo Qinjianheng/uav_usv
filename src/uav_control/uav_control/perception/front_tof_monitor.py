@@ -7,7 +7,6 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Point
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import (
@@ -458,12 +457,6 @@ class FrontTofMonitor(Node):
             Float32, '/simulation/gazebo/real_time_factor', 10
         )
 
-        self.target_sub = self.create_subscription(
-            Point,
-            '/target/position',
-            self.target_callback,
-            10,
-        )
         self.position_sub = self.create_subscription(
             VehicleLocalPosition,
             '/fmu/out/vehicle_local_position_v1',
@@ -544,7 +537,7 @@ class FrontTofMonitor(Node):
             f'{self.maximum_depth:.1f} m'
         )
         self.get_logger().info(
-            'Target truth remains enabled for control and evaluation; '
+            'Image diagnostics only; target truth is not subscribed; '
             'ToF output is diagnostic only.'
         )
 

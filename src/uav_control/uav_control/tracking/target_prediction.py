@@ -13,6 +13,11 @@ class TargetKinematicState:
     stamp: float
     position: tuple
     velocity: tuple
+    observation_stamp: float = None
+
+    def __post_init__(self):
+        if self.observation_stamp is None:
+            object.__setattr__(self, 'observation_stamp', self.stamp)
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,7 @@ class PredictionResult:
     longitudinal_acceleration: float
     valid: bool
     invalid_reason: str
+    observation_stamp: float = None
 
 
 class PredictionEngine:
@@ -54,7 +60,7 @@ class PredictionEngine:
         horizon=4.0,
         sample_period=0.1,
         input_timeout=0.125,
-        source='simulation_truth',
+        source='tracking',
     ):
         self.predictor = predictor or ManeuveringTargetPredictor()
         self.horizon = self._positive(horizon, 'prediction horizon')
@@ -68,6 +74,7 @@ class PredictionEngine:
         )
         self.source = str(source)
         self.latest_state = None
+        self.invalid_reason = 'NO_TARGET_STATE'
 
     @staticmethod
     def _positive(value, name):
@@ -80,6 +87,7 @@ class PredictionEngine:
     def _finite_state(state):
         values = (
             state.stamp,
+            state.observation_stamp,
             *state.position,
             *state.velocity,
         )
@@ -87,15 +95,39 @@ class PredictionEngine:
             math.isfinite(float(value)) for value in values
         )
 
-    def update(self, state):
-        """Accept a finite, newer state and update motion history."""
-        if not self._finite_state(state):
+    def invalidate(self, reason='INVALID_TARGET_STATE'):
+        """Discard cached input when transport reports an invalid state."""
+        self.latest_state = None
+        self.invalid_reason = str(reason)
+
+    def update(self, state, now=None):
+        """Accept newer states; validate measurement age without retiming."""
+        if (
+            not self._finite_state(state)
+            or state.stamp <= 0.0
+            or state.observation_stamp <= 0.0
+            or state.observation_stamp > state.stamp
+        ):
+            self.invalidate('INVALID_TARGET_STATE')
             return False
         if (
             self.latest_state is not None
             and state.stamp <= self.latest_state.stamp
         ):
             return False
+        if now is not None:
+            now = float(now)
+            age = now - state.observation_stamp
+            if (
+                not math.isfinite(now)
+                or state.stamp > now
+                or age < 0.0
+            ):
+                self.invalidate('STATE_TIME_IN_FUTURE')
+                return False
+            if age > self.input_timeout:
+                self.invalidate('STATE_STALE')
+                return False
         self.predictor.update_velocity(
             state.velocity[0],
             state.velocity[1],
@@ -107,6 +139,7 @@ class PredictionEngine:
             state.stamp,
         )
         self.latest_state = state
+        self.invalid_reason = ''
         return True
 
     def _sample_times(self):
@@ -122,14 +155,18 @@ class PredictionEngine:
 
     def _invalid(self, now, mission_id, sequence_id, reason):
         source_stamp = (
-            self.latest_state.stamp if self.latest_state is not None else now
+            self.latest_state.stamp if self.latest_state is not None else 0.0
+        )
+        observation_stamp = (
+            self.latest_state.observation_stamp
+            if self.latest_state is not None else 0.0
         )
         return PredictionResult(
             mission_id=int(mission_id),
             sequence_id=int(sequence_id),
             source_stamp=source_stamp,
             generated_stamp=float(now),
-            valid_until=source_stamp + self.input_timeout,
+            valid_until=observation_stamp + self.input_timeout,
             source=self.source,
             model='BCTRA_BOUNDED_Z',
             horizon=self.horizon,
@@ -139,6 +176,7 @@ class PredictionEngine:
             longitudinal_acceleration=self.predictor.speed_acceleration,
             valid=False,
             invalid_reason=reason,
+            observation_stamp=observation_stamp,
         )
 
     def generate(self, now, mission_id, sequence_id):
@@ -151,10 +189,10 @@ class PredictionEngine:
                 now,
                 mission_id,
                 sequence_id,
-                'NO_TARGET_STATE',
+                self.invalid_reason,
             )
-        age = now - self.latest_state.stamp
-        if age < 0.0:
+        age = now - self.latest_state.observation_stamp
+        if age < 0.0 or self.latest_state.stamp > now:
             return self._invalid(
                 now,
                 mission_id,
@@ -202,7 +240,7 @@ class PredictionEngine:
             sequence_id=int(sequence_id),
             source_stamp=state.stamp,
             generated_stamp=now,
-            valid_until=state.stamp + self.input_timeout,
+            valid_until=state.observation_stamp + self.input_timeout,
             source=self.source,
             model='BCTRA_BOUNDED_Z',
             horizon=self.horizon,
@@ -212,4 +250,5 @@ class PredictionEngine:
             longitudinal_acceleration=self.predictor.speed_acceleration,
             valid=True,
             invalid_reason='',
+            observation_stamp=state.observation_stamp,
         )

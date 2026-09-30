@@ -20,6 +20,10 @@ class MissionPhase(IntEnum):
     CAPTURE = 10
     FAILURE = 11
     ABORTED = 12
+    TARGET_ACQUIRE = 13
+    TARGET_LOCK = 14
+    REACQUIRE = 15
+    SAFE_RECOVERY = 16
 
 
 class MissionManagerCore:
@@ -49,6 +53,7 @@ class MissionManagerCore:
         self.last_tracker_accept_time = None
         self.recovery_started_at = None
         self.last_transition_time = 0.0
+        self.target_locked = False
 
     def _transition(self, phase, now):
         changed = self.phase != MissionPhase(phase)
@@ -79,6 +84,7 @@ class MissionManagerCore:
             self.active_plan_id = 0
             self.last_tracker_accept_time = None
             self.recovery_started_at = None
+            self.target_locked = False
             destination = (
                 MissionPhase.GROUND_HOLD
                 if self.flight_ready
@@ -98,7 +104,7 @@ class MissionManagerCore:
             self._transition(MissionPhase.TAKEOFF, now)
             return True
         if command == 'Y':
-            if self.phase != MissionPhase.FOLLOW:
+            if self.phase != MissionPhase.TARGET_LOCK or not self.target_locked:
                 return False
             self.intercept_requested = True
             self._transition(MissionPhase.FAR_GUIDANCE, now)
@@ -106,11 +112,34 @@ class MissionManagerCore:
         return False
 
     def mark_takeoff_complete(self, now):
-        """Enter follow only from the explicit takeoff phase."""
+        """Start visual acquisition only after explicit takeoff completion."""
         if self.phase != MissionPhase.TAKEOFF:
             return False
-        self._transition(MissionPhase.FOLLOW, now)
+        self._transition(MissionPhase.TARGET_ACQUIRE, now)
         return True
+
+    def observe_visibility(self, mission_id, state, locked, now):
+        """Consume only the command owner's visual/safety decision."""
+        if int(mission_id) != self.mission_id or self.completed:
+            return False
+        if self.phase in (MissionPhase.INIT, MissionPhase.GROUND_HOLD,
+                          MissionPhase.TAKEOFF):
+            return False
+        self.target_locked = bool(locked)
+        if state == 'SAFE_RECOVERY':
+            self.active_plan_id = 0
+            return self._transition(MissionPhase.SAFE_RECOVERY, now)
+        if not locked and state in ('REACQUIRE', 'SAFE_WAIT'):
+            self.active_plan_id = 0
+            destination = (MissionPhase.REACQUIRE if state == 'REACQUIRE'
+                           else MissionPhase.SAFE_WAIT)
+            return self._transition(destination, now)
+        if locked and self.phase in (
+            MissionPhase.TARGET_ACQUIRE, MissionPhase.REACQUIRE,
+            MissionPhase.SAFE_WAIT, MissionPhase.SAFE_RECOVERY,
+        ):
+            return self._transition(MissionPhase.TARGET_LOCK, now)
+        return False
 
     def observe_planner(self, success, plan_id, now):
         """Record no state: solver success is not tracker acceptance."""
@@ -143,6 +172,11 @@ class MissionManagerCore:
             and fresh
             and tracking
             and self.intercept_requested
+            and self.target_locked
+            and self.phase not in (
+                MissionPhase.REACQUIRE, MissionPhase.SAFE_RECOVERY,
+                MissionPhase.TARGET_ACQUIRE,
+            )
         ):
             new_plan = int(plan_id) != self.active_plan_id
             self.active_plan_id = int(plan_id)
@@ -178,7 +212,9 @@ class MissionManagerCore:
     def tick(self, now, far_guidance_available=False):
         """Advance transient and timeout-driven recoverable phases."""
         now = float(now)
-        if self.phase == MissionPhase.MINCO_READY:
+        if self.phase == MissionPhase.TARGET_LOCK and self.intercept_requested:
+            self._transition(MissionPhase.FAR_GUIDANCE, now)
+        elif self.phase == MissionPhase.MINCO_READY:
             self._transition(MissionPhase.MINCO_TRACKING, now)
         elif (
             self.phase == MissionPhase.PLAN_RECOVERY
@@ -189,16 +225,17 @@ class MissionManagerCore:
         elif (
             self.phase == MissionPhase.SAFE_WAIT
             and bool(far_guidance_available)
+            and self.target_locked
         ):
             self._transition(MissionPhase.FAR_GUIDANCE, now)
         return self.phase
 
     def mark_capture(self, now):
-        """Finish the mission with a truth-evaluated capture event."""
+        """Reserved external/manual completion; evaluator never invokes it."""
         self.completed = True
         self._transition(MissionPhase.CAPTURE, now)
 
     def mark_failure(self, now):
-        """Finish the mission with an evaluator or PX4 failure event."""
+        """Reserved external/manual failure; evaluator never invokes it."""
         self.completed = True
         self._transition(MissionPhase.FAILURE, now)

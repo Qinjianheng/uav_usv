@@ -11,6 +11,10 @@ uint8 SAFE_WAIT=9
 uint8 CAPTURE=10
 uint8 FAILURE=11
 uint8 ABORTED=12
+uint8 TARGET_ACQUIRE=13
+uint8 TARGET_LOCK=14
+uint8 REACQUIRE=15
+uint8 SAFE_RECOVERY=16
 
 builtin_interfaces/Time stamp
 uint64 mission_id

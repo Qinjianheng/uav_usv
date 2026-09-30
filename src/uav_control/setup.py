@@ -27,10 +27,6 @@ setup(
             'position_listener = uav_control.position_listener:main',
             'offboard_takeoff = uav_control.offboard_takeoff:main',
             'moving_target = uav_control.moving_target:main',
-            'pure_pursuit = uav_control.pure_pursuit:main',
-            'predictive_intercept = uav_control.predictive_intercept:main',
-            'trajectory_impact_sim = '
-            'uav_control.trajectory_impact_sim:main',
             'usv_estimation_analysis = '
             'uav_control.analysis.usv_estimation_analysis:main',
             'intercept_outcome_analysis = '
@@ -49,6 +45,8 @@ setup(
             'uav_control.evaluation.intercept_evaluator_node:main',
             'front_tof_monitor = '
             'uav_control.perception.front_tof_monitor:main',
+            'target_bearing_node = '
+            'uav_control.perception.target_bearing_node:main',
             'rgbd_target_localizer = '
             'uav_control.perception.rgbd_target_localizer:main',
             'dual_tof_selector = '

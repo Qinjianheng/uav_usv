@@ -39,10 +39,13 @@ def seconds_to_duration(seconds):
 
 
 def state_from_message(message):
-    """Convert a TargetState without replacing its measurement timestamp."""
+    """Keep the KF evaluation epoch and its image acquisition time."""
     stamp = message.stamp.sec + message.stamp.nanosec * 1e-9
     return TargetKinematicState(
         stamp=stamp,
+        observation_stamp=(
+            message.source_stamp.sec + message.source_stamp.nanosec * 1e-9
+        ),
         position=(
             float(message.position.x),
             float(message.position.y),
@@ -62,6 +65,7 @@ def prediction_to_message(result, compute_time, frame_id='local_ned'):
     message.mission_id = result.mission_id
     message.sequence_id = result.sequence_id
     message.source_stamp = seconds_to_time(result.source_stamp)
+    message.observation_stamp = seconds_to_time(result.observation_stamp)
     message.generated_stamp = seconds_to_time(result.generated_stamp)
     message.valid_until = seconds_to_time(result.valid_until)
     message.frame_id = str(frame_id)
@@ -108,7 +112,6 @@ class TargetPredictorNode(Node):
     def __init__(self):
         super().__init__('target_predictor_node')
         self.declare_parameter('target_state_source', 'tracking')
-        self.declare_parameter('simulation_truth_topic', '/target/state')
         self.declare_parameter('tracking_topic', '/tracking/target_state')
         self.declare_parameter(
             'prediction_topic',
@@ -137,18 +140,20 @@ class TargetPredictorNode(Node):
         source = str(
             self.get_parameter('target_state_source').value
         ).strip().lower()
-        if source not in ('simulation_truth', 'tracking'):
+        if source != 'tracking':
+            raise ValueError('target_state_source must be tracking')
+        input_topic = str(self.get_parameter('tracking_topic').value).strip()
+        resolved_topic = self.resolve_topic_name(input_topic)
+        forbidden_topics = {
+            '/target/state', '/target/position', '/target/velocity',
+        }
+        if (
+            '/' + input_topic.strip('/') in forbidden_topics
+            or resolved_topic in forbidden_topics
+        ):
             raise ValueError(
-                'target_state_source must be simulation_truth or tracking'
+                'tracking_topic cannot be a simulation truth topic'
             )
-        input_topic_parameter = (
-            'simulation_truth_topic'
-            if source == 'simulation_truth'
-            else 'tracking_topic'
-        )
-        input_topic = str(
-            self.get_parameter(input_topic_parameter).value
-        )
         output_topic = str(self.get_parameter('prediction_topic').value)
         self.frame_id = str(self.get_parameter('frame_id').value)
         update_rate_hz = float(self.get_parameter('update_rate_hz').value)
@@ -244,8 +249,14 @@ class TargetPredictorNode(Node):
         )
 
     def state_callback(self, message):
-        if message.valid:
-            self.engine.update(state_from_message(message))
+        if not message.valid:
+            self.engine.invalidate('INVALID_TARGET_STATE')
+            return
+        if message.frame_id != self.frame_id:
+            self.engine.invalidate('FRAME_MISMATCH')
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self.engine.update(state_from_message(message), now=now)
 
     def mission_callback(self, message):
         self.mission_id = int(message.mission_id)
