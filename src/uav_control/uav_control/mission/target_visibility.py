@@ -185,6 +185,16 @@ class TargetVisibilityState:
                 and self._fresh(self.last_valid_observation_stamp, now)
                 and len(self._centered_stamps) >= self.config.target_lock_min_frames)
 
+    def bearing_approach_ready(self, now, maximum_age):
+        """Grant RGB-only motion after distinct centered frames, never a 3D lock."""
+        stamp = self.last_valid_bearing_stamp
+        return bool(
+            self._latest_bearing_valid and stamp is not None
+            and 0.0 <= now-stamp <= min(maximum_age, self.config.target_lock_max_age)
+            and abs(self.last_valid_image_bearing) <= self.config.target_lock_max_bearing
+            and len(self._centered_stamps) >= self.config.target_lock_min_frames
+        )
+
     def _servo(self):
         if abs(self.last_valid_image_bearing) < self.config.target_center_deadband_rad:
             return 0.0
@@ -292,8 +302,6 @@ class TargetVisibilityState:
             return VisibilityDecision('SAFE_WAIT', False, visible, 0.0, 0)
         if visible:
             state = 'REACQUIRE' if self.has_ever_locked_target else 'TARGET_ACQUIRE'
-            if not kf_fresh and self.has_ever_locked_target:
-                state = 'SAFE_WAIT'
             return VisibilityDecision(state, False, True, self._servo(), 0)
         state = 'REACQUIRE' if self.has_ever_seen_target else 'TARGET_ACQUIRE'
         if height < self.config.target_search_enable_height:
@@ -302,5 +310,6 @@ class TargetVisibilityState:
         timed_out = (self.has_ever_seen_target
                      and now - self._search_started_at >= self.config.target_reacquire_timeout)
         if self._scan_finished or timed_out:
-            state = 'SAFE_WAIT'
+            self._scan_finished = True
+            return VisibilityDecision('SAFE_WAIT', False, False, 0.0, 0)
         return VisibilityDecision(state, False, False, rate, direction)

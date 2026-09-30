@@ -8,6 +8,8 @@ import json
 import math
 from pathlib import Path
 
+from .uav_heading_diagnostics import UAV_HEADING_CSV_FIELDS
+
 
 # Distance from the PX4 local-position reference to the lowest point of the
 # vehicle body.  The X500 landing-gear skids reach 0.227 m below base_link, so
@@ -934,7 +936,9 @@ class ExperimentArtifactWriter:
     """Write isolated sample, summary, and configuration artifacts."""
 
     CSV_FIELDS = (
-        'time', 'mission_id', 'phase',
+        'time', 'run_elapsed_time', 'intercept_elapsed_time',
+        'intercept_started', 'sample_kind', 'truth_available', 'uav_available',
+        'mission_id', 'phase',
         'uav_x', 'uav_y', 'uav_z', 'uav_vx', 'uav_vy', 'uav_vz',
         'target_x', 'target_y', 'target_z',
         'target_vx', 'target_vy', 'target_vz',
@@ -942,6 +946,7 @@ class ExperimentArtifactWriter:
         'relative_speed', 'closing_speed',
         'approach_phase', 'first_terminal_approach',
         'controller_status', 'plan_id',
+        'bearing_approach_active', 'bearing_age_at_control',
         'prediction_age', 'trajectory_age',
         'target_visible', 'target_locked', 'search_state', 'search_direction',
         'last_valid_observation_age', 'last_valid_image_bearing',
@@ -1040,7 +1045,7 @@ class ExperimentArtifactWriter:
         'truth_x', 'truth_y', 'truth_z',
         'error_x', 'error_y', 'error_z',
         'horizontal_error', 'position_3d_error', 'observation_age',
-    )
+    ) + tuple(field for field in UAV_HEADING_CSV_FIELDS if field != 'px4_heading')
 
     def __init__(
         self,

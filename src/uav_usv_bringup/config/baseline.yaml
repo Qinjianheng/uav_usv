@@ -313,6 +313,9 @@ trajectory_tracker_node:
     takeoff_horizontal_full_height: 1.5
     follow_distance: 5.0
     follow_position_gain: 0.8
+    # Far acquisition advances from RGB direction without requiring depth/KF.
+    bearing_approach_enabled: true
+    bearing_approach_speed: 6.0
     altitude_velocity_gain: 1.0
     # FAR_GUIDANCE keeps flight_altitude while moving to a preparation point
     # whose standoff is closing_speed * current vertical minimum time.

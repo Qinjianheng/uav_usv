@@ -227,3 +227,80 @@ def test_empty_csv_does_not_report_zero_error_or_zero_valid_rate(analyzer):
     assert result['valid_rate'] is None
     assert result['raw_error']['horizontal_rmse_m'] is None
     assert result['heading_diagnostic']['sample_count'] == 0
+
+
+def test_layer_analysis_distinguishes_missing_geometry_and_conditioned_pose(
+    analyzer,
+):
+    result = analyzer.analyze_rows([
+        vision_row(geometry_diagnostics_enabled=False)])
+    assert result['geometry_layers']['status'] == 'not_evaluated'
+    assert result['geometry_layers']['reason'] == (
+        'insufficient_geometry_fields')
+    assert 'PX4' in result['geometry_layers']['conditioning']
+
+
+def test_layer_analysis_reports_pixel_camera_body_and_ned_separately(analyzer):
+    row = vision_row(projection_error_u=3., projection_error_v=4.,
+                     camera_center_error_x=.1, camera_center_error_y=.2,
+                     camera_center_error_z=.2, body_flu_error_x=.2,
+                     body_flu_error_y=.1, body_flu_error_z=.2,
+                     vision_to_entity_x=.4, vision_to_entity_y=.3,
+                     vision_to_entity_z=0., entity_to_truth_x=0.,
+                     entity_to_truth_y=0., entity_to_truth_z=0.)
+    layers = analyzer.analyze_rows([row])['geometry_layers']
+    assert layers['projection_pixel']['norm_rmse'] == 5.
+    assert layers['camera_center']['norm_rmse'] == pytest.approx(.3)
+    assert layers['body_flu']['norm_rmse'] == pytest.approx(.3)
+    assert layers['vision_to_entity']['norm_rmse'] == pytest.approx(.5)
+    assert layers['root_cause'] == 'not_confirmed'
+
+
+def embedded_reference(**changes):
+    row = vision_row(
+        px4_heading=.1, reference_heading=0.,
+        heading_diagnostics_status='VALID',
+        heading_reference_source='gazebo_uav_model_pose',
+        gazebo_uav_diagnostics_enabled='true',
+        uav_pose_status='INTERPOLATED', uav_pose_query_ros_stamp=10.,
+        uav_pose_left_ros_stamp=9.95, uav_pose_right_ros_stamp=10.05)
+    row.update(changes)
+    return row
+
+
+def test_embedded_heading_needs_explicit_independent_provenance_and_bracket(
+    analyzer,
+):
+    diagnostic = analyzer.analyze_rows([embedded_reference()])[
+        'heading_diagnostic']
+    assert diagnostic['sample_count'] == 1
+    assert diagnostic['reference_source'] == 'embedded_gazebo_uav_model_pose'
+    for changes in (
+        {'heading_reference_source': 'target_truth_bearing'},
+        {'heading_diagnostics_status': 'REFERENCE_AFTER_HISTORY'},
+        {'uav_pose_query_ros_stamp': 10.01},
+        {'uav_pose_left_ros_stamp': 10.01},
+        {'geometry_diagnostics_enabled': False},
+    ):
+        assert analyzer.analyze_rows([embedded_reference(**changes)])[
+            'heading_diagnostic']['status'] == 'not_evaluated'
+
+
+def test_geometry_off_cannot_report_zero_layer_residual(analyzer):
+    row = vision_row(geometry_diagnostics_enabled=False,
+                     projection_error_u=0., projection_error_v=0.)
+    layers = analyzer.analyze_rows([row])['geometry_layers']
+    assert layers['projection_pixel']['sample_count'] == 0
+    assert layers['projection_pixel']['norm_rmse'] is None
+
+
+def test_attitude_counterfactual_keeps_position_assumption_visible(analyzer):
+    row = embedded_reference(
+        attitude_counterfactual_status='PX4_POSITION_HELD_FIXED',
+        attitude_counterfactual_error_x=.03,
+        attitude_counterfactual_error_y=.04,
+        attitude_counterfactual_error_z=0.)
+    value = analyzer.analyze_rows([row])['geometry_layers'][
+        'attitude_only_counterfactual']
+    assert value['norm_rmse'] == pytest.approx(.05)
+    assert 'PX4 position' in value['conditioning']

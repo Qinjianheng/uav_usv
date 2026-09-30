@@ -1281,6 +1281,9 @@ class RgbdTargetLocalizer(Node):
             source_is_ros_time=self.px4_timestamp_is_ros_time,
         )
         self._image_clock_reset_pending = False
+        # Wake the ROS executor when data becomes ready. Keep decoding out of
+        # DDS and Gazebo transport callbacks; the timer remains a timeout retry.
+        self.localization_guard = self.create_guard_condition(self.timed_localize)
         from gz.msgs10.clock_pb2 import Clock as GazeboClock
         from gz.transport13 import Node as GazeboTransportNode
 
@@ -1327,6 +1330,15 @@ class RgbdTargetLocalizer(Node):
             self._reset_pose_time_state()
 
         self._flush_pending_raw_pose_samples()
+        self._request_localization()
+
+    def _request_localization(self):
+        """Schedule ready or causally waiting image work in the ROS executor."""
+        guard = getattr(self, 'localization_guard', None)
+        if guard is not None and (
+            self.pending_image_pairs or getattr(self, 'waiting_image_pair', None)
+        ):
+            guard.trigger()
 
     def _apply_pending_image_clock_reset(self):
         if not getattr(self, '_image_clock_reset_pending', False):
@@ -1356,6 +1368,7 @@ class RgbdTargetLocalizer(Node):
             self.waiting_image_pair = None
             self.image_clock_mapper.reset()
         self._collect_image_pair()
+        self._request_localization()
 
     def depth_callback(self, message):
         """Cache depth by acquisition stamp without decoding it in DDS."""
@@ -1377,6 +1390,7 @@ class RgbdTargetLocalizer(Node):
             self.waiting_image_pair = None
             self.image_clock_mapper.reset()
         self._collect_image_pair()
+        self._request_localization()
 
     def _collect_image_pair(self):
         while True:
@@ -1577,6 +1591,7 @@ class RgbdTargetLocalizer(Node):
         if self.position_history.add(stamp, position):
             self.uav_position = position
             self.uav_position_time = stamp
+        self._request_localization()
 
     def attitude_callback(self, message):
         """Store attitude using recovered physical PX4 sample time."""
@@ -1612,6 +1627,7 @@ class RgbdTargetLocalizer(Node):
 
         self.attitude_mapped_stamp = stamp
         self._add_attitude_sample(stamp, quaternion)
+        self._request_localization()
 
     def _pending_pose_samples_for_node(self):
         if not hasattr(self, '_pending_pose_samples'):

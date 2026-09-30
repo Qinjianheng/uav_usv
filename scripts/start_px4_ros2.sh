@@ -184,6 +184,40 @@ export PX4_GZ_MODELS="${CUSTOM_GZ_MODELS}"
 
 LAB_SESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/uav_usv_lab.XXXXXX")"
 LAB_RESTART_MARKER="${LAB_SESSION_DIR}/restarting"
+LAB_GZ_SERVER_CONFIG="${LAB_SESSION_DIR}/magnetometer_enu.config"
+
+# The native bridge and Gazebo field must select the same coordinates. Fail
+# before launching either component if only one half of the fix is installed.
+if ! LC_ALL=C grep -aFq 'PX4_GZ_MAGNETOMETER_ENU' \
+    "${PX4_ROOT}/build/px4_sitl_default/bin/px4"; then
+    echo "PX4 needs the workspace ENU magnetometer bridge patch and rebuild." >&2
+    echo "See patches/px4/gz_magnetometer_enu.patch and the follow repair report." >&2
+    exit 1
+fi
+python3 "${WS_ROOT}/scripts/prepare_gz_magnetometer_config.py" \
+    --source "${PX4_ROOT}/src/modules/simulation/gz_bridge/server.config" \
+    --output "${LAB_GZ_SERVER_CONFIG}"
+
+PX4_ENU_INIT="${PX4_ROOT}/build/px4_sitl_default/rootfs/etc/init.d-posix/px4-rc.gzmag_enu"
+if ! cmp -s "${WS_ROOT}/patches/px4/px4-rc.gzmag_enu" "${PX4_ENU_INIT}" \
+    || ! grep -Fq '. px4-rc.gzmag_enu || exit 1' \
+        "${PX4_ROOT}/build/px4_sitl_default/rootfs/etc/init.d-posix/rcS"; then
+    echo "PX4 needs the ENU zero-bias simulated magnetometer startup hook." >&2
+    echo "See patches/px4/gz_magnetic_initialization.patch and the repair report." >&2
+    exit 1
+fi
+# Preserve imported parameters before the selected zero-bias simulator mode
+# initializes its own magnetic offsets. Do not delete/reset the parameter DB.
+PX4_PARAMETER_BACKUP_ROOT="${WS_ROOT}/data/experiments/px4_parameter_backups"
+mkdir -p "${PX4_PARAMETER_BACKUP_ROOT}"
+PX4_PARAMETER_BACKUP_DIR="$(mktemp -d "${PX4_PARAMETER_BACKUP_ROOT}/enu_XXXXXX")"
+for parameter_file in parameters.bson parameters_backup.bson; do
+    if [[ -f "${PX4_ROOT}/build/px4_sitl_default/rootfs/${parameter_file}" ]]; then
+        cp -- "${PX4_ROOT}/build/px4_sitl_default/rootfs/${parameter_file}" \
+            "${PX4_PARAMETER_BACKUP_DIR}/${parameter_file}"
+    fi
+done
+echo "PX4 parameter backup: ${PX4_PARAMETER_BACKUP_DIR}"
 
 stop_lab_component()
 {
@@ -273,6 +307,7 @@ restart_lab()
 
     rm -f \
         "${LAB_RESTART_MARKER}" \
+        "${LAB_GZ_SERVER_CONFIG}" \
         "${LAB_SESSION_DIR}/experiment.pid" \
         "${LAB_SESSION_DIR}/dds.pid" \
         "${LAB_SESSION_DIR}/px4.pid" \
@@ -286,6 +321,7 @@ echo "Starting Gazebo ocean world..."
 gnome-terminal --title="Gazebo Ocean" -- bash -lc "
 printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/gazebo.pid' &&
 source '${PX4_GZ_ENV}' &&
+export GZ_SIM_SERVER_CONFIG_PATH='${LAB_GZ_SERVER_CONFIG}' &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 gz sim -r '${OCEAN_WORLD}';
 component_status=\$?;
@@ -312,6 +348,8 @@ echo "Starting PX4 SITL in standalone Gazebo mode..."
 gnome-terminal --title="PX4 SITL" -- bash -lc "
 printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/px4.pid' &&
 source '${PX4_GZ_ENV}' &&
+export GZ_SIM_SERVER_CONFIG_PATH='${LAB_GZ_SERVER_CONFIG}' &&
+export PX4_GZ_MAGNETOMETER_ENU=1 &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
 export PX4_GZ_STANDALONE=1 &&
@@ -461,7 +499,7 @@ publish_command()
 echo
 echo "Two-stage control is ready; PX4 is disarmed in OFFBOARD ground hold."
 echo "  X: start UAV takeoff and USV motion simultaneously"
-echo "  Y: start interception after stable TARGET_LOCK"
+echo "  Y: start interception from visually locked FOLLOW"
 echo "  R: stop this simulation and restart a clean session"
 echo "  Q: leave this command console"
 

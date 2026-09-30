@@ -36,6 +36,7 @@ class MissionManagerCore:
         plan_recovery_timeout=0.50,
         terminal_time_threshold=1.0,
         terminal_distance_threshold=2.0,
+        lock_confirmation_duration=0.05,
     ):
         self.maximum_tracker_age = float(maximum_tracker_age)
         self.minimum_plan_remaining_time = float(
@@ -44,6 +45,11 @@ class MissionManagerCore:
         self.plan_recovery_timeout = float(plan_recovery_timeout)
         self.terminal_time_threshold = float(terminal_time_threshold)
         self.terminal_distance_threshold = float(terminal_distance_threshold)
+        self.lock_confirmation_duration = float(lock_confirmation_duration)
+        if (not math.isfinite(self.lock_confirmation_duration)
+                or self.lock_confirmation_duration <= 0.0):
+            raise ValueError(
+                'lock_confirmation_duration must be finite and positive')
         self.mission_id = 0
         self.phase = MissionPhase.INIT
         self.flight_ready = False
@@ -104,7 +110,9 @@ class MissionManagerCore:
             self._transition(MissionPhase.TAKEOFF, now)
             return True
         if command == 'Y':
-            if self.phase != MissionPhase.TARGET_LOCK or not self.target_locked:
+            if self.phase not in (
+                MissionPhase.FOLLOW, MissionPhase.TARGET_LOCK,
+            ) or not self.target_locked:
                 return False
             self.intercept_requested = True
             self._transition(MissionPhase.FAR_GUIDANCE, now)
@@ -175,7 +183,7 @@ class MissionManagerCore:
             and self.target_locked
             and self.phase not in (
                 MissionPhase.REACQUIRE, MissionPhase.SAFE_RECOVERY,
-                MissionPhase.TARGET_ACQUIRE,
+                MissionPhase.TARGET_ACQUIRE, MissionPhase.TARGET_LOCK,
             )
         ):
             new_plan = int(plan_id) != self.active_plan_id
@@ -212,8 +220,16 @@ class MissionManagerCore:
     def tick(self, now, far_guidance_available=False):
         """Advance transient and timeout-driven recoverable phases."""
         now = float(now)
-        if self.phase == MissionPhase.TARGET_LOCK and self.intercept_requested:
-            self._transition(MissionPhase.FAR_GUIDANCE, now)
+        if (
+            self.phase == MissionPhase.TARGET_LOCK
+            and self.target_locked
+            and now - self.last_transition_time + 1e-9
+            >= self.lock_confirmation_duration
+        ):
+            destination = (
+                MissionPhase.FAR_GUIDANCE if self.intercept_requested
+                else MissionPhase.FOLLOW)
+            self._transition(destination, now)
         elif self.phase == MissionPhase.MINCO_READY:
             self._transition(MissionPhase.MINCO_TRACKING, now)
         elif (
@@ -226,6 +242,7 @@ class MissionManagerCore:
             self.phase == MissionPhase.SAFE_WAIT
             and bool(far_guidance_available)
             and self.target_locked
+            and self.intercept_requested
         ):
             self._transition(MissionPhase.FAR_GUIDANCE, now)
         return self.phase

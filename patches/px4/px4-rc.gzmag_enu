@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# The selected Gazebo model has zero sensor mean/bias. Initialize only its
+# identified simulation device before sensors/EKF start, never physical mags.
+if [ "${PX4_GZ_MAGNETOMETER_ENU:-0}" = "1" ] && param compare -s SIM_GZ_EN 1
+then
+    for gzmag_slot in 0 1 2 3
+    do
+        if param compare -s "CAL_MAG${gzmag_slot}_ID" 197388
+        then
+            echo "ENU zero-bias simulated magnetometer: initializing slot ${gzmag_slot} offsets"
+            param show "CAL_MAG${gzmag_slot}_XOFF"
+            param show "CAL_MAG${gzmag_slot}_YOFF"
+            param show "CAL_MAG${gzmag_slot}_ZOFF"
+            param set "CAL_MAG${gzmag_slot}_XOFF" 0 || return 1
+            param set "CAL_MAG${gzmag_slot}_YOFF" 0 || return 1
+            param set "CAL_MAG${gzmag_slot}_ZOFF" 0 || return 1
+        fi
+    done
+fi

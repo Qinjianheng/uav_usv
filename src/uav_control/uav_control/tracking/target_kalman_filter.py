@@ -230,6 +230,9 @@ class TargetKalmanFilterNode(Node):
             return
 
         self.last_measurement_time_ns = timestamp_ns
+        # A new image must not wait another publication period before control
+        # sees it. Projection keeps the original source stamp and KF state.
+        self.timer_callback()
 
     def predict_to(self, timestamp_ns):
         if (

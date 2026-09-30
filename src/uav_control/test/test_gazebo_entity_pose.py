@@ -111,6 +111,7 @@ def test_entity_query_metadata_is_cleared_with_clock_reset():
 
 def test_evaluator_callbacks_select_target_entity_and_keep_sample_time():
     node = object.__new__(InterceptEvaluatorNode)
+    node.gazebo_uav_tracker = None
     node.gazebo_entity_tracker = GazeboEntityPoseTracker(
         history_duration=1.0
     )

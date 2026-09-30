@@ -351,6 +351,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('takeoff_horizontal_full_height', 1.5)
         self.declare_parameter('follow_distance', 5.0)
         self.declare_parameter('follow_position_gain', 0.8)
+        self.declare_parameter('bearing_approach_enabled', True)
+        self.declare_parameter('bearing_approach_speed', 6.0)
         self.declare_parameter('altitude_velocity_gain', 1.0)
         self.declare_parameter('approach_contact_clearance', 0.33)
         self.declare_parameter('approach_closing_speed', 1.5)
@@ -387,6 +389,11 @@ class TrajectoryTrackerNode(Node):
             name: self.get_parameter(name).value
             for name in vars(VisibilityConfig())
         }))
+        self.bearing_approach_enabled = bool(
+            self.get_parameter('bearing_approach_enabled').value)
+        self.bearing_approach_speed = float(self.get_parameter('bearing_approach_speed').value)
+        if not math.isfinite(self.bearing_approach_speed) or self.bearing_approach_speed <= 0.0:
+            raise ValueError('bearing_approach_speed must be finite and positive')
         self.offboard_prestream_cycles = max(
             int(round(
                 self.get_parameter('offboard_prestream_time').value
@@ -639,6 +646,8 @@ class TrajectoryTrackerNode(Node):
         self.search_state = 'GROUND_HOLD'
         self.search_hold_position = None
         self.safe_recovery_latched = False
+        self.bearing_approach_active = False
+        self.intercept_requested = False
         self.yaw_owner = 'HOLD'
         self.search_yaw_rate_command = 0.0
         self.current_heading = 0.0
@@ -778,7 +787,9 @@ class TrajectoryTrackerNode(Node):
             self.latest_prediction = None
             self.search_hold_position = None
             self.safe_recovery_latched = False
+            self.bearing_approach_active = False
         self.mission_id = new_mission_id
+        self.intercept_requested = bool(getattr(message, 'intercept_requested', False))
         self.mission_state = int(message.state)
         self.mission_state_name = str(message.state_name) or 'INIT'
         if self.mission_state == MissionState.TERMINAL_MINCO:
@@ -1079,6 +1090,8 @@ class TrajectoryTrackerNode(Node):
         message.last_valid_image_bearing = (
             visibility.last_valid_image_bearing if visibility else math.nan
         )
+        if status == 'BEARING_APPROACH':
+            message.source_age = measurement_age(now, visibility.last_valid_bearing_stamp)
         message.search_yaw_rate_command = getattr(
             self, 'search_yaw_rate_command', 0.0,
         )
@@ -1220,6 +1233,20 @@ class TrajectoryTrackerNode(Node):
             self.search_hold_position, (0.0, 0.0, 0.0),
         ))
 
+    def _bearing_approach_available(self, current, now):
+        """Keep RGB approach separate from locked FOLLOW and Y/MINCO authority."""
+        return bool(
+            getattr(self, 'bearing_approach_enabled', False)
+            and self.mission_state in (MissionState.TARGET_ACQUIRE, MissionState.REACQUIRE)
+            and not getattr(self, 'intercept_requested', False)
+            and not self.safe_recovery_latched and not self.terminal_mode_latched
+            and self.latest_target_state is None
+            and current.position[2] <= (self.flight_guidance.flight_altitude
+                                        + self.flight_guidance.takeoff_tolerance)
+            and abs(current.velocity[2]) <= self.flight_guidance.takeoff_tolerance
+            and self.visibility.bearing_approach_ready(now, self.maximum_state_age)
+        )
+
     def _final_yaw(self, setpoint, current, dt):
         """One arbiter owns yaw for every final PX4 setpoint."""
         decision = self.visibility_decision
@@ -1242,8 +1269,9 @@ class TrajectoryTrackerNode(Node):
                     (self.max_observation_yaw_rate if decision.locked
                      else self.visibility.config.maximum_search_yaw_rate),
                 )
-                self.yaw_owner = 'VISION' if decision.locked else 'SEARCH'
-            else:
+                self.yaw_owner = ('VISION' if decision.locked or getattr(
+                    self, 'bearing_approach_active', False) else 'SEARCH')
+            elif decision.state != 'SAFE_WAIT':
                 rate = decision.yaw_rate
                 self.yaw_owner = 'SEARCH'
         self.search_yaw_rate_command = rate
@@ -1292,6 +1320,8 @@ class TrajectoryTrackerNode(Node):
 
         dt = min(dt, self.tracker.maximum_command_dt)
         decision = self._update_visibility(current, now, dt)
+        was_bearing_approach = getattr(self, 'bearing_approach_active', False)
+        self.bearing_approach_active = False
         target_yaw = self.current_heading
 
         if self.mission_state in (MissionState.INIT, MissionState.GROUND_HOLD):
@@ -1355,6 +1385,21 @@ class TrajectoryTrackerNode(Node):
             self.flight_ready = ready
             status = self.mission_state_name
             command = flight_command
+        elif self._bearing_approach_available(current, now):
+            self._publish_bool(self.flight_ready_pub, False)
+            self._request_flight_mode()
+            self.pending_trajectory = None
+            self.tracker.active_trajectory = None
+            self.search_hold_position = None
+            if not was_bearing_approach:
+                self.flight_guidance.previous_velocity = tuple(current.velocity)
+            command = self.flight_guidance.bearing_approach(
+                flight_state, self.current_heading, self.bearing_approach_speed, dt)
+            self.bearing_approach_active = True
+            self._publish_offboard_mode(timestamp_us, velocity_control=True)
+            setpoint = flight_command_to_setpoint(command, timestamp_us)
+            self._publish_bool(self.far_guidance_pub, False)
+            status = 'BEARING_APPROACH'
         elif (self.mission_state in (
             MissionState.TARGET_ACQUIRE, MissionState.TARGET_LOCK,
             MissionState.REACQUIRE, MissionState.SAFE_RECOVERY,

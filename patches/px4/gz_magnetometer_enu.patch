@@ -1,0 +1,30 @@
+--- a/src/modules/simulation/gz_bridge/GZBridge.cpp
++++ b/src/modules/simulation/gz_bridge/GZBridge.cpp
+@@ -40,6 +40,9 @@
+ 
+ #include <px4_platform_common/getopt.h>
+ 
++#include "GzMagneticField.hpp"
++
++#include <cstdlib>
+ #include <iostream>
+ #include <string>
+ 
+@@ -396,10 +399,13 @@
+ 
+ 	_px4_mag.set_temperature(_temperature); // this will be static if no airspeed sensor is on the model.
+ 
+-	// FIXME: once we're on jetty or later
+-	// The magnetometer plugin publishes in units of gauss and in a weird left handed coordinate system
+-	// https://github.com/gazebosim/gz-sim/pull/2460
+-	_px4_mag.update(timestamp, -msg.field_tesla().y(), -msg.field_tesla().x(), msg.field_tesla().z());
++	// This workspace selects ENU world / FLU sensor coordinates explicitly.
++	// Keep gauss units and legacy behavior for worlds that have not opted in.
++	const char *frame_mode = std::getenv("PX4_GZ_MAGNETOMETER_ENU");
++	const bool enu_flu = frame_mode && std::string(frame_mode) == "1";
++	const auto field = px4_gz::magnetometer_frd(msg.field_tesla().x(), msg.field_tesla().y(),
++			  msg.field_tesla().z(), enu_flu);
++	_px4_mag.update(timestamp, field[0], field[1], field[2]);
+ }
+ 
+ void GZBridge::airPressureCallback(const gz::msgs::FluidPressure &msg)

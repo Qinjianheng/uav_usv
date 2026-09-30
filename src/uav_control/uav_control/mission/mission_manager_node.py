@@ -66,6 +66,7 @@ class MissionManagerNode(Node):
             terminal_distance_threshold=self.get_parameter(
                 'terminal_distance_threshold'
             ).value,
+            lock_confirmation_duration=1.0 / publication_rate,
         )
         state_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,

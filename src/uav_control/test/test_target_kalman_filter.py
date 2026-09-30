@@ -104,11 +104,20 @@ def test_measurement_update_predicts_by_acquisition_dt_before_update():
         def update(self, position, covariance):
             self.events.append(('update', tuple(position)))
 
+        def project(self, dt):
+            return np.zeros(6), np.eye(6)
+
     node = object.__new__(target_kalman_filter.TargetKalmanFilterNode)
     node.frame_id = 'local_ned'
     node.filter = RecordingFilter()
     node.filter_time_ns = None
     node.last_measurement_time_ns = None
+    node.measurement_timeout = .5
+    node.prediction_horizon = .5
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: target_kalman_filter.Time(nanoseconds=10_120_000_000))
+    node.state_pub = SimpleNamespace(publish=lambda message: None)
+    node.prediction_pub = SimpleNamespace(publish=lambda message: None)
 
     def observation(nanoseconds, x):
         message = TargetObservation()

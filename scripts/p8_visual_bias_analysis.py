@@ -4,7 +4,7 @@ Diagnose visual position bias offline, without fitting or online correction.
 
 Heading references must already be causal, in the same NED frame, and aligned
 with the image acquisition measurement_stamp. This program does not infer a
-reference from target truth direction, attitude quaternions, or receipt times.
+reference from target truth direction, PX4 quaternions, or receipt times.
 All angles are radians, positions/ranges metres, and timestamps seconds.
 """
 
@@ -169,6 +169,89 @@ def _heading_diagnostic(error_rows, heading_rows, tolerance):
     }
 
 
+def _embedded_references(rows):
+    references = []
+    for row in rows:
+        if not (
+            _true(row.get('geometry_diagnostics_enabled'))
+            and _true(row.get('gazebo_uav_diagnostics_enabled'))
+            and row.get('heading_diagnostics_status') == 'VALID'
+            and row.get('heading_reference_source') == 'gazebo_uav_model_pose'
+            and row.get('uav_pose_status') in ('EXACT', 'INTERPOLATED')
+        ):
+            continue
+        stamp, query, left, right = (_number(row, key) for key in (
+            'measurement_stamp', 'uav_pose_query_ros_stamp',
+            'uav_pose_left_ros_stamp', 'uav_pose_right_ros_stamp'))
+        if (None in (stamp, query, left, right) or stamp <= 0.0
+                or abs(query - stamp) > MAX_MATCH_TOLERANCE
+                or not left - MAX_MATCH_TOLERANCE <= stamp
+                <= right + MAX_MATCH_TOLERANCE):
+            continue
+        references.append(row)
+    return references
+
+
+def _vector_layer(rows, prefix, axes, units='m'):
+    samples = []
+    for row in rows:
+        if not _true(row.get('geometry_diagnostics_enabled')):
+            continue
+        values = tuple(_number(row, prefix + '_' + axis) for axis in axes)
+        if None not in values:
+            samples.append(values)
+    return {
+        'status': 'evaluated_diagnostic_only' if samples else 'not_evaluated',
+        'sample_count': len(samples), 'units': units,
+        'norm_rmse': _rmse([math.hypot(*value) for value in samples]),
+        'signed_axes': {axis: _summary([value[i] for value in samples])
+                        for i, axis in enumerate(axes)},
+    }
+
+
+def _geometry_layers(valid_rows):
+    layers = {
+        'projection_pixel': _vector_layer(
+            valid_rows, 'projection_error', ('u', 'v'), 'px'),
+        'camera_center': _vector_layer(
+            valid_rows, 'camera_center_error', ('x', 'y', 'z')),
+        'body_flu': _vector_layer(
+            valid_rows, 'body_flu_error', ('x', 'y', 'z')),
+        'vision_to_entity': _vector_layer(
+            valid_rows, 'vision_to_entity', ('x', 'y', 'z')),
+        'entity_to_truth': _vector_layer(
+            valid_rows, 'entity_to_truth', ('x', 'y', 'z')),
+        'independent_physical_projection': _vector_layer(
+            valid_rows, 'physical_projection_error', ('u', 'v'), 'px'),
+        'independent_physical_camera': _vector_layer(
+            valid_rows, 'physical_camera_center_error', ('x', 'y', 'z')),
+        'attitude_only_counterfactual': _vector_layer(
+            [row for row in valid_rows
+             if row.get('attitude_counterfactual_status')
+             == 'PX4_POSITION_HELD_FIXED'],
+            'attitude_counterfactual_error', ('x', 'y', 'z')),
+    }
+    layers['attitude_only_counterfactual']['conditioning'] = (
+        'PX4 position held fixed; independent UAV attitude replaces PX4 '
+        'attitude; model-origin position equivalence not established')
+    evaluated = any(value['sample_count'] for value in layers.values())
+    return {
+        'status': (
+            'evaluated_diagnostic_only' if evaluated else 'not_evaluated'),
+        'reason': '' if evaluated else 'insufficient_geometry_fields',
+        'conditioning': (
+            'projection_pixel/camera_center/body_flu expected values use PX4 '
+            'position and attitude; residuals cannot alone distinguish pose '
+            'error from mask/depth/extrinsics. Rotated camera/body residual '
+            'norms are coupled and are not independent proof.'),
+        'independent_physical_provenance': (
+            'legacy physical_* columns require their original capture config '
+            'and exact camera/model pose bracket audit; these statistics '
+            'alone do not certify alignment'),
+        'root_cause': 'not_confirmed', **layers,
+    }
+
+
 def analyze_rows(rows, heading_rows=None, match_tolerance=MAX_MATCH_TOLERANCE):
     """Return finite JSON-ready diagnostics from acquisition-timed CSV rows."""
     tolerance = float(match_tolerance)
@@ -190,6 +273,13 @@ def analyze_rows(rows, heading_rows=None, match_tolerance=MAX_MATCH_TOLERANCE):
                 and stamp is not None and stamp > 0.0
                 and error_x is not None and error_y is not None):
             error_rows.append((row, error_x, error_y))
+    embedded = _embedded_references(valid_rows) if heading_rows is None else []
+    references = (
+        heading_rows if heading_rows is not None else (embedded or None))
+    heading_diagnostic = _heading_diagnostic(error_rows, references, tolerance)
+    if embedded:
+        heading_diagnostic['reference_source'] = (
+            'embedded_gazebo_uav_model_pose')
     reasons = Counter(str(row.get('rejection_reason', '')).strip()
                       for row in rows)
     return {
@@ -222,8 +312,8 @@ def analyze_rows(rows, heading_rows=None, match_tolerance=MAX_MATCH_TOLERANCE):
             'mean_rad': _mean(bearings), 'rmse_rad': _rmse(bearings),
             'definition': 'atan((mask_centroid_u - camera_cx) / camera_fx)',
         },
-        'heading_diagnostic': _heading_diagnostic(
-            error_rows, heading_rows, tolerance),
+        'geometry_layers': _geometry_layers(valid_rows),
+        'heading_diagnostic': heading_diagnostic,
     }
 
 

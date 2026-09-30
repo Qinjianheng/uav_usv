@@ -29,6 +29,8 @@ from .intercept_evaluator import TimestampedStateHistory
 from .intercept_evaluator import VisionMetricAccumulator
 from .intercept_evaluator import synchronize_histories
 from .intercept_evaluator import image_pose_diagnostics
+from .run_metrics import RunMetricAccumulator
+from .uav_heading_diagnostics import GazeboUavPoseTracker, heading_diagnostics
 from .gazebo_entity_pose import entity_geometry_residuals
 from .gazebo_entity_pose import GazeboEntityPoseTracker
 from uav_control.common.runtime_performance import RateMeter
@@ -176,6 +178,8 @@ class InterceptEvaluatorNode(Node):
         )
         self.declare_parameter('gazebo_world_name', 'default')
         self.declare_parameter('gazebo_entity_diagnostics_enabled', False)
+        self.declare_parameter('gazebo_uav_diagnostics_enabled', False)
+        self.declare_parameter('gazebo_uav_entity_name', 'x500_mono_cam_0')
         self.declare_parameter('gazebo_target_entity_name', 'usv_target')
         self.declare_parameter('gazebo_visual_height_offset', 0.42)
         self.declare_parameter('gazebo_pause_timeout_ms', 250)
@@ -220,6 +224,13 @@ class InterceptEvaluatorNode(Node):
         )
         self.gazebo_pauser = None
         self.gazebo_entity_tracker = None
+        self.gazebo_uav_tracker = None
+        self.gazebo_uav_diagnostics_enabled = bool(self.get_parameter(
+            'gazebo_uav_diagnostics_enabled'
+        ).value)
+        self.gazebo_uav_entity_name = str(self.get_parameter(
+            'gazebo_uav_entity_name'
+        ).value)
         self.gazebo_entity_node = None
         self.gazebo_target_entity_name = str(
             self.get_parameter('gazebo_target_entity_name').value
@@ -233,13 +244,18 @@ class InterceptEvaluatorNode(Node):
         self.gazebo_entity_diagnostics_enabled = bool(self.get_parameter(
             'gazebo_entity_diagnostics_enabled'
         ).value)
-        if self.gazebo_entity_diagnostics_enabled:
+        if self.gazebo_entity_diagnostics_enabled or self.gazebo_uav_diagnostics_enabled:
             try:
                 from gz.msgs10.clock_pb2 import Clock as GazeboClock
                 from gz.msgs10.pose_v_pb2 import Pose_V
                 from gz.transport13 import Node as GazeboTransportNode
 
-                self.gazebo_entity_tracker = GazeboEntityPoseTracker()
+                if self.gazebo_entity_diagnostics_enabled:
+                    self.gazebo_entity_tracker = GazeboEntityPoseTracker()
+                if self.gazebo_uav_diagnostics_enabled:
+                    self.gazebo_uav_tracker = GazeboUavPoseTracker(
+                        model_name=self.gazebo_uav_entity_name,
+                    )
                 self.gazebo_entity_node = GazeboTransportNode()
                 clock_topic = f'/world/{world_name}/clock'
                 pose_topic = f'/world/{world_name}/pose/info'
@@ -261,6 +277,7 @@ class InterceptEvaluatorNode(Node):
                     )
             except (ImportError, RuntimeError, TypeError) as error:
                 self.gazebo_entity_tracker = None
+                self.gazebo_uav_tracker = None
                 self.gazebo_entity_node = None
                 self.get_logger().warn(
                     f'Gazebo entity diagnostics unavailable: {error}'
@@ -409,6 +426,14 @@ class InterceptEvaluatorNode(Node):
         self.runtime_performance = RuntimePerformanceAccumulator()
         self.terminal_pause_result = None
         self.writer = None
+        self.run_started_at = None
+        self.run_mission_id = None
+        self.intercept_started_at = None
+        self.intercept_result = None
+        self.run_metrics = None
+        self.last_run_sample_stamp = None
+        self.last_run_paths = None
+        self.last_run_summary = None
         self.result_published = False
         self.approach_phase = 'PREPARATION'
         self.terminal_approach_count = 0
@@ -440,23 +465,20 @@ class InterceptEvaluatorNode(Node):
 
     def gazebo_entity_clock_callback(self, message):
         """Keep the evaluator-only entity history in ROS system time."""
-        if self.gazebo_entity_tracker is None:
-            return
-        self.gazebo_entity_tracker.add_clock_anchor(
-            self._gazebo_stamp(message.sim),
-            self._gazebo_stamp(message.system),
-            self._now(),
-            time.monotonic(),
-        )
+        for tracker in (self.gazebo_entity_tracker, self.gazebo_uav_tracker):
+            if tracker is not None:
+                tracker.add_clock_anchor(
+                    self._gazebo_stamp(message.sim),
+                    self._gazebo_stamp(message.system),
+                    self._now(), time.monotonic(),
+                )
 
     def gazebo_entity_pose_callback(self, message):
         """Record the actual rendered target pose at its Gazebo sample time."""
-        if self.gazebo_entity_tracker is None:
-            return
         sim_stamp = self._gazebo_stamp(message.header.stamp)
         for pose in message.pose:
             name = str(pose.name)
-            if (
+            if self.gazebo_entity_tracker is not None and (
                 name == self.gazebo_target_entity_name
                 or name.rsplit('::', 1)[-1]
                 == self.gazebo_target_entity_name
@@ -470,7 +492,15 @@ class InterceptEvaluatorNode(Node):
                     ),
                     self._now(),
                 )
-                return
+            if (self.gazebo_uav_tracker is not None
+                    and self.gazebo_uav_tracker.matches_model(name)):
+                self.gazebo_uav_tracker.add_pose(
+                    sim_stamp,
+                    (pose.position.x, pose.position.y, pose.position.z),
+                    (pose.orientation.w, pose.orientation.x,
+                     pose.orientation.y, pose.orientation.z),
+                    self._now(),
+                )
 
     def uav_callback(self, message):
         try:
@@ -580,7 +610,7 @@ class InterceptEvaluatorNode(Node):
         self.pending_visual_observations.append((message, self._now()))
         self._drain_visual_observations()
 
-    def _drain_visual_observations(self):
+    def _drain_visual_observations(self, force=False):
         if self.writer is None:
             return
         pending = deque(maxlen=self.pending_visual_observations.maxlen)
@@ -596,13 +626,26 @@ class InterceptEvaluatorNode(Node):
                 self.truth_history.state_at(measurement_stamp)
                 if measurement_stamp > 0.0 else None
             )
-            if message.valid and truth is None:
-                latest_truth_stamp = self.truth_history.latest_stamp
-                if (
-                    latest_truth_stamp is None
-                    or measurement_stamp >= latest_truth_stamp - 0.5
-                ):
-                    pending.append((message, callback_receipt))
+            if (message.valid and truth is None and not force
+                    and self._now() - callback_receipt < 0.5):
+                pending.append((message, callback_receipt))
+                continue
+            # Evaluation references may arrive after the online observation.
+            # Wait a bounded interval for a causal bracket, never extrapolate.
+            heading_query = (
+                self.gazebo_uav_tracker.query_at(measurement_stamp)
+                if self.gazebo_uav_tracker is not None else None
+            )
+            entity_query = (
+                self.gazebo_entity_tracker.query_at(measurement_stamp)
+                if self.gazebo_entity_tracker is not None else None
+            )
+            if (message.valid and message.geometry_diagnostics_enabled
+                    and not force and self._now() - callback_receipt < 0.15
+                    and any(query is not None and query.status in (
+                        'EMPTY', 'AFTER_HISTORY', 'QUERY_GAP',
+                    ) for query in (heading_query, entity_query))):
+                pending.append((message, callback_receipt))
                 continue
             estimate = (
                 float(message.position.x),
@@ -734,6 +777,18 @@ class InterceptEvaluatorNode(Node):
                 geometry_residuals.body_error
                 if geometry_residuals else (math.nan,) * 3
             )
+            heading_record = heading_diagnostics(
+                message,
+                heading_query,
+                error_ned=error, entity_center_ned=entity_center,
+            )
+            if heading_record['heading_diagnostics_status'] != 'VALID':
+                heading_record.pop('px4_heading', None)
+            if self.gazebo_uav_diagnostics_enabled and self.gazebo_uav_tracker is None:
+                heading_record.update(
+                    gazebo_uav_diagnostics_enabled=True,
+                    heading_diagnostics_status='REFERENCE_UNAVAILABLE',
+                )
             covariance = list(message.covariance)
             self.writer.append_visual_event({
                 'measurement_stamp': measurement_stamp,
@@ -829,6 +884,7 @@ class InterceptEvaluatorNode(Node):
                 'valid_depth_ratio': float(message.valid_depth_ratio),
                 'target_range': target_range,
                 **image_pose_diagnostics(message),
+                **heading_record,
                 'view_angle': float(message.view_angle),
                 'geometry_diagnostics_enabled': bool(
                     message.geometry_diagnostics_enabled
@@ -1013,6 +1069,8 @@ class InterceptEvaluatorNode(Node):
         )
 
     def prediction_callback(self, message):
+        if self.writer is not None and int(message.mission_id) != self.run_mission_id:
+            return
         if message.valid:
             self.latest_prediction = message
 
@@ -1023,6 +1081,8 @@ class InterceptEvaluatorNode(Node):
         )
 
     def shadow_prediction_callback(self, message):
+        if self.writer is not None and int(message.mission_id) != self.run_mission_id:
+            return
         self._queue_prediction(
             'shadow_bctra',
             message,
@@ -1042,6 +1102,8 @@ class InterceptEvaluatorNode(Node):
         )
 
     def planner_callback(self, message):
+        if self.writer is not None and int(message.mission_id) != self.run_mission_id:
+            return
         self.latest_planner_diagnostic = message
         is_new = self.event_metrics.observe_planner(
             mission_id=message.mission_id,
@@ -1123,9 +1185,39 @@ class InterceptEvaluatorNode(Node):
                 },
             )
 
+    def _fresh_controller(self, now):
+        """Expose a cached diagnostic only within its decision-age limit."""
+        message = self.latest_controller
+        if message is None:
+            return None
+        if (int(message.mission_id) != self.run_mission_id
+                or not 0.0 <= now - _stamp_seconds(message.stamp) <= 0.125):
+            return None
+        return message
+
     def controller_callback(self, message):
+        if (self.writer is not None
+                and int(message.mission_id) != self.run_mission_id):
+            return
+        age = self._now() - _stamp_seconds(message.stamp)
+        if not 0.0 <= age <= 0.125:
+            self.latest_controller = None
+            return
+        if (self.latest_controller is not None
+                and _stamp_seconds(message.stamp)
+                < _stamp_seconds(self.latest_controller.stamp)):
+            return
         self.tracker_rate.observe(self._now())
         self.latest_controller = message
+        if self.writer is not None:
+            stamp = _stamp_seconds(message.stamp)
+            if 0.0 <= self._now() - stamp <= 0.125:
+                self.run_metrics.observe(
+                    self._now(), str(self.latest_mission.state_name),
+                    visible=bool(message.target_visible),
+                    locked=bool(message.target_locked),
+                    control_status=str(message.status),
+                )
         self.event_metrics.observe_controller(
             message.mission_id,
             message.plan_id,
@@ -1227,12 +1319,23 @@ class InterceptEvaluatorNode(Node):
             'gazebo_entity_diagnostics_enabled': (
                 self.gazebo_entity_diagnostics_enabled
             ),
+            'gazebo_uav_diagnostics_enabled': self.gazebo_uav_diagnostics_enabled,
+            'gazebo_uav_entity_name': self.gazebo_uav_entity_name,
             'gazebo_target_entity_name': self.gazebo_target_entity_name,
             'gazebo_visual_height_offset': self.gazebo_visual_height_offset,
         }
 
-    def _start_mission(self, mission_id, now):
-        self.evaluator.begin(mission_id, now)
+    def _start_run_artifacts(self, mission_id, now):
+        """Start run logging on accepted takeoff, before interception."""
+        if self.writer is not None:
+            self._finalize_run('MISSION_RESET', now)
+        self.evaluator.reset()
+        self.run_started_at = float(now)
+        self.run_mission_id = int(mission_id)
+        self.intercept_started_at = None
+        self.intercept_result = None
+        self.run_metrics = RunMetricAccumulator(now)
+        self.last_run_sample_stamp = None
         self.event_metrics = PlannerEventAccumulator()
         self.prediction_tracker.reset()
         self.vision_metrics = VisionMetricAccumulator()
@@ -1251,6 +1354,8 @@ class InterceptEvaluatorNode(Node):
         self.terminal_pause_result = None
         self.latest_tracker_rejection_reason = ''
         self.latest_planner_diagnostic = None
+        self.latest_prediction = None
+        self.latest_controller = None
         self.approach_phase = 'PREPARATION'
         self.terminal_approach_count = 0
         self.recovery_count = 0
@@ -1276,21 +1381,44 @@ class InterceptEvaluatorNode(Node):
         )
         self.result_published = False
 
+    def _start_intercept_evaluation(self, mission_id, now):
+        """Start the capture/timeout interval only after accepted Y."""
+        if (self.writer is None or self.run_mission_id != int(mission_id)
+                or self.intercept_started_at is not None):
+            return False
+        self.intercept_started_at = float(now)
+        self.evaluator.begin(mission_id, now)
+        self.last_synchronized_stamp = None
+        self.result_published = False
+        return True
+
     def mission_callback(self, message):
         previous_phase = (
             self.latest_mission.state_name if self.latest_mission else ''
         )
-        self.latest_mission = message
         now = self._now()
-        if (
-            message.intercept_requested
-            and (
-                self.evaluator.started_at is None
-                or int(message.mission_id) != self.evaluator.mission_id
-            )
-        ):
-            self._start_mission(int(message.mission_id), now)
         state_name = str(message.state_name)
+        mission_id = int(message.mission_id)
+        if ((self.run_mission_id is not None and mission_id < self.run_mission_id)
+                or (self.latest_mission is not None
+                    and mission_id < int(self.latest_mission.mission_id))):
+            return
+        if self.writer is not None and mission_id != self.run_mission_id:
+            if mission_id < self.run_mission_id:
+                return
+            self._finalize_run('MISSION_RESET', now)
+        self.latest_mission = message
+        if (state_name == 'TAKEOFF' and self.writer is None
+                and mission_id != self.run_mission_id):
+            self._start_run_artifacts(mission_id, now)
+        if self.writer is not None and mission_id == self.run_mission_id:
+            if message.intercept_requested:
+                self._start_intercept_evaluation(mission_id, now)
+            self.run_metrics.observe(now, state_name)
+            if previous_phase != state_name:
+                self._write_run_sample(now, transition=True)
+            if message.completed or state_name in ('ABORTED', 'CAPTURE', 'FAILURE'):
+                self._finalize_run(state_name, now)
         terminal_states = {
             'MINCO_READY', 'MINCO_TRACKING', 'TERMINAL_MINCO'
         }
@@ -1312,38 +1440,50 @@ class InterceptEvaluatorNode(Node):
         elif state_name in ('CAPTURE', 'FAILURE', 'ABORTED'):
             self.approach_phase = state_name
 
-    def _sample_row(self, now):
+    def _sample_row(self, now, metrics_available=None):
+        unavailable = KinematicState((math.nan,) * 3, (math.nan,) * 3)
+        uav = self.latest_uav or unavailable
+        truth = self.latest_truth or unavailable
+        if metrics_available is None:
+            metrics_available = self.latest_uav is not None and self.latest_truth is not None
         metrics = self.evaluator.instantaneous_metrics(
-            self.latest_uav,
-            self.latest_truth,
-        )
-        controller = self.latest_controller
+            uav, truth,
+        ) if metrics_available else (math.nan,) * 6
+        controller = self._fresh_controller(now)
         planner = self.latest_planner_diagnostic
         body_clearance = (
-            self.evaluator.body_contact_z - self.latest_uav.position[2]
+            self.evaluator.body_contact_z - uav.position[2]
         )
         self.minimum_body_clearance = min(
             self.minimum_body_clearance,
             body_clearance,
         )
         return {
-            'time': now - self.evaluator.started_at,
-            'mission_id': self.evaluator.mission_id,
+            'time': now - self.run_started_at,
+            'run_elapsed_time': now - self.run_started_at,
+            'intercept_elapsed_time': (
+                now - self.intercept_started_at
+                if self.intercept_started_at is not None else ''
+            ),
+            'intercept_started': self.intercept_started_at is not None,
+            'truth_available': bool(metrics_available),
+            'uav_available': self.latest_uav is not None,
+            'mission_id': self.run_mission_id,
             'phase': (
                 self.latest_mission.state_name if self.latest_mission else ''
             ),
-            'uav_x': self.latest_uav.position[0],
-            'uav_y': self.latest_uav.position[1],
-            'uav_z': self.latest_uav.position[2],
-            'uav_vx': self.latest_uav.velocity[0],
-            'uav_vy': self.latest_uav.velocity[1],
-            'uav_vz': self.latest_uav.velocity[2],
-            'target_x': self.latest_truth.position[0],
-            'target_y': self.latest_truth.position[1],
-            'target_z': self.latest_truth.position[2],
-            'target_vx': self.latest_truth.velocity[0],
-            'target_vy': self.latest_truth.velocity[1],
-            'target_vz': self.latest_truth.velocity[2],
+            'uav_x': uav.position[0],
+            'uav_y': uav.position[1],
+            'uav_z': uav.position[2],
+            'uav_vx': uav.velocity[0],
+            'uav_vy': uav.velocity[1],
+            'uav_vz': uav.velocity[2],
+            'target_x': truth.position[0],
+            'target_y': truth.position[1],
+            'target_z': truth.position[2],
+            'target_vx': truth.velocity[0],
+            'target_vy': truth.velocity[1],
+            'target_vz': truth.velocity[2],
             'distance': metrics[0],
             'horizontal_distance': metrics[1],
             'vertical_error': metrics[2],
@@ -1352,6 +1492,11 @@ class InterceptEvaluatorNode(Node):
             'approach_phase': self.approach_phase,
             'first_terminal_approach': self.terminal_approach_count == 1,
             'controller_status': controller.status if controller else '',
+            'bearing_approach_active': bool(
+                controller and controller.status == 'BEARING_APPROACH'),
+            'bearing_age_at_control': (
+                float(controller.source_age)
+                if controller and controller.status == 'BEARING_APPROACH' else math.inf),
             **{
                 name: getattr(controller, name, default)
                 for name, default in (
@@ -1658,21 +1803,98 @@ class InterceptEvaluatorNode(Node):
         summary['vision'] = self.vision_metrics.summary()
         return summary
 
-    def timer_callback(self):
-        if (
-            self.evaluator.started_at is None
-            or self.result_published
-            or self.latest_uav is None
-            or self.latest_truth is None
-        ):
+    def _write_run_sample(self, now, transition=False, synchronized=None):
+        """Write phase events and periodic rows even without target truth."""
+        if self.writer is None:
             return
+        if (not transition and self.last_run_sample_stamp is not None
+                and now <= self.last_run_sample_stamp):
+            return
+        original_uav, original_truth = self.latest_uav, self.latest_truth
+        if synchronized is not None:
+            _, self.latest_uav, self.latest_truth = synchronized
+        sample = self._sample_row(now, metrics_available=synchronized is not None)
+        sample['sample_kind'] = 'PHASE_TRANSITION' if transition else 'PERIODIC'
+        self.writer.append_sample(sample)
+        # Distance statistics use periodic rows, not duplicated phase events.
+        self.run_metrics.observe(
+            now, sample['phase'],
+            position=self.latest_uav.position if self.latest_uav else None,
+            estimated_distance=(
+                getattr(self._fresh_controller(now), 'target_distance', None)
+                if not transition else None
+            ),
+            evaluation_distance=sample['distance'] if not transition else None,
+            control_status=sample['controller_status'],
+        )
+        self.runtime_performance.observe(sample['distance'], {
+            **self.performance_values,
+            'tracker_hz': sample['tracker_hz'],
+            'tracker_callback_time': sample['tracker_callback_time'],
+            'planner_compute_time': sample['planner_compute_time'],
+        })
+        self.latest_uav, self.latest_truth = original_uav, original_truth
+        self.last_run_sample_stamp = now
+
+    def _finalize_run(self, reason, now=None):
+        """Close one run once on reset/end/shutdown, including X-only runs."""
+        if self.writer is None:
+            return self.last_run_paths
+        now = self._now() if now is None else float(now)
+        self._drain_visual_observations(force=True)
+        result = self.intercept_result
+        summary = self._summary(result) if result is not None else {
+            'outcome': 'ABORTED', 'failure_reason': str(reason),
+            'elapsed_time': (
+                now - self.intercept_started_at
+                if self.intercept_started_at is not None else 0.0
+            ),
+            'vision': self.vision_metrics.summary(),
+            **self.event_metrics.summary(0.0),
+        }
+        summary.update({
+            'run_started_at': self.run_started_at,
+            'intercept_started_at': self.intercept_started_at,
+            'intercept_started': self.intercept_started_at is not None,
+            'run_elapsed_time': max(now - self.run_started_at, 0.0),
+            'intercept_elapsed_time': (
+                max(now - self.intercept_started_at, 0.0)
+                if self.intercept_started_at is not None else None
+            ),
+            'run_end_reason': str(reason),
+            'truth_role': 'evaluation_only',
+            'run_metrics': self.run_metrics.summary(now),
+            'prediction_errors': self._prediction_summary(),
+            'runtime_performance_by_distance': self.runtime_performance.summary(),
+        })
+        self.last_run_summary = summary
+        self.last_run_paths = self.writer.finalize(summary)
+        self.writer = None
+        self.get_logger().info(
+            f'Run finalized: {reason} | artifacts={self.last_run_paths.csv_path}'
+        )
+        return self.last_run_paths
+
+    def timer_callback(self):
+        if self.writer is None:
+            return
+        run_now = self._now()
+        self._drain_visual_observations()
         synchronized = synchronize_histories(
             self.uav_history,
             self.truth_history,
         )
+        if (synchronized is not None
+                and not 0.0 <= run_now - synchronized[0] <= 0.25):
+            synchronized = None
+        self._write_run_sample(run_now, synchronized=synchronized)
+        if self.evaluator.started_at is None or self.result_published:
+            return
         if synchronized is None:
             return
-        now, self.latest_uav, self.latest_truth = synchronized
+        now, uav, truth = synchronized
+        if now < self.intercept_started_at:
+            return
         if (
             self.last_synchronized_stamp is not None
             and now <= self.last_synchronized_stamp + 1e-9
@@ -1681,22 +1903,9 @@ class InterceptEvaluatorNode(Node):
         self.last_synchronized_stamp = now
         result = self.evaluator.update(
             now,
-            self.latest_uav,
-            self.latest_truth,
+            uav,
+            truth,
         )
-        if self.writer is not None:
-            sample = self._sample_row(now)
-            self.writer.append_sample(sample)
-            runtime_metrics = dict(self.performance_values)
-            runtime_metrics.update({
-                'tracker_hz': sample['tracker_hz'],
-                'tracker_callback_time': sample['tracker_callback_time'],
-                'planner_compute_time': sample['planner_compute_time'],
-            })
-            self.runtime_performance.observe(
-                sample['distance'],
-                runtime_metrics,
-            )
         if result is None:
             return
         self.result_pub.publish(
@@ -1724,12 +1933,12 @@ class InterceptEvaluatorNode(Node):
                     ),
                 },
             )
-            paths = self.writer.finalize(self._summary(result))
             self.get_logger().info(
                 f'{result.outcome}: {result.reason} | '
                 f'minimum distance={result.minimum_distance:.3f} m | '
-                f'artifacts={paths.csv_path}'
+                f'run logging continues: {self.writer.paths.csv_path}'
             )
+        self.intercept_result = result
         self.result_published = True
 
 
@@ -1741,11 +1950,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        if node.writer is not None and not node.result_published:
-            node.writer.finalize({
-                'outcome': 'ABORTED',
-                'failure_reason': 'NODE_SHUTDOWN',
-                **node.event_metrics.summary(0.0),
-            })
+        node._finalize_run('NODE_SHUTDOWN')
         node.destroy_node()
         rclpy.shutdown()

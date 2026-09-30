@@ -154,7 +154,7 @@ def test_initial_sweep_stops_after_one_full_turn_through_yaw_wrap():
 
 
 def test_reacquire_alternates_expanding_arcs_and_finishes():
-    core = TargetVisibilityState()
+    core = TargetVisibilityState(VisibilityConfig(target_reacquire_timeout=1000.))
     lock(core)
     now = lose(core)
     yaw = 0.0
@@ -174,14 +174,15 @@ def test_reacquire_alternates_expanding_arcs_and_finishes():
     assert decision.yaw_rate == 0.0
 
 
-def test_reacquire_timeout_is_safe_wait_while_finite_yaw_scan_continues():
+def test_reacquire_timeout_stops_scan_in_safe_wait():
     core = TargetVisibilityState()
     lock(core)
     now = lose(core)
     tick(core, now)
     decision = tick(core, now + 2.01, yaw=0.4)
     assert decision.state == 'SAFE_WAIT'
-    assert decision.yaw_rate != 0.0
+    assert decision.yaw_rate == 0.0
+    assert decision.search_direction == 0
 
 
 @pytest.mark.parametrize('sign', [-1, 1])

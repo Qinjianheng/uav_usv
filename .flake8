@@ -1,0 +1,3 @@
+[flake8]
+# Match ROS ament_flake8's existing 99-character package standard.
+max-line-length = 99

@@ -1,0 +1,20 @@
+--- a/ROMFS/px4fmu_common/init.d-posix/rcS
++++ b/ROMFS/px4fmu_common/init.d-posix/rcS
+@@ -245,6 +245,7 @@
+ # only start the simulator if not in replay mode, as both control the lockstep time
+ if ! replay tryapplyparams
+ then
++	. px4-rc.gzmag_enu || exit 1
+ 	. px4-rc.simulator
+ fi
+ 
+--- a/ROMFS/px4fmu_common/init.d-posix/CMakeLists.txt
++++ b/ROMFS/px4fmu_common/init.d-posix/CMakeLists.txt
+@@ -37,6 +37,7 @@
+ 	px4-rc.mavlink
+ 	px4-rc.simulator
+ 	px4-rc.gzsim
++	px4-rc.gzmag_enu
+ 	px4-rc.jmavsim
+ 	px4-rc.mavlinksim
+ 	px4-rc.sihsim

@@ -258,6 +258,25 @@ class FlightGuidanceCore:
             * (desired_position[1] - state.position[1]),
         )
 
+    def bearing_approach(self, state, heading, speed, dt):
+        """
+        Advance along the UAV heading while holding flight altitude.
+
+        The caller grants fresh, centered RGB authority. No target position,
+        depth, route, prediction, or truth is consumed here.
+        """
+        if not all(math.isfinite(value) for value in (heading, speed, dt)):
+            return self._hold(state)
+        speed = min(max(float(speed), 0.0), self.maximum_horizontal_speed)
+        if self.previous_velocity is None:
+            self.previous_velocity = tuple(state.velocity)
+        return self._velocity_command(
+            state,
+            (speed * math.cos(heading), speed * math.sin(heading),
+             self.altitude_velocity_gain * (self.flight_altitude-state.position[2])),
+            dt, takeoff_complete=False, target_available=False,
+        )
+
     def approach_target(self, state, target):
         """Return a moving preparation point sized by vertical reachability."""
         contact_z = self.sea_surface_z - self.approach_contact_clearance
