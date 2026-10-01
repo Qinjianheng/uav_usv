@@ -16,6 +16,29 @@ def parameters(config, node):
     return config[node]['ros__parameters']
 
 
+def test_online_small_matrix_nodes_start_with_one_blas_thread(monkeypatch, tmp_path):
+    import importlib.util
+    from launch import LaunchContext
+    from launch.actions import SetEnvironmentVariable
+    from launch_ros.actions import Node
+
+    path = CONFIG_FILE.parent.parent / 'launch/modular_intercept.launch.py'
+    spec = importlib.util.spec_from_file_location('modular_runtime_limits', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    context = LaunchContext()
+    context.environment['OPENBLAS_NUM_THREADS'] = '12'
+    context.environment['OMP_NUM_THREADS'] = '12'
+    for action in module.generate_launch_description().entities:
+        if isinstance(action, Node):
+            break
+        if isinstance(action, SetEnvironmentVariable):
+            action.execute(context)
+    assert context.environment['OPENBLAS_NUM_THREADS'] == '1'
+    assert context.environment['OMP_NUM_THREADS'] == '1'
+
+
 def test_shared_dynamic_and_safety_limits_are_synchronized():
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     planner = parameters(config, 'intercept_planner_node')

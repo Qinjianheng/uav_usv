@@ -258,23 +258,48 @@ class FlightGuidanceCore:
             * (desired_position[1] - state.position[1]),
         )
 
-    def bearing_approach(self, state, heading, speed, dt):
+    def bearing_approach(self, state, heading, speed, dt, bearing=0.0):
         """
-        Advance along the UAV heading while holding flight altitude.
+        Advance along the fresh RGB ray while holding flight altitude.
 
-        The caller grants fresh, centered RGB authority. No target position,
+        The caller grants fresh RGB direction authority. No target position,
         depth, route, prediction, or truth is consumed here.
         """
-        if not all(math.isfinite(value) for value in (heading, speed, dt)):
+        if (not all(math.isfinite(value) for value in (heading, speed, dt, bearing))
+                or abs(bearing) >= math.pi / 2.0):
             return self._hold(state)
         speed = min(max(float(speed), 0.0), self.maximum_horizontal_speed)
+        speed *= math.cos(bearing)
+        direction = heading + bearing
         if self.previous_velocity is None:
             self.previous_velocity = tuple(state.velocity)
         return self._velocity_command(
             state,
-            (speed * math.cos(heading), speed * math.sin(heading),
+            (speed * math.cos(direction), speed * math.sin(direction),
              self.altitude_velocity_gain * (self.flight_altitude-state.position[2])),
             dt, takeoff_complete=False, target_available=False,
+        )
+
+    def search_velocity(self, state, anchor, dt):
+        """Brake without target inputs, then servo the stopped search anchor."""
+        if self.previous_velocity is None:
+            self.previous_velocity = tuple(state.velocity)
+        horizontal = ((0.0, 0.0) if anchor is None else (
+            self.follow_position_gain * (anchor[0] - state.position[0]),
+            self.follow_position_gain * (anchor[1] - state.position[1]),
+        ))
+        altitude = self.flight_altitude if anchor is None else anchor[2]
+        command = self._velocity_command(
+            state,
+            (horizontal[0], horizontal[1],
+             self.altitude_velocity_gain * (altitude - state.position[2])),
+            dt, takeoff_complete=False, target_available=False,
+        )
+        return command if anchor is None else FlightGuidanceCommand(
+            mode=command.mode, position=tuple(anchor), velocity=command.velocity,
+            acceleration=command.acceleration, takeoff_complete=False,
+            far_guidance_available=False, safety_state=command.safety_state,
+            safety_margin=command.safety_margin,
         )
 
     def approach_target(self, state, target):
@@ -409,6 +434,8 @@ class FlightGuidanceCore:
                 self.altitude_velocity_gain
                 * (self.flight_altitude - state.position[2]),
             )
+            if self.previous_velocity is None:
+                self.previous_velocity = tuple(state.velocity)
             return self._velocity_command(
                 state,
                 desired,

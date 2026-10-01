@@ -212,4 +212,8 @@ def test_follow_one_or_two_invalid_rgb_frames_continue_only_with_fresh_kf():
     node.latest_state = replace(node.latest_state, stamp=10.26)
     node._ros_seconds = lambda: 10.26
     node.timer_callback()
-    assert node.diagnostics[-1][1] == 'REACQUIRE'
+    assert node.diagnostics[-1][1] == 'VISUAL_BRAKING'
+    assert node.visibility_decision.state == 'REACQUIRE'
+    assert not node.visibility_decision.locked
+    assert not node.diagnostics[-1][0].far_guidance_available
+    assert node.diagnostics[-1][0].mode == 'VELOCITY'

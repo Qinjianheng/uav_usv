@@ -1014,6 +1014,28 @@ def test_rgb_depth_pairs_by_acquisition_time_despite_transport_delay():
     assert paired_color.raw_stamp == paired_depth.raw_stamp == 5.0
 
 
+def test_aligned_sensor_config_does_not_consume_previous_depth_frame():
+    baseline = (Path(__file__).resolve().parents[2]
+                / 'uav_usv_bringup/config/baseline.yaml')
+    parameters = yaml.safe_load(baseline.read_text())[
+        'rgbd_target_localizer']['ros__parameters']
+    pairs = RgbDepthPairBuffer(parameters['maximum_rgb_depth_skew'])
+    color, old_depth, matching_depth = object(), object(), object()
+    pairs.add('depth', old_depth, 5.0, 10.0)
+    pairs.add('color', color, 5.052, 10.06)
+
+    paired_color, paired_depth, reason = pairs.pop_pair()
+
+    assert paired_color is None and paired_depth is None
+    assert reason == 'DEPTH_FRAME_UNMATCHED'
+    pairs.add('depth', matching_depth, 5.052, 10.07)
+    paired_color, paired_depth, reason = pairs.pop_pair()
+    assert reason == ''
+    assert paired_color.message is color
+    assert paired_depth.message is matching_depth
+    assert paired_color.raw_stamp == paired_depth.raw_stamp == 5.052
+
+
 def test_rgb_depth_pairing_selects_closest_acquisition_times():
     pairs = RgbDepthPairBuffer(maximum_skew=0.1, capacity=4)
     early_color = object()

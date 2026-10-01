@@ -206,8 +206,16 @@ if ! cmp -s "${WS_ROOT}/patches/px4/px4-rc.gzmag_enu" "${PX4_ENU_INIT}" \
     echo "See patches/px4/gz_magnetic_initialization.patch and the repair report." >&2
     exit 1
 fi
-# Preserve imported parameters before the selected zero-bias simulator mode
-# initializes its own magnetic offsets. Do not delete/reset the parameter DB.
+PX4_GNSS_INIT="${PX4_ROOT}/build/px4_sitl_default/rootfs/etc/init.d-posix/px4-rc.gzgnss"
+if ! cmp -s "${WS_ROOT}/patches/px4/px4-rc.gzgnss" "${PX4_GNSS_INIT}" \
+    || ! grep -Fq '. px4-rc.gzgnss || exit 1' \
+        "${PX4_ROOT}/build/px4_sitl_default/rootfs/etc/init.d-posix/rcS"; then
+    echo "PX4 needs the Gazebo no-delay GNSS startup hook and rebuild." >&2
+    echo "See patches/px4/gz_gnss_initialization.patch and px4-rc.gzgnss." >&2
+    exit 1
+fi
+# Preserve imported parameters before the selected simulator profile
+# initializes magnetic offsets and GNSS delay. Do not reset the parameter DB.
 PX4_PARAMETER_BACKUP_ROOT="${WS_ROOT}/data/experiments/px4_parameter_backups"
 mkdir -p "${PX4_PARAMETER_BACKUP_ROOT}"
 PX4_PARAMETER_BACKUP_DIR="$(mktemp -d "${PX4_PARAMETER_BACKUP_ROOT}/enu_XXXXXX")"
@@ -350,6 +358,7 @@ printf '%s\n' \"\${BASHPID}\" > '${LAB_SESSION_DIR}/px4.pid' &&
 source '${PX4_GZ_ENV}' &&
 export GZ_SIM_SERVER_CONFIG_PATH='${LAB_GZ_SERVER_CONFIG}' &&
 export PX4_GZ_MAGNETOMETER_ENU=1 &&
+export PX4_GZ_GNSS_NO_DELAY=1 &&
 export GZ_SIM_RESOURCE_PATH='${CUSTOM_GZ_MODELS}':\${GZ_SIM_RESOURCE_PATH:-} &&
 export PX4_GZ_MODELS='${CUSTOM_GZ_MODELS}' &&
 export PX4_GZ_STANDALONE=1 &&

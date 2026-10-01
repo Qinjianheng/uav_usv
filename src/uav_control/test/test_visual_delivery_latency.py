@@ -41,6 +41,20 @@ def observation(stamp):
     return message
 
 
+def test_control_images_request_retransmission_without_unbounded_backlog():
+    from rclpy.qos import HistoryPolicy, ReliabilityPolicy
+    from uav_control.perception import rgbd_target_localizer as localizer
+    from uav_control.perception import target_bearing_node as bearing
+
+    factory = getattr(localizer, 'aligned_camera_qos', None)
+    assert callable(factory), 'Control images need reliable delivery from image_bridge'
+    assert getattr(bearing, 'aligned_camera_qos', None) is factory
+    qos = factory()
+    assert qos.reliability == ReliabilityPolicy.RELIABLE
+    assert qos.history == HistoryPolicy.KEEP_LAST
+    assert 2 <= qos.depth <= 8
+
+
 def test_kf_publishes_new_measurement_without_waiting_for_timer():
     now = [10.025]
     node, states = filter_node(now)
@@ -152,5 +166,8 @@ def test_delivery_reaches_follow_and_translation_with_original_age_gate():
     controller.latest_kf_message = states[-1]
     controller.latest_state = replace(state, stamp=now[0])
     controller.timer_callback()
-    assert controller.diagnostics[-1][1] == 'REACQUIRE'
+    assert controller.diagnostics[-1][1] == 'VISUAL_BRAKING'
+    assert controller.visibility_decision.state == 'REACQUIRE'
+    assert controller.latest_target_state is None
+    assert not controller.diagnostics[-1][0].far_guidance_available
     assert controller.diagnostics[-1][0].velocity == (0., 0., 0.)

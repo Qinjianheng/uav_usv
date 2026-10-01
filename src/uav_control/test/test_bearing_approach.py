@@ -17,7 +17,7 @@ from test_run_logging import node_fixture, phase, csv_rows
 from uav_usv_interfaces.msg import MissionState
 
 
-def approach_node():
+def approach_node(bearing=.05):
     node, state = runnable_follow_node()
     node.mission_state = MissionState.TARGET_ACQUIRE
     node.mission_state_name = 'TARGET_ACQUIRE'
@@ -28,7 +28,7 @@ def approach_node():
     node.bearing_approach_active = False
     node.visibility = TargetVisibilityState()
     for value in (10., 10.1, 10.2):
-        node.visibility.observe(value, .05, True, value)
+        node.visibility.observe(value, bearing, True, value)
     node.offboard_modes = []
     node._publish_offboard_mode = lambda timestamp, velocity_control: (
         node.offboard_modes.append(velocity_control))
@@ -41,8 +41,8 @@ def test_rgb_alone_approaches_and_logs_without_claiming_position_lock():
     command, status = node.diagnostics[-1]
     assert status == 'BEARING_APPROACH'
     assert command.mode == 'VELOCITY'
-    assert command.velocity[0] == pytest.approx(.15)  # 3 m/s² first 50 ms
-    assert command.velocity[1:] == (0., 0.)
+    assert command.velocity == pytest.approx((.149812539, .007496875, 0.))
+    assert math.hypot(*command.velocity[:2]) == pytest.approx(.15)  # 3m/s² * 50ms
     assert node.offboard_modes[-1]
     assert all(math.isnan(v) for v in node.setpoint_pub.messages[-1].position)
     assert node.yaw_owner == 'VISION'
@@ -51,7 +51,7 @@ def test_rgb_alone_approaches_and_logs_without_claiming_position_lock():
 
 
 @pytest.mark.parametrize('condition', [
-    'stale', 'invalid', 'off_center', 'two_frames', 'disabled', 'terminal',
+    'stale', 'invalid', 'behind_camera', 'two_frames', 'disabled', 'terminal',
     'intercept', 'recovery', 'low_height', 'takeoff', 'safe_wait',
 ])
 def test_rgb_approach_inhibited_on_loss_or_other_control_authority(condition):
@@ -59,8 +59,8 @@ def test_rgb_approach_inhibited_on_loss_or_other_control_authority(condition):
     if condition == 'stale':
         node.latest_state = replace(state, stamp=10.326)
         node._ros_seconds = lambda: 10.326
-    elif condition in ('invalid', 'off_center'):
-        node.visibility.observe(10.201, .3 if condition == 'off_center' else 0.,
+    elif condition in ('invalid', 'behind_camera'):
+        node.visibility.observe(10.201, math.pi/2. if condition == 'behind_camera' else 0.,
                                 condition != 'invalid', 10.201)
         node.latest_state = replace(state, stamp=10.201)
         node._ros_seconds = lambda: 10.201
@@ -89,7 +89,7 @@ def test_rgb_approach_inhibited_on_loss_or_other_control_authority(condition):
     assert not node.bearing_approach_active
 
 
-def test_approach_stop_anchors_new_position_and_restarts_from_actual_velocity():
+def test_approach_stop_brakes_then_resumes_without_position_mode():
     node, state = approach_node()
     node.timer_callback()
     node.visibility.observe(10.21, 0., False, 10.21)
@@ -98,6 +98,8 @@ def test_approach_stop_anchors_new_position_and_restarts_from_actual_velocity():
     node.timer_callback()
     assert node.diagnostics[-1][0].position == (4., 2., -5.)
     assert node.diagnostics[-1][0].velocity == (0., 0., 0.)
+    assert node.diagnostics[-1][0].mode == 'VELOCITY'
+    assert node.search_hold_position is None
     for value in (10.22, 10.27, 10.32):
         node.visibility.observe(value, .05, True, value)
     node._ros_seconds = lambda: 10.32

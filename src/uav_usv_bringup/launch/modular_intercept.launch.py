@@ -4,7 +4,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -29,6 +29,13 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        # Online KF/MINCO matrices are small. A BLAS worker pool was consuming
+        # several cores and starving image delivery despite ~3 ms localization.
+        # Set limits before child processes import their numerical libraries.
+        SetEnvironmentVariable('OPENBLAS_NUM_THREADS', '1'),
+        SetEnvironmentVariable('OMP_NUM_THREADS', '1'),
+        SetEnvironmentVariable('MKL_NUM_THREADS', '1'),
+        SetEnvironmentVariable('BLIS_NUM_THREADS', '1'),
         DeclareLaunchArgument(
             'config_file',
             default_value=default_config,

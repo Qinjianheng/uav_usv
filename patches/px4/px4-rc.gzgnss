@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Gazebo navsat publishes current measurements without a receiver delay.
+# Configure only its identified receiver before sensors/EKF start. The device
+# ID (11469068) is SIMULATION / DRV_GPS_DEVTYPE_SIM / bus 1 / address 1.
+if [ "${PX4_GZ_GNSS_NO_DELAY:-0}" = "1" ] && param compare -s SIM_GZ_EN 1 && param compare -s SIM_GZ_EN_GPS 1
+then
+    gzgnss_slot=
+    for gzgnss_candidate in 0 1
+    do
+        if param compare -s "SENS_GPS${gzgnss_candidate}_ID" 11469068
+        then
+            gzgnss_slot="${gzgnss_candidate}"
+            break
+        fi
+    done
+    # PX4 falls back to the uORB instance when both IDs are unconfigured.
+    # This standalone, single-GNSS model registers its receiver at instance 0.
+    if [ -z "${gzgnss_slot}" ] && param compare -s SENS_GPS0_ID 0 && param compare -s SENS_GPS1_ID 0
+    then
+        gzgnss_slot=0
+    fi
+    if [ -z "${gzgnss_slot}" ]
+    then
+        echo "Gazebo GNSS no-delay profile: cannot identify simulated receiver slot" >&2
+        return 1
+    fi
+    echo "Gazebo GNSS without receiver delay: initializing slot ${gzgnss_slot} delay"
+    param show "SENS_GPS${gzgnss_slot}_DELAY"
+    param set "SENS_GPS${gzgnss_slot}_DELAY" 0 || return 1
+fi

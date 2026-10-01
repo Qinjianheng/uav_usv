@@ -148,8 +148,14 @@ class MissionManagerNode(Node):
             )
             self._publish()
         else:
+            reason = (
+                ' | Y requires FOLLOW (or transient TARGET_LOCK) and a fresh visual/KF lock; '
+                'wait for FOLLOW + target_locked=true, then press Y again'
+                if command == 'Y' else ''
+            )
             self.get_logger().warn(
-                f'{command!r} rejected in {self.core.phase.name}'
+                f'{command!r} rejected in {self.core.phase.name} | '
+                f'target_locked={self.core.target_locked}{reason}'
             )
 
     def flight_ready_callback(self, message):

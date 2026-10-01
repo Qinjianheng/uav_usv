@@ -205,7 +205,9 @@ def test_search_hold_xyz_does_not_follow_measured_drift():
         state, position=(2., 3., -4.),
     ))
     assert first.position == second.position == (1., 2., -5.)
-    assert second.velocity == (0., 0., 0.)
+    assert second.mode == 'VELOCITY'
+    assert second.velocity == pytest.approx((-.106066017, -.106066017, -.15))
+    assert not second.far_guidance_available
 
 
 def test_single_yaw_arbiter_limits_search_then_vision_and_recovery():

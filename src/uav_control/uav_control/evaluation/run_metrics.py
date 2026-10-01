@@ -36,6 +36,7 @@ class RunMetricAccumulator:
         self.search_xy_drift_max = None
         self.control_status = ''
         self.bearing_approach_duration = 0.
+        self.visual_braking_duration = 0.
 
     def observe(
         self, now, phase, *, visible=None, locked=None, position=None,
@@ -48,6 +49,8 @@ class RunMetricAccumulator:
             return False
         if self.control_status == 'BEARING_APPROACH':
             self.bearing_approach_duration += now - self.last_stamp
+        if self.control_status == 'VISUAL_BRAKING':
+            self.visual_braking_duration += now - self.last_stamp
         self.last_stamp = now
         phase = str(phase)
         if control_status is not None:
@@ -86,7 +89,9 @@ class RunMetricAccumulator:
             ):
                 if value is not None and math.isfinite(value) and value >= 0.:
                     target.append(float(value))
-        if phase not in self.SEARCH_PHASES or self.control_status == 'BEARING_APPROACH':
+        if phase not in self.SEARCH_PHASES or self.control_status in (
+            'BEARING_APPROACH', 'VISUAL_BRAKING',
+        ):
             self.search_anchor = None
         elif position is not None and all(math.isfinite(v) for v in position):
             if self.search_anchor is None:
@@ -114,6 +119,8 @@ class RunMetricAccumulator:
             'follow_duration': durations.get('FOLLOW', 0.),
             'bearing_approach_duration': self.bearing_approach_duration + (
                 now - self.last_stamp if self.control_status == 'BEARING_APPROACH' else 0.),
+            'visual_braking_duration': self.visual_braking_duration + (
+                now - self.last_stamp if self.control_status == 'VISUAL_BRAKING' else 0.),
             'time_to_first_visible': (
                 self.first_visible_at - self.started_at
                 if self.first_visible_at is not None else None

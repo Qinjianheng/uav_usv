@@ -1,0 +1,20 @@
+--- a/ROMFS/px4fmu_common/init.d-posix/rcS
++++ b/ROMFS/px4fmu_common/init.d-posix/rcS
+@@ -246,6 +246,7 @@
+ if ! replay tryapplyparams
+ then
+ 	. px4-rc.gzmag_enu || exit 1
++	. px4-rc.gzgnss || exit 1
+ 	. px4-rc.simulator
+ fi
+ 
+--- a/ROMFS/px4fmu_common/init.d-posix/CMakeLists.txt
++++ b/ROMFS/px4fmu_common/init.d-posix/CMakeLists.txt
+@@ -38,6 +38,7 @@
+ 	px4-rc.simulator
+ 	px4-rc.gzsim
+ 	px4-rc.gzmag_enu
++	px4-rc.gzgnss
+ 	px4-rc.jmavsim
+ 	px4-rc.mavlinksim
+ 	px4-rc.sihsim

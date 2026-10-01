@@ -1204,8 +1204,8 @@ class TrajectoryTrackerNode(Node):
         self.search_state = decision.state
         return decision
 
-    def _search_or_recovery_command(self, current):
-        """Preempt stale descent and capture a fixed search XYZ anchor."""
+    def _search_or_recovery_command(self, current, dt=None):
+        """Preempt stale descent; brake pre-intercept motion before anchoring."""
         self.pending_trajectory = None
         self.tracker.active_trajectory = None
         search_height = self.visibility.config.target_search_enable_height
@@ -1220,10 +1220,28 @@ class TrajectoryTrackerNode(Node):
             self.safe_recovery_latched = True
             self.search_state = 'SAFE_RECOVERY'
             self.search_hold_position = None
+            # Recovery uses the tracker's command owner. A later flight-guidance
+            # handover must start from measured velocity, not a cached approach.
+            self.flight_guidance.previous_velocity = None
             return self.tracker.recovery_command(
                 current, recovery_clearance=max(
                     search_height, self.tracker.recovery_clearance,
                 ),
+            )
+        if not getattr(self, 'intercept_requested', False):
+            previous = self.flight_guidance.previous_velocity
+            command_speed = (math.hypot(*previous[:2]) if previous is not None
+                             else math.hypot(*current.velocity[:2]))
+            if (self.search_hold_position is None
+                    and math.hypot(*current.velocity[:2]) <= 0.1
+                    and command_speed <= 0.1):
+                self.search_hold_position = anchored_search_hold(
+                    None, current.position, self.tracker.sea_surface_z, search_height,
+                )
+            return self.flight_guidance.search_velocity(
+                FlightKinematicState(current.position, current.velocity),
+                self.search_hold_position,
+                self.tracker.control_dt if dt is None else dt,
             )
         self.search_hold_position = anchored_search_hold(
             self.search_hold_position, current.position,
@@ -1237,10 +1255,14 @@ class TrajectoryTrackerNode(Node):
         """Keep RGB approach separate from locked FOLLOW and Y/MINCO authority."""
         return bool(
             getattr(self, 'bearing_approach_enabled', False)
-            and self.mission_state in (MissionState.TARGET_ACQUIRE, MissionState.REACQUIRE)
+            and self.mission_state in (
+                MissionState.TARGET_ACQUIRE, MissionState.TARGET_LOCK,
+                MissionState.REACQUIRE, MissionState.FOLLOW,
+            )
+            and not (self.mission_state == MissionState.FOLLOW
+                     and self.visibility_decision.locked)
             and not getattr(self, 'intercept_requested', False)
             and not self.safe_recovery_latched and not self.terminal_mode_latched
-            and self.latest_target_state is None
             and current.position[2] <= (self.flight_guidance.flight_altitude
                                         + self.flight_guidance.takeoff_tolerance)
             and abs(current.velocity[2]) <= self.flight_guidance.takeoff_tolerance
@@ -1251,12 +1273,23 @@ class TrajectoryTrackerNode(Node):
         """One arbiter owns yaw for every final PX4 setpoint."""
         decision = self.visibility_decision
         height = self.tracker.sea_surface_z - current.position[2]
+        visual_intercept = (
+            getattr(self, 'intercept_requested', False)
+            and self.mission_state in (
+                MissionState.MINCO_READY, MissionState.MINCO_TRACKING,
+                MissionState.TERMINAL_MINCO,
+            )
+            and decision is not None and decision.locked and decision.visible
+        )
         inhibited = (
             self.mission_state in (
                 MissionState.INIT, MissionState.GROUND_HOLD,
                 *self.TERMINAL_STATES,
             ) or self.safe_recovery_latched
-            or height < self.visibility.config.target_search_enable_height
+            # This is a launch/search gate. A fresh, locked terminal descent
+            # still needs visual yaw below it to keep the target in the camera.
+            or (height < self.visibility.config.target_search_enable_height
+                and not visual_intercept)
         )
         rate = 0.0
         self.yaw_owner = 'HOLD'
@@ -1320,7 +1353,6 @@ class TrajectoryTrackerNode(Node):
 
         dt = min(dt, self.tracker.maximum_command_dt)
         decision = self._update_visibility(current, now, dt)
-        was_bearing_approach = getattr(self, 'bearing_approach_active', False)
         self.bearing_approach_active = False
         target_yaw = self.current_heading
 
@@ -1391,10 +1423,10 @@ class TrajectoryTrackerNode(Node):
             self.pending_trajectory = None
             self.tracker.active_trajectory = None
             self.search_hold_position = None
-            if not was_bearing_approach:
-                self.flight_guidance.previous_velocity = tuple(current.velocity)
             command = self.flight_guidance.bearing_approach(
-                flight_state, self.current_heading, self.bearing_approach_speed, dt)
+                flight_state, self.current_heading, self.bearing_approach_speed, dt,
+                bearing=self.visibility.last_valid_image_bearing,
+            )
             self.bearing_approach_active = True
             self._publish_offboard_mode(timestamp_us, velocity_control=True)
             setpoint = flight_command_to_setpoint(command, timestamp_us)
@@ -1408,14 +1440,19 @@ class TrajectoryTrackerNode(Node):
         ))):
             self._publish_bool(self.flight_ready_pub, False)
             self._request_flight_mode()
-            command = self._search_or_recovery_command(current)
-            self._publish_offboard_mode(timestamp_us, velocity_control=False)
+            command = self._search_or_recovery_command(current, dt)
+            self._publish_offboard_mode(
+                timestamp_us, velocity_control=getattr(command, 'mode', '') == 'VELOCITY',
+            )
             if hasattr(command, 'mode'):
                 setpoint = flight_command_to_setpoint(command, timestamp_us)
             else:
                 setpoint = command_to_setpoint(command, timestamp_us)
             self._publish_bool(self.far_guidance_pub, False)
             status = self.search_state
+            if (getattr(command, 'mode', '') == 'VELOCITY'
+                    and self.search_hold_position is None):
+                status = 'VISUAL_BRAKING'
         elif self.mission_state in (
             MissionState.TAKEOFF,
             MissionState.FOLLOW,
@@ -1468,8 +1505,11 @@ class TrajectoryTrackerNode(Node):
                     prediction.observation_stamp)) <= self.maximum_state_age
             )
             if not prediction_fresh:
-                command = self._search_or_recovery_command(current)
-                self._publish_offboard_mode(timestamp_us, velocity_control=False)
+                command = self._search_or_recovery_command(current, dt)
+                self._publish_offboard_mode(
+                    timestamp_us,
+                    velocity_control=getattr(command, 'mode', '') == 'VELOCITY',
+                )
                 setpoint = (flight_command_to_setpoint(command, timestamp_us)
                             if hasattr(command, 'mode')
                             else command_to_setpoint(command, timestamp_us))

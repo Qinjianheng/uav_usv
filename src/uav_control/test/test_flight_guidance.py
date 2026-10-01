@@ -81,7 +81,7 @@ def test_follow_tracks_behind_four_mps_target_within_limits():
 
     command = guidance.command(
         'FOLLOW',
-        state((8.0, -5.0, -5.0)),
+        state((8.0, -5.0, -5.0), (0.0, 4.0, 0.0)),
         target,
         0.05,
     )
@@ -107,6 +107,11 @@ def test_default_far_guidance_uses_six_point_two_mps_soft_limit():
         state((0.0, 0.0, -5.0)),
         target,
         0.05,
+    )
+
+    assert command.velocity[0] == pytest.approx(5.0)
+    command = guidance.command(
+        'FAR_GUIDANCE', state((0.0, 0.0, -5.0)), target, 0.05,
     )
 
     assert command.velocity[0] == pytest.approx(6.2)

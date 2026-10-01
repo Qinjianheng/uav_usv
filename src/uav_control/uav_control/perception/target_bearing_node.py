@@ -16,11 +16,10 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 from .front_tof_monitor import camera_intrinsics, red_pixel_mask
-from .rgbd_target_localizer import GazeboImageClockMapper
+from .rgbd_target_localizer import GazeboImageClockMapper, aligned_camera_qos
 
 
 @dataclass(frozen=True)
@@ -221,7 +220,7 @@ class TargetBearingNode(Node):
         )
         self.color_subscription = self.create_subscription(
             Image, str(values['color_topic']), self.color_callback,
-            qos_profile_sensor_data,
+            aligned_camera_qos(),
         )
         from gz.msgs10.clock_pb2 import Clock as GazeboClock
         from gz.transport13 import Node as GazeboTransportNode

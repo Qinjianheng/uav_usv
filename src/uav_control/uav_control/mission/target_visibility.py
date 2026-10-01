@@ -85,6 +85,7 @@ class TargetVisibilityState:
         self._last_position_stamp = None
         self._latest_bearing_valid = False
         self._centered_stamps = deque(maxlen=self.config.target_lock_min_frames)
+        self._direction_stamps = deque(maxlen=self.config.target_lock_min_frames)
         self._locked = False
         self._loss_started_at = None
         self._recovery_latched = False
@@ -149,6 +150,7 @@ class TargetVisibilityState:
         if not valid:
             self.consecutive_valid_frames = 0
             self._centered_stamps.clear()
+            self._direction_stamps.clear()
             self.consecutive_lost_frames += 1
             if self._loss_started_at is None:
                 self._loss_started_at = stamp
@@ -162,6 +164,12 @@ class TargetVisibilityState:
         self._loss_started_at = None
         self._search_started_at = None
         self._clear_scan()
+        if abs(bearing) < math.pi / 2.0:
+            if self._direction_stamps and not self._fresh(self._direction_stamps[-1], stamp):
+                self._direction_stamps.clear()
+            self._direction_stamps.append(stamp)
+        else:
+            self._direction_stamps.clear()
         if abs(bearing) <= self.config.target_lock_max_bearing:
             if self._centered_stamps and not self._fresh(self._centered_stamps[-1], stamp):
                 self._centered_stamps.clear()
@@ -186,13 +194,13 @@ class TargetVisibilityState:
                 and len(self._centered_stamps) >= self.config.target_lock_min_frames)
 
     def bearing_approach_ready(self, now, maximum_age):
-        """Grant RGB-only motion after distinct centered frames, never a 3D lock."""
+        """Grant direction motion from fresh RGB frames independently of centered lock."""
         stamp = self.last_valid_bearing_stamp
         return bool(
             self._latest_bearing_valid and stamp is not None
             and 0.0 <= now-stamp <= min(maximum_age, self.config.target_lock_max_age)
-            and abs(self.last_valid_image_bearing) <= self.config.target_lock_max_bearing
-            and len(self._centered_stamps) >= self.config.target_lock_min_frames
+            and abs(self.last_valid_image_bearing) < math.pi / 2.0
+            and len(self._direction_stamps) >= self.config.target_lock_min_frames
         )
 
     def _servo(self):

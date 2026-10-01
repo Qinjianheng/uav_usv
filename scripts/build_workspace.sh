@@ -12,7 +12,7 @@ source /opt/ros/humble/setup.bash
 cd "${WS_ROOT}"
 
 echo "Building ROS 2 workspace: ${WS_ROOT}"
-colcon build --symlink-install "$@"
+colcon build --base-paths "${WS_ROOT}/src" --symlink-install "$@"
 
 echo
 echo "Build complete. To use this shell, run:"

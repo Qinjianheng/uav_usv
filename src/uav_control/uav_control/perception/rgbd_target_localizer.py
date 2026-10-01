@@ -45,6 +45,16 @@ from .front_tof_monitor import (
 DEFAULT_CAMERA_TRANSLATION_FLU = (0.35, 0.0, 0.19)
 
 
+def aligned_camera_qos():
+    """Request retransmission from the reliable image bridge with bounded history."""
+    return QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=8,
+    )
+
+
 def validated_sensor_stamp(measurement_stamp, receipt_stamp, maximum_age):
     """Accept only acquisition stamps demonstrably in the ROS clock domain."""
     measurement_stamp = float(measurement_stamp)
@@ -1175,17 +1185,18 @@ class RgbdTargetLocalizer(Node):
         )
         color_topic = str(self.get_parameter('color_topic').value)
         depth_topic = str(self.get_parameter('depth_topic').value)
+        image_qos = aligned_camera_qos()
         self.color_sub = self.create_subscription(
             Image,
             color_topic,
             self.color_callback,
-            sensor_qos,
+            image_qos,
         )
         self.depth_sub = self.create_subscription(
             Image,
             depth_topic,
             self.depth_callback,
-            sensor_qos,
+            image_qos,
         )
         self.position_sub = self.create_subscription(
             VehicleLocalPosition,
