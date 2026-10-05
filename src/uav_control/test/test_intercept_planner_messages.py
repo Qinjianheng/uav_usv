@@ -1039,6 +1039,7 @@ def callback_prediction(stamp=10.1, observation_stamp=10.0, sequence_id=1):
 )
 def test_invalid_prediction_revokes_planner_cached_snapshot(failure):
     node = SimpleNamespace(
+        intercept_requested=False,
         latest_prediction=None,
         frame_id='local_ned',
         maximum_input_age=0.125,
@@ -1077,6 +1078,7 @@ def test_invalid_prediction_revokes_planner_cached_snapshot(failure):
 
 def test_older_prediction_packet_does_not_poison_newer_valid_snapshot():
     node = SimpleNamespace(
+        intercept_requested=False,
         latest_prediction=None,
         frame_id='local_ned',
         maximum_input_age=0.125,

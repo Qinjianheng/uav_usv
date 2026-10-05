@@ -1,0 +1,82 @@
+..............................................s......................... [  8%]
+........................................................................ [ 17%]
+........................................................................ [ 26%]
+........................................................................ [ 35%]
+........................................................................ [ 44%]
+........................................................................ [ 53%]
+........................................................................ [ 62%]
+..................F..F.F................................................ [ 71%]
+........................................................................ [ 80%]
+........................................................................ [ 89%]
+........................................................................ [ 98%]
+..........                                                               [100%]
+=================================== FAILURES ===================================
+______ test_synthetic_sphere_exposes_median_plus_radius_forward_bias[3.0] ______
+
+distance = 3.0
+
+    @pytest.mark.parametrize('distance', (3.0, 5.0, 8.0, 12.0))
+    def test_synthetic_sphere_exposes_median_plus_radius_forward_bias(distance):
+        radius = 0.25
+        expected = np.array((distance, 0.0, 0.0))
+        mask, depth = _render_forward_depth_sphere(expected, radius)
+    
+        geometry = target_geometry_from_rgbd(
+            mask, depth, 1.74, 0.2, 25.0, radius
+        )
+    
+        assert geometry is not None
+        assert geometry.projection_center == pytest.approx((160.0, 120.0))
+>       assert geometry.center_camera[0] > expected[0]
+E       assert 2.9999999999999964 > 3.0
+
+test/test_rgbd_target_localizer.py:423: AssertionError
+_____ test_synthetic_sphere_exposes_median_plus_radius_forward_bias[12.0] ______
+
+distance = 12.0
+
+    @pytest.mark.parametrize('distance', (3.0, 5.0, 8.0, 12.0))
+    def test_synthetic_sphere_exposes_median_plus_radius_forward_bias(distance):
+        radius = 0.25
+        expected = np.array((distance, 0.0, 0.0))
+        mask, depth = _render_forward_depth_sphere(expected, radius)
+    
+        geometry = target_geometry_from_rgbd(
+            mask, depth, 1.74, 0.2, 25.0, radius
+        )
+    
+        assert geometry is not None
+        assert geometry.projection_center == pytest.approx((160.0, 120.0))
+>       assert geometry.center_camera[0] > expected[0]
+E       assert 11.999999999999957 > 12.0
+
+test/test_rgbd_target_localizer.py:423: AssertionError
+____ test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias _____
+
+    def test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias():
+        expected = np.array((5.0, -0.8, 0.4))
+        mask, depth = _render_forward_depth_sphere(expected, 0.25)
+        visible_columns = np.nonzero(mask)[1]
+        mask[:, :int(np.median(visible_columns))] = False
+    
+        geometry = target_geometry_from_rgbd(
+            mask, depth, 1.74, 0.2, 25.0, 0.25
+        )
+    
+        assert geometry is not None
+>       assert abs(geometry.center_camera[1] - expected[1]) > 0.03
+E       assert 8.215650382226158e-15 > 0.03
+E        +  where 8.215650382226158e-15 = abs((-0.7999999999999918 - -0.8))
+
+test/test_rgbd_target_localizer.py:463: AssertionError
+=============================== warnings summary ===============================
+src/uav_control/test/test_flake8.py::test_flake8
+src/uav_control/test/test_flake8.py::test_flake8
+  Warning: SelectableGroups dict interface is deprecated. Use select.
+
+-- Docs: https://docs.pytest.org/en/stable/warnings.html
+=========================== short test summary info ============================
+FAILED test/test_rgbd_target_localizer.py::test_synthetic_sphere_exposes_median_plus_radius_forward_bias[3.0]
+FAILED test/test_rgbd_target_localizer.py::test_synthetic_sphere_exposes_median_plus_radius_forward_bias[12.0]
+FAILED test/test_rgbd_target_localizer.py::test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias
+3 failed, 798 passed, 1 skipped, 2 warnings in 6.23s

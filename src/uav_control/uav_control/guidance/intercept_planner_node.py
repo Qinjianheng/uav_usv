@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 
 import rclpy
-from px4_msgs.msg import VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
@@ -136,6 +135,13 @@ def uav_state_from_message(message, received_stamp):
         velocity=tuple(values[3:6]),
         acceleration=tuple(values[6:9]),
     )
+
+
+def uav_state_from_navigation(message, now):
+    """Preserve physical UAV sample time separately from future boundaries."""
+    from ..common.navigation_state import navigation_components
+    stamp, position, velocity, acceleration = navigation_components(message, now)
+    return UavKinematicState(stamp, position, velocity, acceleration)
 
 
 def plan_to_message(
@@ -292,7 +298,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('minimum_duration', 1.0)
         self.declare_parameter('terminal_minimum_duration', 0.30)
         self.declare_parameter('terminal_freeze_time', 0.30)
-        self.declare_parameter('maximum_duration', 4.0)
+        self.declare_parameter('maximum_duration', 1.5)
         self.declare_parameter('duration_margin', 0.35)
         self.declare_parameter('sample_step', 0.05)
         self.declare_parameter('maximum_horizontal_speed', 7.0)
@@ -316,7 +322,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('approach_reserve_clearance', 0.20)
         self.declare_parameter(
             'approach_preparation_standoff_speed',
-            1.5,
+            0.8,
         )
         self.declare_parameter(
             'approach_preparation_position_tolerance',
@@ -447,9 +453,10 @@ class InterceptPlannerNode(Node):
             self.prediction_callback,
             px4_qos,
         )
+        from uav_usv_interfaces.msg import UavState
         self.uav_sub = self.create_subscription(
-            VehicleLocalPosition,
-            '/fmu/out/vehicle_local_position_v1',
+            UavState,
+            '/navigation/uav_state',
             self.uav_callback,
             px4_qos,
         )
@@ -493,6 +500,9 @@ class InterceptPlannerNode(Node):
             1.0 / terminal_planning_rate_hz,
             self.terminal_planning_timer_callback,
         )
+        self.planning_period = 1.0 / planning_rate_hz
+        self.terminal_planning_period = 1.0 / terminal_planning_rate_hz
+        self.last_worker_started_stamp = None
         completion_poll_rate_hz = float(
             self.get_parameter('completion_poll_rate_hz').value
         )
@@ -588,12 +598,16 @@ class InterceptPlannerNode(Node):
             self.latest_prediction = None
             return
         self.latest_prediction = prediction
+        if self.intercept_requested:
+            self._planning_tick(terminal_tick=None, prediction_triggered=True)
 
     def uav_callback(self, message):
-        self.latest_uav = uav_state_from_message(
-            message,
-            self._ros_seconds(),
-        )
+        try:
+            self.latest_uav = uav_state_from_navigation(
+                message, self._ros_seconds(),
+            )
+        except (ValueError, TypeError):
+            self.latest_uav = None
 
     def mission_callback(self, message):
         new_mission_id = int(message.mission_id)
@@ -686,6 +700,25 @@ class InterceptPlannerNode(Node):
         if self.latest_prediction is None or self.latest_uav is None:
             return None
         boundary = self.latest_uav
+        # A target forecast can start after the physical UAV sample. Advance
+        # only the planning boundary with P/V/A, retaining uav_source_stamp.
+        delta = max(self.latest_prediction.source_stamp - boundary.stamp, 0.0)
+        if delta > 0.0:
+            boundary = UavKinematicState(
+                boundary.stamp + delta,
+                tuple(
+                    p + v * delta + 0.5 * a * delta * delta
+                    for p, v, a in zip(
+                        boundary.position, boundary.velocity,
+                        boundary.acceleration,
+                    )
+                ),
+                tuple(
+                    v + a * delta
+                    for v, a in zip(boundary.velocity, boundary.acceleration)
+                ),
+                boundary.acceleration,
+            )
         active_reference = getattr(self, 'active_plan_reference', None)
         if active_reference is not None:
             boundary = select_planning_start_state(
@@ -1345,7 +1378,7 @@ class InterceptPlannerNode(Node):
             return
         self._publish_job(job)
 
-    def _planning_tick(self, terminal_tick):
+    def _planning_tick(self, terminal_tick, prediction_triggered=False):
         if (
             not self.intercept_requested
             or self.mission_state not in self.PLANNING_STATES
@@ -1363,13 +1396,45 @@ class InterceptPlannerNode(Node):
             remaining = self.contact_schedule.remaining_t_go(
                 now
             )
+        if (
+            remaining is not None and remaining <= 0.0
+            and self.mission_state == MissionState.FAR_GUIDANCE
+        ):
+            # Recovery may pass through TARGET_LOCK before FAR_GUIDANCE, so
+            # the direct recovery->far callback is not guaranteed. A missed,
+            # expired contact must not keep the reacquired mission frozen.
+            self.planning_cycle_id += 1
+            self.contact_schedule.reset()
+            self.active_plan_reference = None
+            self.published_plan_references.clear()
+            self.last_submitted_key = None
+            remaining = None
         decision = self.request_policy.decide(
             self.mission_state,
             remaining_t_go=remaining,
         )
-        if decision.terminal_mode != bool(terminal_tick):
+        if (
+            terminal_tick is not None
+            and decision.terminal_mode != bool(terminal_tick)
+        ):
             return
         if not decision.submit:
+            return
+        # Timers maintain contact expiry/freeze policy. Start only on a new
+        # prediction: equal-period timers can repeatedly select the previous
+        # image just before its replacement arrives, wasting the age budget.
+        if not prediction_triggered:
+            return
+        if self.future is not None or self.ready_job is not None:
+            return
+        period = (
+            self.terminal_planning_period
+            if decision.terminal_mode else self.planning_period
+        )
+        if (
+            self.last_worker_started_stamp is not None
+            and now - self.last_worker_started_stamp < period - 1e-8
+        ):
             return
         current = self._current_request(decision)
         if current is not None:
@@ -1380,14 +1445,13 @@ class InterceptPlannerNode(Node):
                 current.uav.stamp,
             )
             if key != self.last_submitted_key:
-                self.request_slot.submit(current)
+                # Build the boundary at dispatch, never queue a future
+                # handover state while another worker result is pending.
                 self.last_submitted_key = key
-        if self.future is None and getattr(self, 'ready_job', None) is None:
-            request = self.request_slot.take()
-            if request is not None:
+                self.last_worker_started_stamp = now
                 self.future = self.worker_executor.submit(
                     self._run_request,
-                    request,
+                    current,
                 )
 
     def planning_timer_callback(self):

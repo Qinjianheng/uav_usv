@@ -8,9 +8,9 @@ def start_intercept(core):
     assert core.handle_command('X', now=1.0)
     assert core.phase == MissionPhase.TAKEOFF
     assert core.mark_takeoff_complete(now=3.0)
-    assert core.phase == MissionPhase.TARGET_ACQUIRE
+    assert core.phase == MissionPhase.FOLLOW
     core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 3.1)
-    assert core.phase == MissionPhase.TARGET_LOCK
+    assert core.phase == MissionPhase.FOLLOW
     core.tick(3.2)
     assert core.phase == MissionPhase.FOLLOW
     assert core.handle_command('Y', now=4.0)

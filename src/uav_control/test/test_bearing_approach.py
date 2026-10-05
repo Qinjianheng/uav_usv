@@ -50,6 +50,21 @@ def test_rgb_alone_approaches_and_logs_without_claiming_position_lock():
     assert node.latest_target_state is None
 
 
+def test_rgb_approach_uses_body_ray_and_retains_image_yaw_feedback():
+    node, _ = approach_node()
+    node.visibility.reset()
+    for value in (10.1, 10.15, 10.2):
+        node.bearing_callback(SimpleNamespace(
+            stamp=stamp(value), raw_stamp=stamp(value - 5.),
+            valid=True, bearing=.1, body_bearing=.3,
+        ))
+    node.timer_callback()
+    command, status = node.diagnostics[-1]
+    assert status == 'BEARING_APPROACH'
+    assert command.velocity[1] / command.velocity[0] == pytest.approx(math.tan(.3))
+    assert node.visibility.last_valid_image_bearing == .1
+
+
 @pytest.mark.parametrize('condition', [
     'stale', 'invalid', 'behind_camera', 'two_frames', 'disabled', 'terminal',
     'intercept', 'recovery', 'low_height', 'takeoff', 'safe_wait',

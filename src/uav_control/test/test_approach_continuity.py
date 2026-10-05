@@ -24,6 +24,7 @@ def test_first_fresh_depth_sample_keeps_rgb_motion_until_follow_handover(phase):
     node.timer_callback()
     command, status = node.diagnostics[-1]
     assert status == 'BEARING_APPROACH'
+    assert node.bearing_approach_active
     assert command.mode == 'VELOCITY'
     assert node.offboard_modes == [True, True]
     assert math.dist(command.velocity[:2], previous[:2]) == pytest.approx(.15)
@@ -44,7 +45,8 @@ def test_expired_kf_in_follow_uses_independently_fresh_rgb_without_fake_lock():
     node.visibility.observe(10.32, .05, True, 10.33)
     node.timer_callback()
     command, status = node.diagnostics[-1]
-    assert status == 'BEARING_APPROACH'
+    assert status == 'FOLLOW'
+    assert node.bearing_approach_active
     assert node.latest_target_state is None
     assert not node.visibility_decision.locked
     assert command.mode == 'VELOCITY'

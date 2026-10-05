@@ -215,6 +215,7 @@ class TargetPredictorNode(Node):
         )
         self.mission_id = 0
         self.sequence_id = 0
+        self.last_prediction_observation_stamp = None
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -256,7 +257,8 @@ class TargetPredictorNode(Node):
             self.engine.invalidate('FRAME_MISMATCH')
             return
         now = self.get_clock().now().nanoseconds * 1e-9
-        self.engine.update(state_from_message(message), now=now)
+        if self.engine.update(state_from_message(message), now=now):
+            self.timer_callback()
 
     def mission_callback(self, message):
         self.mission_id = int(message.mission_id)
@@ -264,6 +266,17 @@ class TargetPredictorNode(Node):
     def timer_callback(self):
         start = time.perf_counter()
         now = self.get_clock().now().nanoseconds * 1e-9
+        state = self.engine.latest_state
+        if (
+            state is not None
+            and state.observation_stamp == self.last_prediction_observation_stamp
+            and state.stamp <= now
+            and 0.0 <= now - state.observation_stamp <= self.engine.input_timeout
+        ):
+            # A KF projection or heartbeat is not another image. Publish
+            # fresh observations immediately, once each; timers still report
+            # invalid/stale input without resetting acquisition deadlines.
+            return
         self.sequence_id += 1
         result = self.engine.generate(
             now=now,
@@ -276,6 +289,8 @@ class TargetPredictorNode(Node):
             compute_time=compute_time,
             frame_id=self.frame_id,
         ))
+        if result.valid:
+            self.last_prediction_observation_stamp = result.observation_stamp
 
 
 def main(args=None):

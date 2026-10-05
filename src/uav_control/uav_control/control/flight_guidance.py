@@ -67,6 +67,7 @@ class FlightGuidanceCore:
         approach_horizon=4.0,
         approach_response_delay=0.15,
         control_dt=0.05,
+        approach_preparation_clearance=None,
     ):
         self.flight_altitude = float(flight_altitude)
         self.takeoff_tolerance = float(takeoff_tolerance)
@@ -105,6 +106,20 @@ class FlightGuidanceCore:
             vertical_braking_acceleration
         )
         self.approach_contact_clearance = float(approach_contact_clearance)
+        self.approach_preparation_clearance = (
+            self.sea_surface_z - self.flight_altitude
+            if approach_preparation_clearance is None
+            else float(approach_preparation_clearance)
+        )
+        if (
+            approach_preparation_clearance is not None
+            and (
+                not math.isfinite(self.approach_preparation_clearance)
+                or self.approach_preparation_clearance
+                <= self.approach_contact_clearance
+            )
+        ):
+            raise ValueError('preparation clearance must exceed contact clearance')
         self.approach_closing_speed = float(approach_closing_speed)
         self.approach_horizon = float(approach_horizon)
         self.approach_response_delay = float(approach_response_delay)
@@ -341,7 +356,7 @@ class FlightGuidanceCore:
             position=(
                 target.position[0] - standoff * direction[0],
                 target.position[1] - standoff * direction[1],
-                self.flight_altitude,
+                self.sea_surface_z - self.approach_preparation_clearance,
             ),
             vertical_time=vertical_time,
             standoff=standoff,
@@ -428,11 +443,15 @@ class FlightGuidanceCore:
                 if phase == 'FAR_GUIDANCE'
                 else self._follow_velocity(state, target)
             )
+            altitude = (
+                self.sea_surface_z - self.approach_preparation_clearance
+                if phase == 'FAR_GUIDANCE' else self.flight_altitude
+            )
             desired = (
                 horizontal[0],
                 horizontal[1],
                 self.altitude_velocity_gain
-                * (self.flight_altitude - state.position[2]),
+                * (altitude - state.position[2]),
             )
             if self.previous_velocity is None:
                 self.previous_velocity = tuple(state.velocity)

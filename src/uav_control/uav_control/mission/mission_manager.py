@@ -112,18 +112,20 @@ class MissionManagerCore:
         if command == 'Y':
             if self.phase not in (
                 MissionPhase.FOLLOW, MissionPhase.TARGET_LOCK,
-            ) or not self.target_locked:
+            ) or (self.phase == MissionPhase.TARGET_LOCK
+                  and not self.target_locked):
                 return False
             self.intercept_requested = True
-            self._transition(MissionPhase.FAR_GUIDANCE, now)
+            if self.target_locked:
+                self._transition(MissionPhase.FAR_GUIDANCE, now)
             return True
         return False
 
     def mark_takeoff_complete(self, now):
-        """Start visual acquisition only after explicit takeoff completion."""
+        """Enter continuous FOLLOW; RGB/KF quality selects its internal command."""
         if self.phase != MissionPhase.TAKEOFF:
             return False
-        self._transition(MissionPhase.TARGET_ACQUIRE, now)
+        self._transition(MissionPhase.FOLLOW, now)
         return True
 
     def observe_visibility(self, mission_id, state, locked, now):
@@ -134,6 +136,12 @@ class MissionManagerCore:
                           MissionPhase.TAKEOFF):
             return False
         self.target_locked = bool(locked)
+        if self.phase == MissionPhase.FOLLOW:
+            if self.intercept_requested and locked:
+                return self._transition(MissionPhase.FAR_GUIDANCE, now)
+            # RGB acquisition, centering, and temporary loss stay within
+            # FOLLOW. Only a precise lock grants a queued Y request authority.
+            return False
         if state == 'SAFE_RECOVERY':
             self.active_plan_id = 0
             return self._transition(MissionPhase.SAFE_RECOVERY, now)

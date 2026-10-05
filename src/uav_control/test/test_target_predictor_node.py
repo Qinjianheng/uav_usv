@@ -83,6 +83,7 @@ def make_callback_node(now=10.11):
     return SimpleNamespace(
         engine=PredictionEngine(source='tracking'),
         frame_id='local_ned',
+        timer_callback=lambda: None,
         get_clock=lambda: SimpleNamespace(
             now=lambda: SimpleNamespace(nanoseconds=round(now * 1e9)),
         ),
@@ -178,3 +179,67 @@ def test_online_predictor_refuses_tracking_topic_remapped_to_truth(
     )
     with pytest.raises(ValueError, match='truth'):
         TargetPredictorNode()
+
+
+class PredictionPublisher:
+    """Collect actual predictor output messages at the transport boundary."""
+
+    def __init__(self):
+        """Create an empty output sequence."""
+        self.messages = []
+
+    def publish(self, message):
+        """Store one timestamp-preserving forecast."""
+        self.messages.append(message)
+
+
+def make_publication_node(clock):
+    """Use the real callbacks without starting ROS middleware."""
+    node = object.__new__(TargetPredictorNode)
+    node.engine = PredictionEngine(source='tracking', horizon=0.2)
+    node.frame_id = 'local_ned'
+    node.get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=round(clock[0] * 1e9)),
+    )
+    node.mission_id = 1
+    node.sequence_id = 0
+    node.last_prediction_observation_stamp = None
+    node.prediction_pub = PredictionPublisher()
+    return node
+
+
+def test_new_kf_observation_publishes_before_next_periodic_timer():
+    """Do not spend another 50 ms of acquisition age waiting to predict."""
+    clock = [10.02]
+    node = make_publication_node(clock)
+    node.state_callback(make_tracking_message(stamp=10.02))
+    assert len(node.prediction_pub.messages) == 1
+    message = node.prediction_pub.messages[0]
+    assert message.valid
+    assert message.source_stamp.nanosec == 20_000_000
+    assert message.observation_stamp.sec == 10
+    assert message.observation_stamp.nanosec == 0
+    assert message.valid_until.nanosec == 125_000_000
+
+
+def test_duplicate_kf_projection_and_timer_do_not_double_prediction_rate():
+    """Publish once per new image while maintaining timeout heartbeats."""
+    clock = [10.02]
+    node = make_publication_node(clock)
+    node.state_callback(make_tracking_message(stamp=10.02))
+    clock[0] = 10.035
+    node.state_callback(make_tracking_message(stamp=10.035))
+    clock[0] = 10.055
+    node.timer_callback()
+    assert len(node.prediction_pub.messages) == 1
+    clock[0] = 10.07
+    node.state_callback(make_tracking_message(stamp=10.07, source_stamp=10.05))
+    assert len(node.prediction_pub.messages) == 2
+    clock[0] = 10.20
+    node.timer_callback()
+    assert len(node.prediction_pub.messages) == 3
+    message = node.prediction_pub.messages[-1]
+    assert not message.valid
+    assert message.invalid_reason == 'STATE_STALE'
+    assert message.observation_stamp.nanosec == 50_000_000
+    assert message.valid_until.nanosec == 175_000_000

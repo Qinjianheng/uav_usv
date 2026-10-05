@@ -18,6 +18,7 @@ def test_locked_intercept_continues_visual_yaw_below_search_height(phase):
     node.intercept_requested = True
     node.visibility_decision = VisibilityDecision('TRACKING', True, True, .4, 0)
     node.visibility.last_valid_image_bearing = .4
+    node.latest_kf_message = None  # Isolate the visual gate's feedback fallback.
     command = SimpleNamespace()
     node._final_yaw(command, state, .05)
     assert command.yawspeed == pytest.approx(.4)

@@ -500,15 +500,7 @@ def test_flight_velocity_command_does_not_activate_position_control():
 
 
 def test_tracking_velocity_mode_uses_command_velocity_without_position():
-    """
-    Guard velocity-driven MINCO tracking, which is what builds closing speed.
-
-    In position mode the reference is rebuilt from the measured state on every
-    replan, so the position error never grows past a few centimetres and the
-    vehicle can only hold the speed it already has: it flew at the target's
-    4 m/s and closed at under 0.7 m/s.  Velocity mode lets PX4 consume the
-    tracker's acceleration-limited command instead.
-    """
+    """Send the bounded tracker command without a second position loop."""
     command = TrackingCommand(
         position=(1.0, 2.0, -3.0),
         velocity=(6.2, 0.4, -0.3),
@@ -527,7 +519,7 @@ def test_tracking_velocity_mode_uses_command_velocity_without_position():
     assert message.timestamp == 77
     assert all(math.isnan(value) for value in message.position)
     assert list(message.velocity) == pytest.approx([6.2, 0.4, -0.3])
-    assert all(math.isnan(value) for value in message.acceleration)
+    assert list(message.acceleration) == pytest.approx([0.1, 0.2, 0.3])
     assert math.isnan(message.yaw)
 
 

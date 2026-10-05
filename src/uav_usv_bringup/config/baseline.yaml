@@ -230,10 +230,9 @@ intercept_planner_node:
     minimum_duration: 1.0
     terminal_minimum_duration: 0.30
     terminal_freeze_time: 0.30
-    # The previous 3.0 s cap rejected five-metre terminal descents whose
-    # minimum-time bound was feasible but whose jerk-continuous MINCO profile
-    # needed roughly 3.2 s to respect the 3 m/s^2 vertical acceleration limit.
-    maximum_duration: 4.0
+    # Descend during Y preparation before admitting a short terminal plan.
+    # Long forecasts of the manoeuvring target misplace the contact point.
+    maximum_duration: 1.5
     duration_margin: 0.35
     sample_step: 0.05
     # Hard MINCO feasibility limit matches the 7 m/s vehicle envelope.
@@ -288,7 +287,7 @@ intercept_planner_node:
     # FAR_GUIDANCE must converge on the moving, vertical-time-sized standoff
     # before the first descent can be admitted.  These are joint position and
     # relative-velocity checks inside the existing full MINCO/safety gate.
-    approach_preparation_standoff_speed: 1.5
+    approach_preparation_standoff_speed: 0.8
     approach_preparation_position_tolerance: 0.75
     approach_preparation_velocity_tolerance: 0.75
     response_delay: 0.15
@@ -317,10 +316,11 @@ trajectory_tracker_node:
     bearing_approach_enabled: true
     bearing_approach_speed: 6.0
     altitude_velocity_gain: 1.0
-    # FAR_GUIDANCE keeps flight_altitude while moving to a preparation point
-    # whose standoff is closing_speed * current vertical minimum time.
+    # Y preparation lowers altitude with the existing velocity shaper.
+    # The moving standoff is closing_speed * current vertical minimum time.
     approach_contact_clearance: 0.33
-    approach_closing_speed: 1.5
+    approach_preparation_clearance: 1.5
+    approach_closing_speed: 0.8
     approach_horizon: 4.0
     approach_response_delay: 0.15
     maximum_plan_age: 0.125
@@ -377,26 +377,15 @@ trajectory_tracker_node:
     # maximum_actual_vertical_acceleration derates the vertical allowance once
     # the measured acceleration exceeds it.
     maximum_command_dt: 0.1
-    # NOTE: the derating below rides on the tracker's velocity command, so with
-    # use_velocity_control=false it is inert -- PX4 is tracking the position
-    # reference, whose own acceleration is bounded by the planner limit.  To
-    # bound the MEASURED vertical acceleration in position mode, lower the
-    # planner's maximum_vertical_acceleration instead (measured actual ran
-    # 1.8-1.9x the planned value).
+    # The tracker owns position feedback and limits the resulting velocity.
+    # PX4 consumes that velocity directly; it must not add position feedback
+    # a second time to the same command.
     maximum_actual_vertical_acceleration: 4.0
     maximum_state_age: 0.125
-    # Velocity-driven tracking was tried on 2026-09-20 and made the intercept
-    # worse, so it is off.  The planner rebuilds the reference from the
-    # measured state on every replan, so the sampled reference velocity is
-    # anchored at the measured speed (~4 m/s): position mode still chases the
-    # position reference and builds speed, while velocity mode faithfully
-    # executes that slow command and the vehicle falls behind the target.
-    # Measured: with it on, the UAV slowed to 2.8-4.2 m/s, the range grew from
-    # 9.2 m to 13.4 m, and the run ended in SEA_CONTACT 13 m from the target;
-    # with it off the same code closed 5.84 -> 0.27 m in 4.3 s and captured.
-    # Re-enable only together with a reference that is not re-anchored to the
-    # measured state every replan.
-    use_velocity_control: false
+    # Replanning now starts from the accepted trajectory's future P/V/A,
+    # rather than repeatedly re-anchoring its velocity to measured speed.
+    # This satisfies the condition missing in the 2026-09-20 velocity trial.
+    use_velocity_control: true
     frame_id: local_ned
 
 mission_manager_node:
@@ -465,7 +454,7 @@ rgbd_target_localizer:
     frame_id: local_ned
     horizontal_fov: 1.74
     minimum_red_pixels: 3
-    minimum_depth: 0.2
+    minimum_depth: 0.05
     maximum_depth: 25.0
     minimum_depth_ratio: 0.5
     # A clean sphere has camera-X depth MAD <= target_radius. Keep this
@@ -493,7 +482,7 @@ rgbd_target_localizer:
     image_pair_buffer_size: 8
     time_pair_diagnostics_enabled: false
     localization_rate_hz: 10.0
-    camera_pitch_down: 0.20944
+    camera_pitch_down: 0.4363323129985824
     camera_translation_x: 0.35
     camera_translation_y: 0.0
     camera_translation_z: 0.19
@@ -518,12 +507,12 @@ front_tof_monitor:
     minimum_target_depth_ratio: 0.5
     image_timeout: 0.5
     maximum_rgb_depth_skew: 0.1
-    minimum_rgb_distance: 0.2
+    minimum_rgb_distance: 0.05
     maximum_rgb_distance: 60.0
-    minimum_depth: 0.2
+    minimum_depth: 0.05
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
-    camera_pitch_down: 0.20944
+    camera_pitch_down: 0.4363323129985824
     target_visual_height_offset: 0.42
     analysis_rate_hz: 5.0
     gazebo_world_name: default
@@ -538,6 +527,7 @@ dual_tof_selector:
 
 target_bearing_node:
   ros__parameters:
+    camera_pitch_down: 0.4363323129985824
     color_topic: /camera/front/image_raw
     bearing_topic: /perception/front/target_bearing
     horizontal_fov: 1.74

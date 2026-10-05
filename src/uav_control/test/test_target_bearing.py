@@ -46,6 +46,26 @@ def test_centroid_bearing_has_calibrated_image_left_right_sign(column, expected)
     assert 0 < detection.confidence <= 1
 
 
+@pytest.mark.parametrize('row', [0, 3])
+def test_tilted_mount_body_ray_uses_both_pixel_coordinates(row):
+    msg = image(column=None)
+    pixels = np.zeros((4, 8, 3), dtype=np.uint8)
+    pixels[row, 5:8, 0] = 255
+    msg.data = pixels.tobytes()
+    pitch = math.radians(25.)
+    reading = image_target_bearing(msg, math.pi / 2, 3, camera_pitch_down=pitch)
+    forward = math.cos(pitch) - math.sin(pitch) * ((row - 2.) / 4.)
+    assert reading.valid
+    assert reading.bearing == pytest.approx(math.atan(.5))
+    assert reading.body_bearing == pytest.approx(math.atan2(.5, forward))
+
+
+def test_nonfinite_mount_does_not_supply_rgb_direction():
+    reading = image_target_bearing(image(), math.pi / 2, 3,
+                                   camera_pitch_down=math.nan)
+    assert not reading.valid
+
+
 @pytest.mark.parametrize('column', [2, 6])
 @pytest.mark.parametrize('pitch', [0.0, 0.35])
 def test_bearing_sign_matches_camera_flu_to_px4_ned_clockwise_yaw(column, pitch):

@@ -8,6 +8,29 @@ def state(position=(0.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0)):
     return FlightKinematicState(tuple(position), tuple(velocity))
 
 
+def test_y_preparation_descends_without_changing_follow_altitude():
+    guidance = FlightGuidanceCore(
+        flight_altitude=-5., approach_preparation_clearance=1.5,
+        approach_closing_speed=.8,
+    )
+    uav = state((0., 0., -5.), (4., 0., 0.))
+    target = state((5., 0., 0.), (4., 0., 0.))
+    follow = guidance.command('FOLLOW', uav, target, .05)
+    assert follow.velocity[2] == 0.
+    preparation = guidance.command('FAR_GUIDANCE', uav, target, .05)
+    assert 0. < preparation.velocity[2] <= .15 + 1e-9
+    assert guidance.approach_target(uav, target).position[2] == -1.5
+    near = state((4., 0., -1.5), (4., 0., 0.))
+    approach = guidance.approach_target(near, target)
+    assert approach.standoff < 1.5
+
+
+@pytest.mark.parametrize('clearance', [.1, float('nan')])
+def test_preparation_cannot_be_below_contact_or_nonfinite(clearance):
+    with pytest.raises(ValueError):
+        FlightGuidanceCore(approach_preparation_clearance=clearance)
+
+
 def test_ground_mode_holds_first_valid_position():
     guidance = FlightGuidanceCore(flight_altitude=-5.0)
 

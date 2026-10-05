@@ -19,23 +19,25 @@ def acquired_mission():
     core.set_flight_ready(True)
     assert core.handle_command('X', 1.)
     assert core.mark_takeoff_complete(2.)
-    assert core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 2.1)
+    core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 2.1)
+    assert core.target_locked
     return core
 
 
-def test_confirmed_lock_publishes_before_automatic_follow():
+def test_follow_does_not_wait_for_a_separate_lock_phase():
     core = acquired_mission()
-    assert core.tick(2.11) == MissionPhase.TARGET_LOCK
+    assert core.tick(2.11) == MissionPhase.FOLLOW
     assert core.tick(2.16) == MissionPhase.FOLLOW
     assert core.target_locked
     assert not core.intercept_requested
 
 
-def test_unlocked_confirmation_never_advances_to_follow():
+def test_unlocked_follow_queues_y_without_granting_intercept_authority():
     core = acquired_mission()
     core.observe_visibility(core.mission_id, 'TARGET_ACQUIRE', False, 2.12)
-    assert core.tick(2.2) != MissionPhase.FOLLOW
-    assert not core.handle_command('Y', 2.3)
+    assert core.tick(2.2) == MissionPhase.FOLLOW
+    assert core.handle_command('Y', 2.3)
+    assert core.phase == MissionPhase.FOLLOW
 
 
 def test_old_plan_acceptance_cannot_skip_relock_confirmation_publication():
@@ -63,9 +65,10 @@ def test_y_in_follow_requires_current_visual_lock():
     core.tick(2.2)
     assert core.phase == MissionPhase.FOLLOW
     core.target_locked = False
-    assert not core.handle_command('Y', 2.3)
+    assert core.handle_command('Y', 2.3)
+    assert core.phase == MissionPhase.FOLLOW
     core.target_locked = True
-    assert core.handle_command('Y', 2.4)
+    core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 2.4)
     assert core.phase == MissionPhase.FAR_GUIDANCE
 
 
@@ -79,12 +82,18 @@ def test_follow_loss_and_relock_preserve_intercept_intent(
     core.tick(2.2)
     if intercept_requested:
         assert core.handle_command('Y', 2.3)
-    assert core.observe_visibility(core.mission_id, 'REACQUIRE', False, 3.)
-    assert core.phase == MissionPhase.REACQUIRE
-    assert not core.handle_command('Y', 3.1)
-    assert core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 3.2)
-    assert core.phase == MissionPhase.TARGET_LOCK
-    assert core.tick(3.21) == MissionPhase.TARGET_LOCK
+    core.observe_visibility(core.mission_id, 'REACQUIRE', False, 3.)
+    if intercept_requested:
+        assert core.phase == MissionPhase.REACQUIRE
+        assert not core.handle_command('Y', 3.1)
+    else:
+        assert core.phase == MissionPhase.FOLLOW
+    core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 3.2)
+    if intercept_requested:
+        assert core.phase == MissionPhase.TARGET_LOCK
+        assert core.tick(3.21) == MissionPhase.TARGET_LOCK
+    else:
+        assert core.phase == MissionPhase.FOLLOW
     assert core.tick(3.3) == destination
 
 
@@ -188,7 +197,8 @@ def test_follow_timer_expired_image_preempts_translation_and_anchors_xyz():
     node.visibility.observe(10.2, 0., False, 10.2)
     node.timer_callback()
     command, status = node.diagnostics[-1]
-    assert status == 'REACQUIRE'
+    assert status == 'FOLLOW'
+    assert node.visibility_decision.state == 'REACQUIRE'
     assert command.position == state.position
     assert command.velocity == (0., 0., 0.)
     assert node.latest_target_state is None
@@ -212,7 +222,7 @@ def test_follow_one_or_two_invalid_rgb_frames_continue_only_with_fresh_kf():
     node.latest_state = replace(node.latest_state, stamp=10.26)
     node._ros_seconds = lambda: 10.26
     node.timer_callback()
-    assert node.diagnostics[-1][1] == 'VISUAL_BRAKING'
+    assert node.diagnostics[-1][1] == 'FOLLOW'
     assert node.visibility_decision.state == 'REACQUIRE'
     assert not node.visibility_decision.locked
     assert not node.diagnostics[-1][0].far_guidance_available

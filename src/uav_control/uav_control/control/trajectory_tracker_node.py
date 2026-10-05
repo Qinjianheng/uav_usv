@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 import rclpy
 from builtin_interfaces.msg import Time
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint
-from px4_msgs.msg import VehicleCommand, VehicleLocalPosition, VehicleStatus
+from px4_msgs.msg import VehicleCommand, VehicleStatus
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
@@ -18,6 +18,7 @@ from uav_usv_interfaces.msg import TargetPrediction, TargetState
 from uav_usv_interfaces.msg import TargetBearing, TargetObservation
 
 from ..mission.target_visibility import TargetVisibilityState, VisibilityConfig
+from ..common.navigation_state import navigation_components
 
 from .flight_guidance import FlightGuidanceCore, FlightKinematicState
 from .trajectory_tracking import PolynomialSegmentData
@@ -115,6 +116,12 @@ def tracker_state_from_message(message, received_stamp):
     )
 
 
+def tracker_state_from_navigation(message, now):
+    """Preserve the causally mapped physical sample epoch for acceptance."""
+    stamp, position, velocity, _ = navigation_components(message, now)
+    return TrackerKinematicState(stamp, position, velocity)
+
+
 def flight_target_from_message(message):
     """Convert the launch-selected target source for flight guidance."""
     values = (
@@ -209,7 +216,10 @@ def command_to_setpoint(
     if velocity_mode:
         message.position = [math.nan, math.nan, math.nan]
         message.velocity = [float(value) for value in command.velocity]
-        message.acceleration = [math.nan, math.nan, math.nan]
+        # PX4's velocity loop accepts acceleration feed-forward. The tracker
+        # has already differentiated/limited the post-guard velocity; dropping
+        # this braking term makes the plant lag a decelerating MINCO reference.
+        message.acceleration = [float(value) for value in command.acceleration]
     else:
         message.position = [float(value) for value in command.position]
         message.velocity = [float(value) for value in command.velocity]
@@ -355,7 +365,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('bearing_approach_speed', 6.0)
         self.declare_parameter('altitude_velocity_gain', 1.0)
         self.declare_parameter('approach_contact_clearance', 0.33)
-        self.declare_parameter('approach_closing_speed', 1.5)
+        self.declare_parameter('approach_closing_speed', 0.8)
+        self.declare_parameter('approach_preparation_clearance', 1.5)
         self.declare_parameter('approach_horizon', 4.0)
         self.declare_parameter('approach_response_delay', 0.15)
         self.declare_parameter('terminal_replacement_position_error', 0.15)
@@ -521,6 +532,9 @@ class TrajectoryTrackerNode(Node):
             approach_closing_speed=self.get_parameter(
                 'approach_closing_speed'
             ).value,
+            approach_preparation_clearance=self.get_parameter(
+                'approach_preparation_clearance'
+            ).value,
             approach_horizon=self.get_parameter('approach_horizon').value,
             approach_response_delay=self.get_parameter(
                 'approach_response_delay'
@@ -546,9 +560,10 @@ class TrajectoryTrackerNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        from uav_usv_interfaces.msg import UavState
         self.uav_sub = self.create_subscription(
-            VehicleLocalPosition,
-            '/fmu/out/vehicle_local_position_v1',
+            UavState,
+            '/navigation/uav_state',
             self.uav_callback,
             state_qos,
         )
@@ -642,6 +657,7 @@ class TrajectoryTrackerNode(Node):
         self.latest_prediction = None
         self.latest_target_state = None
         self.latest_kf_message = None
+        self.latest_body_bearing = None
         self.visibility_decision = None
         self.search_state = 'GROUND_HOLD'
         self.search_hold_position = None
@@ -688,10 +704,13 @@ class TrajectoryTrackerNode(Node):
         return self.get_clock().now().nanoseconds // 1000
 
     def uav_callback(self, message):
-        self.latest_state = tracker_state_from_message(
-            message,
-            self._ros_seconds(),
-        )
+        try:
+            self.latest_state = tracker_state_from_navigation(
+                message, self._ros_seconds(),
+            )
+        except (ValueError, TypeError):
+            self.latest_state = None
+            return
         heading = float(getattr(message, 'heading', math.nan))
         if math.isfinite(heading):
             self.current_heading = heading
@@ -738,14 +757,19 @@ class TrajectoryTrackerNode(Node):
             return
         if stamp <= 0.0:
             self.visibility.reset()
+            self.latest_body_bearing = None
             self.latest_kf_message = None
             self.latest_target_state = None
             self.latest_prediction = None
             return
-        self.visibility.observe(
+        accepted = self.visibility.observe(
             stamp, float(message.bearing), bool(message.valid),
             self._ros_seconds(),
         )
+        if (accepted and message.valid
+                and self.visibility.last_valid_bearing_stamp == stamp):
+            body_bearing = float(getattr(message, 'body_bearing', message.bearing))
+            self.latest_body_bearing = (stamp, body_bearing)
 
     def observation_callback(self, message):
         self.visibility.mark_observation(
@@ -782,6 +806,7 @@ class TrajectoryTrackerNode(Node):
             self.terminal_mode_latched = False
             self.visibility.reset()
             self.visibility_decision = None
+            self.latest_body_bearing = None
             self.latest_kf_message = None
             self.latest_target_state = None
             self.latest_prediction = None
@@ -1228,28 +1253,22 @@ class TrajectoryTrackerNode(Node):
                     search_height, self.tracker.recovery_clearance,
                 ),
             )
-        if not getattr(self, 'intercept_requested', False):
-            previous = self.flight_guidance.previous_velocity
-            command_speed = (math.hypot(*previous[:2]) if previous is not None
-                             else math.hypot(*current.velocity[:2]))
-            if (self.search_hold_position is None
-                    and math.hypot(*current.velocity[:2]) <= 0.1
-                    and command_speed <= 0.1):
-                self.search_hold_position = anchored_search_hold(
-                    None, current.position, self.tracker.sea_surface_z, search_height,
-                )
-            return self.flight_guidance.search_velocity(
-                FlightKinematicState(current.position, current.velocity),
-                self.search_hold_position,
-                self.tracker.control_dt if dt is None else dt,
+        # Y grants planning authority, not an abrupt stop on input expiry.
+        # The low-altitude/terminal branch above still owns climb recovery.
+        previous = self.flight_guidance.previous_velocity
+        command_speed = (math.hypot(*previous[:2]) if previous is not None
+                         else math.hypot(*current.velocity[:2]))
+        if (self.search_hold_position is None
+                and math.hypot(*current.velocity[:2]) <= 0.1
+                and command_speed <= 0.1):
+            self.search_hold_position = anchored_search_hold(
+                None, current.position, self.tracker.sea_surface_z, search_height,
             )
-        self.search_hold_position = anchored_search_hold(
-            self.search_hold_position, current.position,
-            self.tracker.sea_surface_z, search_height,
+        return self.flight_guidance.search_velocity(
+            FlightKinematicState(current.position, current.velocity),
+            self.search_hold_position,
+            self.tracker.control_dt if dt is None else dt,
         )
-        return self.flight_guidance._hold(FlightKinematicState(
-            self.search_hold_position, (0.0, 0.0, 0.0),
-        ))
 
     def _bearing_approach_available(self, current, now):
         """Keep RGB approach separate from locked FOLLOW and Y/MINCO authority."""
@@ -1261,13 +1280,44 @@ class TrajectoryTrackerNode(Node):
             )
             and not (self.mission_state == MissionState.FOLLOW
                      and self.visibility_decision.locked)
-            and not getattr(self, 'intercept_requested', False)
+            and (self.mission_state == MissionState.FOLLOW
+                 or not getattr(self, 'intercept_requested', False))
             and not self.safe_recovery_latched and not self.terminal_mode_latched
             and current.position[2] <= (self.flight_guidance.flight_altitude
                                         + self.flight_guidance.takeoff_tolerance)
             and abs(current.velocity[2]) <= self.flight_guidance.takeoff_tolerance
             and self.visibility.bearing_approach_ready(now, self.maximum_state_age)
+            and math.isfinite(self._bearing_approach_direction())
+            and abs(self._bearing_approach_direction()) < math.pi / 2.0
         )
+
+    def _bearing_approach_direction(self):
+        """Use the body ray only for the matching fresh RGB frame."""
+        reading = getattr(self, 'latest_body_bearing', None)
+        if (reading is not None
+                and reading[0] == self.visibility.last_valid_bearing_stamp):
+            return reading[1]
+        return self.visibility.last_valid_image_bearing
+
+    def _continuous_follow_command(self, current, now, dt):
+        """Refine RGB into KF following without leaving FOLLOW or resetting V."""
+        state = FlightKinematicState(current.position, current.velocity)
+        if (self.latest_target_state is not None
+                and (self.visibility_decision.visible
+                     or self.visibility_decision.locked)
+                and not self.safe_recovery_latched):
+            self.search_hold_position = None
+            return self.flight_guidance.command(
+                'FOLLOW', state, self.latest_target_state, dt,
+            )
+        if self._bearing_approach_available(current, now):
+            self.search_hold_position = None
+            self.bearing_approach_active = True
+            return self.flight_guidance.bearing_approach(
+                state, self.current_heading, self.bearing_approach_speed, dt,
+                bearing=self._bearing_approach_direction(),
+            )
+        return self._search_or_recovery_command(current, dt)
 
     def _final_yaw(self, setpoint, current, dt):
         """One arbiter owns yaw for every final PX4 setpoint."""
@@ -1302,6 +1352,26 @@ class TrajectoryTrackerNode(Node):
                     (self.max_observation_yaw_rate if decision.locked
                      else self.visibility.config.maximum_search_yaw_rate),
                 )
+                if visual_intercept:
+                    target = fresh_flight_target(
+                        self.latest_kf_message, current.stamp,
+                        self.maximum_state_age, self.expected_frame_id,
+                    )
+                    if target is not None:
+                        rx = target.position[0] - current.position[0]
+                        ry = target.position[1] - current.position[1]
+                        range_squared = rx * rx + ry * ry
+                        if range_squared > 1e-6:
+                            vx = target.velocity[0] - current.velocity[0]
+                            vy = target.velocity[1] - current.velocity[1]
+                            los_rate = (rx * vy - ry * vx) / range_squared
+                            if math.isfinite(los_rate):
+                                # Image feedback alone needs a persistent
+                                # bearing error to follow a rotating LOS.
+                                rate += los_rate
+                    rate = max(-self.max_observation_yaw_rate, min(
+                        self.max_observation_yaw_rate, rate,
+                    ))
                 self.yaw_owner = ('VISION' if decision.locked or getattr(
                     self, 'bearing_approach_active', False) else 'SEARCH')
             elif decision.state != 'SAFE_WAIT':
@@ -1417,6 +1487,19 @@ class TrajectoryTrackerNode(Node):
             self.flight_ready = ready
             status = self.mission_state_name
             command = flight_command
+        elif self.mission_state == MissionState.FOLLOW:
+            self._publish_bool(self.flight_ready_pub, False)
+            self._request_flight_mode()
+            command = self._continuous_follow_command(current, now, dt)
+            velocity_control = getattr(command, 'mode', '') == 'VELOCITY'
+            self._publish_offboard_mode(
+                timestamp_us, velocity_control=velocity_control,
+            )
+            setpoint = (flight_command_to_setpoint(command, timestamp_us)
+                        if hasattr(command, 'mode')
+                        else command_to_setpoint(command, timestamp_us))
+            self._publish_bool(self.far_guidance_pub, False)
+            status = 'FOLLOW'
         elif self._bearing_approach_available(current, now):
             self._publish_bool(self.flight_ready_pub, False)
             self._request_flight_mode()
@@ -1425,7 +1508,7 @@ class TrajectoryTrackerNode(Node):
             self.search_hold_position = None
             command = self.flight_guidance.bearing_approach(
                 flight_state, self.current_heading, self.bearing_approach_speed, dt,
-                bearing=self.visibility.last_valid_image_bearing,
+                bearing=self._bearing_approach_direction(),
             )
             self.bearing_approach_active = True
             self._publish_offboard_mode(timestamp_us, velocity_control=True)
@@ -1491,7 +1574,7 @@ class TrajectoryTrackerNode(Node):
                 and not self.takeoff_complete_sent
             ):
                 self.takeoff_complete_sent = True
-                self.get_logger().info('TAKEOFF COMPLETE | entering TARGET_ACQUIRE')
+                self.get_logger().info('TAKEOFF COMPLETE | entering FOLLOW')
             status = self.mission_state_name
             command = flight_command
         elif self.mission_state in self.CONTROL_STATES:

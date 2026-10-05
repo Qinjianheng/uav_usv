@@ -30,7 +30,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
-from uav_usv_interfaces.msg import TargetObservation
+from uav_usv_interfaces.msg import TargetObservation, UavState
 
 from .front_tof_monitor import (
     camera_intrinsics,
@@ -847,6 +847,32 @@ def target_vector_from_rgbd(
     return np.asarray(geometry.center_camera, dtype=float)
 
 
+def validation_sphere_center(points, radius):
+    """Recover the validation sphere center from its visible depth surface."""
+    radius = float(radius)
+    if radius <= 0.0 or len(points) < 12:
+        return None
+    # Keep the cost bounded even when the sphere fills the image. The fit
+    # does not need a complete silhouette, unlike a median surface ray.
+    points = points[::max(1, math.ceil(len(points) / 512))]
+    matrix = np.column_stack((2.0 * points, np.ones(len(points))))
+    solution, _, rank, singular = np.linalg.lstsq(
+        matrix, np.sum(points * points, axis=1), rcond=None,
+    )
+    if rank != 4 or singular[-1] <= 1e-8 * singular[0]:
+        return None
+    center = solution[:3]
+    radius_squared = solution[3] + np.dot(center, center)
+    if not np.isfinite(center).all() or center[0] <= 0 or radius_squared <= 0:
+        return None
+    if abs(math.sqrt(radius_squared) - radius) > .1 * radius:
+        return None
+    residual = np.abs(np.linalg.norm(points - center, axis=1) - radius)
+    if np.percentile(residual, 95) > max(.05 * radius, .001):
+        return None
+    return tuple(float(value) for value in center)
+
+
 def target_geometry_from_rgbd(
     target_mask,
     depth,
@@ -859,9 +885,10 @@ def target_geometry_from_rgbd(
     Return the current estimator inputs and intermediate camera vectors.
 
     Gazebo Rendering's RGB-D depth image contains the camera-forward X
-    component.  Recover a representative surface point from that X depth,
-    then add the known radius along its camera ray.  The extra values keep
-    the approximation independently auditable.
+    component. Recover the validation sphere center from the visible 3D
+    surface, including partial close views. Sparse or degenerate surfaces
+    retain the representative surface-ray approximation. Intermediate
+    values keep the depth measurement independently auditable.
     """
     if target_mask is None or depth is None:
         return None
@@ -901,6 +928,14 @@ def target_geometry_from_rgbd(
     surface_up = -(image_y - cy) * surface_forward / fy
     left = -(image_x - cx) * forward / fx
     up = -(image_y - cy) * forward / fy
+    points = np.column_stack((
+        valid_depths,
+        -(columns - cx) * valid_depths / fx,
+        -(rows - cy) * valid_depths / fy,
+    ))
+    fitted = validation_sphere_center(points, target_radius)
+    if fitted is not None:
+        forward, left, up = fitted
     depth_mad = float(np.median(np.abs(
         valid_depths - surface_forward
     )))
@@ -1036,7 +1071,7 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('frame_id', 'local_ned')
         self.declare_parameter('horizontal_fov', 1.74)
         self.declare_parameter('minimum_red_pixels', 3)
-        self.declare_parameter('minimum_depth', 0.2)
+        self.declare_parameter('minimum_depth', 0.05)
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('minimum_depth_ratio', 0.5)
         self.declare_parameter('maximum_depth_mad', 0.25)
@@ -1055,7 +1090,7 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('image_pair_buffer_size', 8)
         self.declare_parameter('time_pair_diagnostics_enabled', False)
         self.declare_parameter('localization_rate_hz', 20.0)
-        self.declare_parameter('camera_pitch_down', 0.20944)
+        self.declare_parameter('camera_pitch_down', 0.4363323129985824)
         self.declare_parameter(
             'camera_translation_x', DEFAULT_CAMERA_TRANSLATION_FLU[0],
         )
@@ -1231,6 +1266,12 @@ class RgbdTargetLocalizer(Node):
             '/diagnostics/rgbd_localizer/compute_time',
             10,
         )
+        self.navigation_state_pub = self.create_publisher(
+            UavState, '/navigation/uav_state', 10,
+        )
+        self._navigation_lock = threading.RLock()
+        self._navigation_samples = deque(maxlen=32)
+        self._navigation_last_stamp = -math.inf
 
         self.latest_color_message = None
         self.latest_depth_message = None
@@ -1341,6 +1382,7 @@ class RgbdTargetLocalizer(Node):
             self._reset_pose_time_state()
 
         self._flush_pending_raw_pose_samples()
+        self._flush_navigation_states()
         self._request_localization()
 
     def _request_localization(self):
@@ -1587,6 +1629,12 @@ class RgbdTargetLocalizer(Node):
             return
 
         self.position_raw_sim_stamp = raw_sim_stamp
+        if getattr(self, 'navigation_state_pub', None) is not None:
+            with self._navigation_lock:
+                self._navigation_samples.append((
+                    message, raw_sim_stamp, time.monotonic(),
+                ))
+            self._flush_navigation_states()
         position = tuple(float(value) for value in values)
 
         if stamp is None:
@@ -1603,6 +1651,47 @@ class RgbdTargetLocalizer(Node):
             self.uav_position = position
             self.uav_position_time = stamp
         self._request_localization()
+
+    def _flush_navigation_states(self):
+        """Publish physical state only after a causal clock bracket exists."""
+        if getattr(self, 'navigation_state_pub', None) is None:
+            return
+        with self._navigation_lock:
+            remaining = deque(maxlen=self._navigation_samples.maxlen)
+            now = self._ros_seconds()
+            while self._navigation_samples:
+                source, raw_sim_stamp, queued_at = (
+                    self._navigation_samples.popleft()
+                )
+                stamp = self.image_clock_mapper.to_ros_time(raw_sim_stamp, now)
+                if stamp is None:
+                    if time.monotonic() - queued_at <= self.pose_wait_timeout:
+                        remaining.append((source, raw_sim_stamp, queued_at))
+                    continue
+                if stamp <= self._navigation_last_stamp:
+                    continue
+                message = UavState()
+                message.stamp = _seconds_to_time(stamp)
+                message.frame_id = 'local_ned'
+                for target, fields in (
+                    (message.position, ('x', 'y', 'z')),
+                    (message.velocity, ('vx', 'vy', 'vz')),
+                    (message.acceleration, ('ax', 'ay', 'az')),
+                ):
+                    for axis, field in zip('xyz', fields):
+                        setattr(target, axis, float(getattr(source, field)))
+                message.heading = float(source.heading)
+                message.valid = all(bool(getattr(source, field)) for field in (
+                    'xy_valid', 'z_valid', 'v_xy_valid', 'v_z_valid',
+                )) and all(math.isfinite(getattr(vector, axis))
+                           for vector in (message.position, message.velocity,
+                                          message.acceleration)
+                           for axis in 'xyz')
+                message.px4_timestamp_sample = int(source.timestamp_sample)
+                message.native_timestamp_sample = round(raw_sim_stamp * 1e6)
+                self.navigation_state_pub.publish(message)
+                self._navigation_last_stamp = stamp
+            self._navigation_samples = remaining
 
     def attitude_callback(self, message):
         """Store attitude using recovered physical PX4 sample time."""
@@ -1660,6 +1749,11 @@ class RgbdTargetLocalizer(Node):
             self.uav_attitude_time = stamp
 
     def _reset_pose_time_state(self):
+        if getattr(self, 'navigation_state_pub', None) is not None:
+            with self._navigation_lock:
+                self._navigation_samples.clear()
+                self._navigation_last_stamp = -math.inf
+                self.navigation_state_pub.publish(UavState())
         self._pending_pose_samples_for_node().clear()
         if hasattr(self, '_pending_raw_pose_samples'):
             self._pending_raw_pose_samples.clear()

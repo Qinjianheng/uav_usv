@@ -146,7 +146,8 @@ def test_delivery_reaches_follow_and_translation_with_original_age_gate():
                                      is not None)
         mission.observe_visibility(mission.mission_id, decision.state,
                                    decision.locked, control_time)
-    assert mission.phase == MissionPhase.TARGET_LOCK
+    assert mission.phase == MissionPhase.FOLLOW
+    assert mission.target_locked
     now[0] = 10.30
     decision = visibility.update(now[0], 0., 5., .05,
                                  fresh_flight_target(states[-1], now[0], .125) is not None)
@@ -166,7 +167,7 @@ def test_delivery_reaches_follow_and_translation_with_original_age_gate():
     controller.latest_kf_message = states[-1]
     controller.latest_state = replace(state, stamp=now[0])
     controller.timer_callback()
-    assert controller.diagnostics[-1][1] == 'VISUAL_BRAKING'
+    assert controller.diagnostics[-1][1] == 'FOLLOW'
     assert controller.visibility_decision.state == 'REACQUIRE'
     assert controller.latest_target_state is None
     assert not controller.diagnostics[-1][0].far_guidance_available

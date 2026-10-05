@@ -9,7 +9,7 @@ from std_msgs.msg import Bool, String
 from uav_usv_interfaces.msg import ControllerDiagnostic
 from uav_usv_interfaces.msg import MissionState, PlannerDiagnostic
 
-from .mission_manager import MissionManagerCore
+from .mission_manager import MissionManagerCore, MissionPhase
 
 
 def _seconds_to_time(value):
@@ -142,15 +142,20 @@ class MissionManagerNode(Node):
         command = message.data.strip().upper()
         accepted = self.core.handle_command(command, self._now())
         if accepted:
+            pending = (
+                ' | pending fresh visual/KF lock; FOLLOW continues'
+                if command == 'Y' and self.core.phase == MissionPhase.FOLLOW
+                else ''
+            )
             self.get_logger().info(
                 f'{command} accepted | mission={self.core.mission_id} | '
-                f'state={self.core.phase.name}'
+                f'state={self.core.phase.name}{pending}'
             )
             self._publish()
         else:
             reason = (
-                ' | Y requires FOLLOW (or transient TARGET_LOCK) and a fresh visual/KF lock; '
-                'wait for FOLLOW + target_locked=true, then press Y again'
+                ' | Y requires FOLLOW; an accepted request waits for '
+                'a fresh visual/KF lock automatically'
                 if command == 'Y' else ''
             )
             self.get_logger().warn(

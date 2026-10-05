@@ -107,6 +107,29 @@ def test_missing_image_timeout_is_reported_at_a_bounded_rate():
     assert due_data_timeout(11.2, 10.0, 10.6, 0.5)
 
 
+@pytest.mark.parametrize('center', [(.45, -.08, .12), (.7, .25, .2)])
+def test_rgbd_partial_near_sphere_recovers_geometric_center(center):
+    """Use rendered ray/sphere intersections, including a missing mask side."""
+    height, width = 120, 160
+    fov = 1.74
+    fx, fy, cx, cy = rgbd_target_localizer.camera_intrinsics(width, height, fov)
+    rows, columns = np.indices((height, width))
+    rays = np.stack((np.ones_like(rows), -(columns - cx) / fx,
+                     -(rows - cy) / fy), axis=-1)
+    center = np.array(center)
+    radius = .25
+    a = np.sum(rays * rays, axis=-1)
+    b = np.sum(rays * center, axis=-1)
+    discriminant = b * b - a * (np.dot(center, center) - radius ** 2)
+    depth = (b - np.sqrt(np.maximum(discriminant, 0))) / a
+    mask = (discriminant > 0) & (depth >= .05) & (columns > width // 3)
+    depth[~mask] = np.inf
+
+    estimated = target_vector_from_rgbd(mask, depth, fov, .05, 25., radius)
+
+    assert estimated == pytest.approx(center, abs=1e-4)
+
+
 def test_rgbd_center_pixel_recovers_forward_target_center():
     mask = np.zeros((4, 6), dtype=bool)
     mask[2, 3] = True
@@ -892,6 +915,71 @@ def test_gazebo_clock_rewind_clears_pose_and_pending_raw_samples():
     assert node.attitude_history.time_range is None
     assert not node._pending_raw_pose_samples
     assert node.waiting_image_pair is None
+
+
+def _enable_navigation(node):
+    import threading
+    messages = []
+    node.navigation_state_pub = SimpleNamespace(publish=messages.append)
+    node._navigation_lock = threading.RLock()
+    node._navigation_samples = deque(maxlen=32)
+    node._navigation_last_stamp = -math.inf
+    node.pose_wait_timeout = .15
+    return messages
+
+
+def _navigation_pose(source):
+    message = VehicleLocalPosition()
+    message.timestamp_sample = round(source * 1e6)
+    message.x, message.y, message.z = 3., 4., -5.
+    message.vx = 4.
+    message.ax = 1.
+    message.xy_valid = message.z_valid = True
+    message.v_xy_valid = message.v_z_valid = True
+    return message
+
+
+def test_navigation_preserves_sample_time_and_raw_clock_provenance():
+    node = _make_causal_pose_localizer([100.42])
+    messages = _enable_navigation(node)
+    node.position_callback(_navigation_pose(50.2))
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.stamp.sec + message.stamp.nanosec * 1e-9 == (
+        pytest.approx(100.2)
+    )
+    assert message.valid and message.frame_id == 'local_ned'
+    assert message.px4_timestamp_sample == 50_200_000
+    assert message.native_timestamp_sample == 10_200_000
+    assert message.position.x == 3. and message.velocity.x == 4.
+    assert message.acceleration.x == 1.
+
+
+def test_navigation_waits_for_clock_bracket_without_receipt_fallback():
+    now = [100.42]
+    node = _make_causal_pose_localizer(now)
+    messages = _enable_navigation(node)
+    node.position_callback(_navigation_pose(50.6))
+    assert not messages
+    now[0] = 100.82
+    node.image_clock_mapper.add_anchor(10.8, 100.8, 100.81, 1.9)
+    node._flush_navigation_states()
+    assert len(messages) == 1
+    assert messages[0].stamp.nanosec == 600_000_000
+    node._reset_pose_time_state()
+    assert not messages[-1].valid
+    assert not node._navigation_samples
+
+
+def test_navigation_clock_wait_timeout_drops_sample():
+    import time
+    node = _make_causal_pose_localizer([100.42])
+    messages = _enable_navigation(node)
+    node._navigation_samples.append((
+        _navigation_pose(50.6), 10.6, time.monotonic() - 1.,
+    ))
+    node._flush_navigation_states()
+    assert not messages and not node._navigation_samples
 
 
 def test_px4_ros_domain_mode_keeps_true_source_sample_time():

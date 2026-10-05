@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TargetPrediction.msg"
   "msg/TargetState.msg"
   "msg/TrajectoryPoint.msg"
+  "msg/UavState.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs
 )
 

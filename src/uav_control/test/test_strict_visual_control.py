@@ -38,16 +38,15 @@ def test_hold_captures_fixed_xyz_and_preserves_search_height():
     assert anchored_search_hold(None, (1., 2., -.3), 0., 1.5)[2] == -1.5
 
 
-def test_takeoff_requires_visual_lock_before_y():
+def test_takeoff_allows_follow_and_queued_y_but_requires_lock_to_intercept():
     core = MissionManagerCore()
     core.set_flight_ready(True)
     core.handle_command('X', 1.)
     core.mark_takeoff_complete(2.)
-    assert core.phase == MissionPhase.TARGET_ACQUIRE
-    assert not core.handle_command('Y', 2.1)
+    assert core.phase == MissionPhase.FOLLOW
+    assert core.handle_command('Y', 2.1)
+    assert core.phase == MissionPhase.FOLLOW
     core.observe_visibility(core.mission_id, 'TARGET_LOCK', True, 2.2)
-    assert core.phase == MissionPhase.TARGET_LOCK
-    assert core.handle_command('Y', 2.3)
     assert core.phase == MissionPhase.FAR_GUIDANCE
 
 

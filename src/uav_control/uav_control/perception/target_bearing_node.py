@@ -28,11 +28,13 @@ class BearingReading:
     raw_stamp: float = 0.0
     valid: bool = False
     bearing: float = 0.0
+    body_bearing: float = 0.0
     confidence: float = 0.0
     reason: str = ''
 
 
-def image_target_bearing(message, horizontal_fov, minimum_red_pixels):
+def image_target_bearing(message, horizontal_fov, minimum_red_pixels,
+                         camera_pitch_down=0.0):
     """Detect centroid and bearing in the image, without any 3D inputs."""
     try:
         mask = red_pixel_mask(
@@ -45,12 +47,21 @@ def image_target_bearing(message, horizontal_fov, minimum_red_pixels):
         minimum = max(int(minimum_red_pixels), 1)
         if len(columns) < minimum:
             return BearingReading(reason='TARGET_NOT_DETECTED')
-        fx, _, cx, _ = camera_intrinsics(
+        fx, fy, cx, cy = camera_intrinsics(
             message.width, message.height, horizontal_fov
         )
-        bearing = math.atan((float(np.mean(columns)) - cx) / fx)
+        pitch = float(camera_pitch_down)
+        if not math.isfinite(pitch):
+            return BearingReading(reason='INVALID_CAMERA_MOUNT')
+        image_right = (float(np.mean(columns)) - cx) / fx
+        image_down = (float(np.mean(rows)) - cy) / fy
+        bearing = math.atan(image_right)
+        # Rotate the unit camera FLU ray into body FRD. No range or pose is
+        # needed; image centering and body direction remain distinct outputs.
+        body_forward = math.cos(pitch) - math.sin(pitch) * image_down
         return BearingReading(
             valid=True, bearing=bearing,
+            body_bearing=math.atan2(image_right, body_forward),
             confidence=min(float(len(columns)) / (4.0 * minimum), 1.0),
         )
     except (ValueError, TypeError, BufferError, AttributeError):
@@ -83,8 +94,10 @@ class RgbBearingProcessor:
         image_clock_reference_timeout=0.5, image_clock_history_duration=2.0,
         image_clock_wait_timeout=0.15, maximum_system_clock_step=0.25,
         maximum_frame_age=0.15, data_timeout=0.5,
+        camera_pitch_down=0.0,
     ):
         self.horizontal_fov = float(horizontal_fov)
+        self.camera_pitch_down = float(camera_pitch_down)
         self.minimum_red_pixels = max(int(minimum_red_pixels), 1)
         self.image_clock_wait_timeout = max(float(image_clock_wait_timeout), 0)
         self.maximum_frame_age = max(float(maximum_frame_age), 0)
@@ -168,11 +181,13 @@ class RgbBearingProcessor:
                         else 'IMAGE_TIMESTAMP_STALE'),
             )
         detection = image_target_bearing(
-            message, self.horizontal_fov, self.minimum_red_pixels
+            message, self.horizontal_fov, self.minimum_red_pixels,
+            camera_pitch_down=self.camera_pitch_down,
         )
         return BearingReading(
             stamp=stamp, raw_stamp=raw_output, valid=detection.valid,
             bearing=detection.bearing, confidence=detection.confidence,
+            body_bearing=detection.body_bearing,
             reason=detection.reason,
         )
 
@@ -190,6 +205,7 @@ class TargetBearingNode(Node):
             'color_topic': '/camera/front/image_raw',
             'bearing_topic': '/perception/front/target_bearing',
             'horizontal_fov': 1.74,
+            'camera_pitch_down': 0.4363323129985824,
             'minimum_red_pixels': 3,
             'gazebo_world_name': 'default',
             'image_clock_reference_timeout': 0.5,
@@ -205,7 +221,7 @@ class TargetBearingNode(Node):
         values = {name: self.get_parameter(name).value for name in defaults}
         self.processor = RgbBearingProcessor(**{
             name: values[name] for name in (
-                'horizontal_fov', 'minimum_red_pixels',
+                'horizontal_fov', 'minimum_red_pixels', 'camera_pitch_down',
                 'image_clock_reference_timeout', 'image_clock_history_duration',
                 'image_clock_wait_timeout', 'maximum_system_clock_step',
                 'maximum_frame_age', 'data_timeout',
@@ -266,6 +282,7 @@ class TargetBearingNode(Node):
             message.raw_stamp = _time_message(reading.raw_stamp)
             message.valid = reading.valid
             message.bearing = reading.bearing
+            message.body_bearing = reading.body_bearing
             message.confidence = reading.confidence
             # A clock reset must not interleave between polling and publishing.
             self.publisher.publish(message)

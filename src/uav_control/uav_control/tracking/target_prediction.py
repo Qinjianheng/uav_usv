@@ -74,6 +74,7 @@ class PredictionEngine:
         )
         self.source = str(source)
         self.latest_state = None
+        self.last_velocity_observation_stamp = None
         self.invalid_reason = 'NO_TARGET_STATE'
 
     @staticmethod
@@ -128,11 +129,25 @@ class PredictionEngine:
             if age > self.input_timeout:
                 self.invalidate('STATE_STALE')
                 return False
-        self.predictor.update_velocity(
-            state.velocity[0],
-            state.velocity[1],
-            state.stamp,
-        )
+        if (
+            self.last_velocity_observation_stamp is not None
+            and state.observation_stamp < self.last_velocity_observation_stamp
+        ):
+            return False
+        # KF also republishes the same image projected to a newer epoch.
+        # That projection is useful as the forecast origin, but is not a new
+        # velocity observation. Derivatives use distinct acquisition times;
+        # publication jitter must not create zero-turn samples or short dt.
+        if (
+            self.last_velocity_observation_stamp is None
+            or state.observation_stamp > self.last_velocity_observation_stamp
+        ):
+            self.predictor.update_velocity(
+                state.velocity[0],
+                state.velocity[1],
+                state.observation_stamp,
+            )
+            self.last_velocity_observation_stamp = state.observation_stamp
         self.predictor.update_vertical(
             state.position[2],
             state.velocity[2],

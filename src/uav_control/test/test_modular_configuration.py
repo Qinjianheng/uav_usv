@@ -101,18 +101,41 @@ def test_planned_contact_point_stays_above_the_body_contact_threshold():
     )
 
 
-def test_tracking_velocity_mode_stays_off_until_the_reference_leads():
-    """
-    Guard the mode that made the 2026-09-20 intercept worse.
-
-    Velocity-driven tracking is only viable once the plan stops re-anchoring
-    its initial state to the measurement on every replan; with the current
-    planner it executes a ~4 m/s reference and the vehicle falls behind.
-    """
+def test_tracker_owns_position_feedback_with_continuous_replanning():
+    """Consume bounded tracker velocity without adding PX4 position feedback."""
     config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
     tracker = parameters(config, 'trajectory_tracker_node')
 
-    assert tracker['use_velocity_control'] is False
+    assert tracker['use_velocity_control'] is True
+
+
+def test_terminal_budget_uses_short_prediction_after_lower_preparation():
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    planner = parameters(config, 'intercept_planner_node')
+    tracker = parameters(config, 'trajectory_tracker_node')
+    assert planner['maximum_duration'] <= 1.5
+    assert tracker['approach_preparation_clearance'] == 1.5
+    assert tracker['approach_closing_speed'] == (
+        planner['approach_preparation_standoff_speed']
+    )
+
+
+def test_front_camera_preserves_close_contact_surfaces():
+    import xml.etree.ElementTree as ET
+
+    model = CONFIG_FILE.parent.parent / 'models/x500_mono_cam/model.sdf'
+    sensor = ET.parse(model).find(".//sensor[@name='front_tof_camera']/camera")
+    config = yaml.safe_load(CONFIG_FILE.read_text(encoding='utf-8'))
+    localizer = parameters(config, 'rgbd_target_localizer')
+    monitor = parameters(config, 'front_tof_monitor')
+    rgb_near = float(sensor.find('clip/near').text)
+    depth_near = float(sensor.find('depth_camera/clip/near').text)
+    # A 0.25 m validation sphere at 0.35 m camera range has a 0.10 m
+    # near surface. The old 0.20 m clip removed that surface during Y.
+    assert 0 < rgb_near <= .05
+    assert depth_near == pytest.approx(rgb_near)
+    assert localizer['minimum_depth'] <= .05
+    assert monitor['minimum_depth'] <= .05
 
 
 def test_sea_barrier_reserve_covers_the_airframe():
@@ -172,14 +195,12 @@ def test_approach_preparation_uses_existing_horizon_and_safety_limits():
     tracker = parameters(config, 'trajectory_tracker_node')
     evaluator = parameters(config, 'intercept_evaluator_node')
 
-    assert tracker['approach_horizon'] == pytest.approx(
-        planner['maximum_duration']
-    )
+    assert tracker['approach_horizon'] >= planner['maximum_duration']
     assert tracker['approach_contact_clearance'] == pytest.approx(
         planner['preferred_clearance']
     )
     assert tracker['approach_closing_speed'] == pytest.approx(
-        planner['preferred_closing_speed']
+        planner['approach_preparation_standoff_speed']
     )
     assert planner['approach_reserve_clearance'] == pytest.approx(
         tracker['reserve_clearance']
@@ -222,13 +243,10 @@ def test_prediction_horizon_covers_vertical_intercept_duration():
     predictor = parameters(config, 'target_predictor_node')
     planner = parameters(config, 'intercept_planner_node')
 
-    # A five-metre, acceleration-limited descent with a near-zero terminal
-    # vertical speed needs more than the old three-second hard cap.
-    assert planner['maximum_duration'] >= 3.5
+    # Y preparation handles the long descent; terminal prediction stays short.
+    assert planner['maximum_duration'] <= 1.5
     assert predictor['prediction_horizon'] >= planner['maximum_duration']
-    assert legacy['terminal_plan_absolute_max_duration'] == pytest.approx(
-        planner['maximum_duration']
-    )
+    assert legacy['terminal_plan_absolute_max_duration'] >= planner['maximum_duration']
 
 
 def test_diagnostic_prediction_output_is_isolated_from_main_prediction():
