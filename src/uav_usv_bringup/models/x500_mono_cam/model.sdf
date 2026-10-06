@@ -17,12 +17,13 @@
 
     <link name="front_camera_link">
       <!--
-        Put the sensor ahead of the X500 rotor / body envelope and tilt its
-        optical axis 25 degrees down. At the nominal 5 m altitude and 5 m
-        follow distance the target depression angle is about 45 degrees,
-        which remains inside the camera's vertical field of view.
+        Place the sensor above the front edge of the central body and tilt
+        its optical axis 28 degrees down. The original forward boom entered
+        the raised validation sphere before the UAV reference reached the
+        capture surface. This higher mount retains a visible depth surface.
+        Model-origin calibration includes x500_base's +0.24 m link offset.
       -->
-      <pose relative_to="base_link">0.35 0 -0.05 0 0.4363323129985824 0</pose>
+      <pose relative_to="base_link">0.18 0 0.15 0 0.4886921905584123 0</pose>
       <inertial>
         <mass>0.05</mass>
         <inertia>

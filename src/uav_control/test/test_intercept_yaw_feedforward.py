@@ -34,6 +34,57 @@ def test_centred_moving_line_of_sight_does_not_wait_for_pixel_error():
     assert node.yaw_owner == 'VISION'
 
 
+def test_y_preparation_also_centres_a_rotating_line_of_sight():
+    """FAR_GUIDANCE must not wait for angular lag before turning the camera."""
+    node, state = intercept_node()
+    node.mission_state = MissionState.FAR_GUIDANCE
+    state = replace(state, position=(0., 0., -1.5))
+    command = SimpleNamespace()
+    node._final_yaw(command, state, .05)
+    assert command.yawspeed == pytest.approx(.5)
+
+
+def test_partial_mask_centroid_does_not_steer_away_from_fitted_target_center():
+    """Clipped pixels at +0.4 rad must not turn a camera with a centred sphere."""
+    from uav_usv_interfaces.msg import TargetObservation
+    from test_strict_visual_control import stamp
+
+    node, state = intercept_node()
+    state = replace(state, velocity=(0., 1., 0.))  # No LOS rotation.
+    node.visibility.last_valid_image_bearing = .4
+    observation = TargetObservation()
+    observation.stamp.sec = stamp(10.2).sec
+    observation.stamp.nanosec = stamp(10.2).nanosec
+    observation.frame_id = 'local_ned'
+    observation.valid = True
+    observation.center_camera_x = 1.
+    observation.center_camera_z = -.2
+    node.observation_callback(observation)
+    command = SimpleNamespace()
+    node._final_yaw(command, state, .05)
+    assert command.yawspeed == 0.
+
+
+@pytest.mark.parametrize('source', [9., 10.21])
+def test_center_feedback_cannot_replace_fresh_rgb_with_old_or_future_geometry(source):
+    from uav_usv_interfaces.msg import TargetObservation
+    from test_strict_visual_control import stamp
+
+    node, state = intercept_node()
+    state = replace(state, velocity=(0., 1., 0.))
+    node.visibility.last_valid_image_bearing = .1
+    observation = TargetObservation()
+    observation.stamp.sec = stamp(source).sec
+    observation.stamp.nanosec = stamp(source).nanosec
+    observation.frame_id = 'local_ned'
+    observation.valid = True
+    observation.center_camera_x = 1.
+    node.observation_callback(observation)
+    command = SimpleNamespace()
+    node._final_yaw(command, state, .05)
+    assert command.yawspeed == pytest.approx(.1)
+
+
 def test_feedforward_uses_relative_velocity_including_uav_motion():
     """Cancel angular motion when UAV and target translate together."""
     node, state = intercept_node()

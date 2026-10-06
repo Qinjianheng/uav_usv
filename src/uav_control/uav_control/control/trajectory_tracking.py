@@ -496,19 +496,75 @@ class TrajectoryTrackerCore:
             self.previous_command_velocity[2] + delta_z,
         )
 
-    def command(self, state, mission_id):
+    def _terminal_cruise_velocity(self, state, control_stamp, target_at_time, target_velocity):
+        """Aim at a short future target position without lowering cruise speed."""
+        trajectory = self.active_trajectory
+        remaining = trajectory.contact_stamp - control_stamp
+        if (target_at_time is None or target_velocity is None
+                or trajectory.contact_stamp <= 0. or not 0. <= remaining <= .7):
+            return None
+        # This is an explicit control-boundary model, not a retimed measurement.
+        age = control_stamp - state.stamp
+        origin = tuple(p + v * age for p, v in zip(state.position, state.velocity))
+        target = target_at_time(control_stamp)
+        relative = tuple(target[a] - origin[a] for a in (0, 1))
+        distance = math.hypot(*relative)
+        if not 1e-6 < distance <= 2.5:
+            return None
+        speed = self.maximum_horizontal_speed
+        a = sum(v * v for v in target_velocity[:2]) - speed * speed
+        b = 2. * sum(relative[i] * target_velocity[i] for i in (0, 1))
+        c = distance * distance
+        if a < -1e-6:
+            lead = (-b - math.sqrt(max(b * b - 4. * a * c, 0.))) / (2. * a)
+        else:
+            lead = distance / speed
+        target = target_at_time(control_stamp + min(max(lead, 0.), .7))
+        aim = tuple(target[i] - origin[i] for i in (0, 1))
+        norm = math.hypot(*aim)
+        if norm <= 1e-6:
+            return None
+        desired = tuple(speed * value / norm for value in aim)
+        previous = (self.previous_command_velocity or state.velocity)[:2]
+        old_speed = min(math.hypot(*previous), speed)
+        dt = self.control_dt if self.previous_command_stamp is None else min(
+            max(control_stamp - self.previous_command_stamp, self.control_dt),
+            self.maximum_command_dt,
+        )
+        budget = self.maximum_horizontal_acceleration * dt
+        if old_speed <= 1e-6:
+            return tuple(min(speed, budget) * value / speed for value in desired)
+        heading = math.atan2(previous[1], previous[0])
+        difference = math.atan2(math.sin(math.atan2(desired[1], desired[0]) - heading),
+                                math.cos(math.atan2(desired[1], desired[0]) - heading))
+        maximum_turn = 2. * math.asin(min(budget / (2. * old_speed), 1.))
+        turn = max(-maximum_turn, min(difference, maximum_turn))
+        # Spend the acceleration budget on steering first. Rotating at a
+        # constant speed avoids the braking caused by vector interpolation.
+        allowed_speed = old_speed * math.cos(turn) + math.sqrt(max(
+            budget * budget - (old_speed * math.sin(turn)) ** 2, 0.,
+        ))
+        new_speed = max(old_speed, min(speed, allowed_speed))
+        return (new_speed * math.cos(heading + turn), new_speed * math.sin(heading + turn))
+
+    def command(self, state, mission_id, control_stamp=None,
+                terminal_target_at_time=None, terminal_target_velocity=None):
         """Return one post-Safety-Guard command or no valid-plan status."""
+        control_stamp = state.stamp if control_stamp is None else float(control_stamp)
+        if not math.isfinite(control_stamp) or control_stamp < state.stamp:
+            raise ValueError('control epoch must not precede the measured state')
         self._observe_state(state)
         trajectory = self.active_trajectory
         if (
             trajectory is None
             or trajectory.mission_id != int(mission_id)
-            or state.stamp >= trajectory.valid_until
+            or control_stamp >= trajectory.valid_until
         ):
             self.active_trajectory = None
             self.status = 'NO_VALID_PLAN'
             return None
-        desired = trajectory.sample_at_ros_time(state.stamp)
+        desired = trajectory.sample_at_ros_time(control_stamp)
+        measured_reference = trajectory.sample_at_ros_time(state.stamp)
         # Remember the reference the vehicle was just asked to follow so a
         # later plan loss can continue from it instead of snapping away.
         self.last_reference_position = desired.position
@@ -517,13 +573,18 @@ class TrajectoryTrackerCore:
             velocity + self.position_gain * (reference - current)
             for velocity, reference, current in zip(
                 desired.velocity,
-                desired.position,
+                measured_reference.position,
                 state.position,
             )
         )
         previous_velocity = self.previous_command_velocity
         previous_stamp = self.previous_command_stamp
-        velocity = self._shape_velocity(feedback_velocity, state.stamp)
+        velocity = self._shape_velocity(feedback_velocity, control_stamp)
+        terminal_velocity = self._terminal_cruise_velocity(
+            state, control_stamp, terminal_target_at_time, terminal_target_velocity,
+        )
+        if terminal_velocity is not None:
+            velocity = (*terminal_velocity, velocity[2])
         safety = apply_sea_safety_guard(
             current_z=state.position[2],
             current_vz=state.velocity[2],
@@ -544,7 +605,7 @@ class TrajectoryTrackerCore:
         )) > 1e-6
         if velocity_changed and previous_velocity is not None:
             dt = max(
-                float(state.stamp) - float(previous_stamp),
+                control_stamp - float(previous_stamp),
                 self.control_dt,
             )
             raw_acceleration = tuple(
@@ -571,7 +632,7 @@ class TrajectoryTrackerCore:
         else:
             acceleration = desired.acceleration
         self.previous_command_velocity = velocity
-        self.previous_command_stamp = state.stamp
+        self.previous_command_stamp = control_stamp
         self.status = 'TRACKING'
         return TrackingCommand(
             position=desired.position,

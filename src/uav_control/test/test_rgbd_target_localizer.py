@@ -130,6 +130,63 @@ def test_rgbd_partial_near_sphere_recovers_geometric_center(center):
     assert estimated == pytest.approx(center, abs=1e-4)
 
 
+@pytest.mark.parametrize('bad_kind', ('tiny', 'invalid', 'background'))
+def test_online_sphere_geometry_rejects_unreliable_surfaces(bad_kind):
+    mask, depth = _render_forward_depth_sphere((.45, -.08, .12), .25)
+    if bad_kind == 'tiny':
+        visible = np.argwhere(mask)
+        mask[:] = False
+        for row, column in visible[:5]:
+            mask[row, column] = True
+    elif bad_kind == 'invalid':
+        depth[mask] = np.nan
+    else:
+        rows, columns = np.nonzero(mask)
+        depth[rows[::5], columns[::5]] = 2.
+    geometry = target_geometry_from_rgbd(
+        mask, depth, 1.74, .05, 25., .25, require_valid_sphere=True,
+    )
+
+    assert geometry is None
+
+
+def test_online_partial_sphere_remains_precise_after_near_clip():
+    expected = np.array((.36, -.07, .08))
+    mask, depth = _render_forward_depth_sphere(expected, .25)
+    mask &= depth >= .15
+    mask[:, :120] = False
+    geometry = target_geometry_from_rgbd(
+        mask, depth, 1.74, .15, 25., .25, require_valid_sphere=True,
+    )
+
+    assert geometry is not None
+    assert geometry.center_camera == pytest.approx(expected, abs=.01)
+
+
+def test_sphere_center_rejects_almost_planar_tiny_cap():
+    angle = np.linspace(-.001, .001, 15)
+    left, up = np.meshgrid(angle, angle)
+    points = np.column_stack((
+        .45 - np.sqrt(.25 ** 2 - left.ravel() ** 2 - up.ravel() ** 2),
+        left.ravel(), up.ravel(),
+    ))
+
+    assert rgbd_target_localizer.validation_sphere_center(points, .25) is None
+
+
+def test_observable_sphere_fit_tolerates_submillimetre_depth_noise():
+    expected = np.array((.45, -.08, .12))
+    mask, depth = _render_forward_depth_sphere(expected, .25)
+    rng = np.random.default_rng(5)
+    depth[mask] += rng.normal(0., .0005, np.count_nonzero(mask))
+    geometry = target_geometry_from_rgbd(
+        mask, depth, 1.74, .05, 25., .25, require_valid_sphere=True,
+    )
+
+    assert geometry is not None
+    assert np.linalg.norm(np.array(geometry.center_camera) - expected) < .01
+
+
 def test_rgbd_center_pixel_recovers_forward_target_center():
     mask = np.zeros((4, 6), dtype=bool)
     mask[2, 3] = True
@@ -309,9 +366,9 @@ def test_camera_pose_transform_compensates_mount_pitch_and_translation():
 
 def test_default_camera_translation_uses_px4_model_origin():
     # x500_base's merged model has base_link at z=+0.24 m.  The front camera
-    # is z=-0.05 m relative to that link, hence z=+0.19 m from model origin.
+    # is z=+0.15 m relative to that link, hence z=+0.39 m from model origin.
     mount = rgbd_target_localizer.DEFAULT_CAMERA_TRANSLATION_FLU
-    assert mount == pytest.approx((0.35, 0.0, 0.19))
+    assert mount == pytest.approx((0.18, 0.0, 0.39))
     baseline = (Path(__file__).parents[2]
                 / 'uav_usv_bringup/config/baseline.yaml')
     parameters = yaml.safe_load(baseline.read_text())[
@@ -409,7 +466,7 @@ def _render_forward_depth_sphere(center, radius, width=320, height=240):
 
 
 @pytest.mark.parametrize('distance', (3.0, 5.0, 8.0, 12.0))
-def test_synthetic_sphere_exposes_median_plus_radius_forward_bias(distance):
+def test_synthetic_sphere_recovers_center_without_median_surface_bias(distance):
     radius = 0.25
     expected = np.array((distance, 0.0, 0.0))
     mask, depth = _render_forward_depth_sphere(expected, radius)
@@ -420,10 +477,7 @@ def test_synthetic_sphere_exposes_median_plus_radius_forward_bias(distance):
 
     assert geometry is not None
     assert geometry.projection_center == pytest.approx((160.0, 120.0))
-    assert geometry.center_camera[0] > expected[0]
-    assert geometry.center_camera[0] - expected[0] < radius
-    assert abs(geometry.center_camera[1]) < 0.02
-    assert abs(geometry.center_camera[2]) < 0.02
+    assert geometry.center_camera == pytest.approx(expected, abs=1e-4)
 
 
 def test_synthetic_off_axis_and_edge_spheres_keep_correct_camera_signs():
@@ -449,7 +503,7 @@ def test_synthetic_off_axis_and_edge_spheres_keep_correct_camera_signs():
         ) < 0.35
 
 
-def test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias():
+def test_partial_synthetic_sphere_recovers_center_from_visible_surface():
     expected = np.array((5.0, -0.8, 0.4))
     mask, depth = _render_forward_depth_sphere(expected, 0.25)
     visible_columns = np.nonzero(mask)[1]
@@ -460,7 +514,7 @@ def test_partial_synthetic_sphere_diagnostic_does_not_hide_occlusion_bias():
     )
 
     assert geometry is not None
-    assert abs(geometry.center_camera[1] - expected[1]) > 0.03
+    assert geometry.center_camera == pytest.approx(expected, abs=1e-4)
 
 
 def test_rgbd_localizer_rejects_missing_valid_depth():
@@ -1387,6 +1441,41 @@ def test_large_depth_mad_rejects_observation_with_quality_evidence():
     assert message.target_reference_z_offset == pytest.approx(0.0)
     assert all(math.isnan(value) for value in message.covariance)
     assert not positions
+
+
+def test_online_node_rejects_sparse_sphere_instead_of_publishing_fallback():
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.target_radius = .25
+    positions = []
+    node.target_position_pub = SimpleNamespace(publish=positions.append)
+    for stamp in (100., 100.5):
+        node.position_history.add(stamp, (0., 0., -5.))
+        node.attitude_history.add(stamp, (1., 0., 0., 0.))
+    _enqueue_rgbd(node, now, 100.1, .02, .03)
+    node.localize()
+
+    assert len(observations) == 1
+    assert not observations[0].valid
+    assert observations[0].rejection_reason == 'TARGET_VECTOR_INVALID'
+    assert not positions
+
+
+def test_valid_camera_center_is_available_without_optional_geometry_diagnostics():
+    """Yaw feedback needs the measured camera ray in the normal launch too."""
+    now = [100.0]
+    node, observations = _make_synthetic_localizer(now)
+    node.geometry_diagnostics_enabled = False
+    for stamp in (100., 100.5):
+        node.position_history.add(stamp, (0., 0., -5.))
+        node.attitude_history.add(stamp, (1., 0., 0., 0.))
+    _enqueue_rgbd(node, now, 100.1, .02, .03)
+    node.localize()
+    message = observations[-1]
+    assert message.valid
+    assert not message.geometry_diagnostics_enabled
+    assert (message.center_camera_x, message.center_camera_y,
+            message.center_camera_z) == pytest.approx((5., 1.25, 1.25))
 
 
 def test_localizer_processes_latest_complete_pair_instead_of_fifo_backlog():

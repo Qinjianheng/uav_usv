@@ -306,7 +306,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('maximum_horizontal_acceleration', 3.0)
         self.declare_parameter('maximum_vertical_acceleration', 3.0)
         self.declare_parameter('preferred_closing_speed', 1.5)
-        self.declare_parameter('conservative_closing_speed', 0.3)
+        self.declare_parameter('conservative_closing_speed', 1.2)
         self.declare_parameter('planned_capture_radius', 0.35)
         self.declare_parameter('terminal_time_threshold', 1.0)
         self.declare_parameter('sea_surface_z', 0.0)
@@ -322,7 +322,7 @@ class InterceptPlannerNode(Node):
         self.declare_parameter('approach_reserve_clearance', 0.20)
         self.declare_parameter(
             'approach_preparation_standoff_speed',
-            0.8,
+            1.5,
         )
         self.declare_parameter(
             'approach_preparation_position_tolerance',

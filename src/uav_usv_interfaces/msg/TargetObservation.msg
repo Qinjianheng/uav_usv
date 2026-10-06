@@ -68,6 +68,9 @@ float64 camera_pitch_down
 float64 surface_camera_x
 float64 surface_camera_y
 float64 surface_camera_z
+# Valid observations always carry the validated target camera FLU ray.
+# Optional geometry diagnostics may also carry it on a rejected observation;
+# consumers must still require valid, correct frame, and acquisition freshness.
 float64 center_camera_x
 float64 center_camera_y
 float64 center_camera_z

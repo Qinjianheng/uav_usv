@@ -311,9 +311,17 @@ class MovingTarget(Node):
         self.flight_ready = bool(msg.data)
 
     def timer_callback(self):
-
+        # The renderer can accept set_pose requests even while physics is
+        # paused. Follow the native world pause flag so wall-clock ROS timers
+        # cannot keep moving the target after the UAV simulation has stopped.
+        native_paused = getattr(self.gazebo_visualizer, 'world_paused', None)
+        if native_paused is not None:
+            self.gazebo_world_paused = bool(native_paused)
+        if self.gazebo_world_paused:
+            # Resume from a nominal step, never integrate the paused interval.
+            self.last_motion_update_time_ns = None
         # 更新目标位置
-        if self.started and not self.hit:
+        if self.started and not self.hit and not self.gazebo_world_paused:
             now_ns = self.get_clock().now().nanoseconds
             motion_step = measured_motion_step(
                 self.last_motion_update_time_ns,
@@ -377,7 +385,7 @@ class MovingTarget(Node):
         # 发布速度
         velocity_msg = Vector3()
 
-        if self.hit or not self.started:
+        if self.hit or not self.started or self.gazebo_world_paused:
             velocity_msg.x = 0.0
             velocity_msg.y = 0.0
             velocity_msg.z = 0.0

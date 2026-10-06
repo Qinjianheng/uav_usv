@@ -1,0 +1,6 @@
+{
+  "src/uav_control/uav_control/control/trajectory_tracking.py": "bdb1d2a8d3aaaff45e579b3645fce04b1a99e49322c40c91d1a13e476b8c7573",
+  "src/uav_control/uav_control/control/trajectory_tracker_node.py": "0868b94516568130fb9db7d6b808c74c57a38c691dc1c89dd485c84a68f7f32b",
+  "src/uav_usv_bringup/config/baseline.yaml": "c957d631a23b1faf6007e4dc99386cf9e782946f1b044944d4476fbeac389f90",
+  "src/uav_usv_bringup/config/visual_geometry_diagnostics.yaml": "1844b1a731c8a10488066a1389300f3e6a15169b7e0b17cdcaab15119875cdb9"
+}

@@ -1,6 +1,7 @@
 """Tests for realtime trajectory acceptance, sampling, and safety."""
 
 import pytest
+from dataclasses import replace
 
 from uav_control.control.trajectory_tracking import PolynomialSegmentData
 from uav_control.control.trajectory_tracking import PolynomialTrajectory
@@ -50,6 +51,81 @@ def test_polynomial_is_sampled_from_original_source_time():
 
     assert sample.position == pytest.approx((0.5, 0.0, -0.9))
     assert sample.velocity == pytest.approx((1.0, 0.0, 0.2))
+
+
+@pytest.mark.parametrize('delay', [0.02, 0.04, 0.08])
+def test_delayed_perfect_tracking_does_not_create_position_feedback(delay):
+    """A physical 6 m/s sample must not be compared with a later position."""
+    coefficients = (0., 6., 0., 0., 0., 0.,
+                    0., 0., 0., 0., 0., 0.,
+                    -1., 0., 0., 0., 0., 0.)
+    trajectory = replace(linear_trajectory(),
+                         segments=(PolynomialSegmentData(2., coefficients),))
+    tracker = TrajectoryTrackerCore()
+    tracker.active_trajectory = trajectory
+    sample_stamp = 10.5 - delay
+    measured = state(sample_stamp, (6. * (.5 - delay), 0., -1.), (6., 0., 0.))
+    command = tracker.command(measured, 4, control_stamp=10.5)
+    assert command.velocity == pytest.approx((6., 0., 0.))
+    assert command.position == pytest.approx((3., 0., -1.))
+    assert measured.stamp == sample_stamp
+    assert tracker.previous_command_stamp == 10.5
+
+
+def test_accelerating_feedforward_uses_command_epoch_with_same_time_feedback():
+    # x(t)=t^2: physical sample t=.45 has p=.2025 and v=.9;
+    # command epoch t=.5 requires v=1, with zero tracking error.
+    coefficients = (0., 0., 1., 0., 0., 0.,
+                    0., 0., 0., 0., 0., 0.,
+                    -1., 0., 0., 0., 0., 0.)
+    tracker = TrajectoryTrackerCore()
+    tracker.active_trajectory = replace(
+        linear_trajectory(), segments=(PolynomialSegmentData(2., coefficients),))
+    command = tracker.command(state(10.45, (.2025, 0., -1.), (.9, 0., 0.)),
+                              4, control_stamp=10.5)
+    assert command.velocity == pytest.approx((1., 0., 0.))
+    assert command.acceleration == pytest.approx((2., 0., 0.))
+
+
+def test_old_measurement_cannot_keep_an_expired_trajectory_executing():
+    tracker = TrajectoryTrackerCore()
+    tracker.active_trajectory = linear_trajectory()
+    assert tracker.command(state(11.98), 4, control_stamp=12.) is None
+
+
+def test_terminal_feedback_preserves_cruise_speed_and_corrects_a_missed_target():
+    # The old terminal plan asks for 5.5 m/s. A newer target position is
+    # displaced laterally; its 4 m/s velocity enters the short intercept lead.
+    coefficients = (0., 5.5, 0., 0., 0., 0.,
+                    0., 0., 0., 0., 0., 0.,
+                    -.33, 0., 0., 0., 0., 0.)
+    tracker = TrajectoryTrackerCore(maximum_horizontal_speed=6.5)
+    tracker.active_trajectory = replace(
+        linear_trajectory(), contact_stamp=12.,
+        segments=(PolynomialSegmentData(2., coefficients),))
+    tracker.previous_command_velocity = (6.5, 0., 0.)
+    tracker.previous_command_stamp = 11.45
+    measured = state(11.5, (8.25, 0., -.33), (6.5, 0., 0.))
+    command = tracker.command(
+        measured, 4, control_stamp=11.5,
+        terminal_target_at_time=lambda stamp: (9.25 + 4. * (stamp - 11.5), .4, 0.),
+        terminal_target_velocity=(4., 0., 0.),
+    )
+    assert (command.velocity[0] ** 2 + command.velocity[1] ** 2) ** .5 == pytest.approx(6.5)
+    assert command.velocity[1] > 0.
+    delta = sum((a - b) ** 2 for a, b in zip(command.velocity, (6.5, 0., 0.))) ** .5
+    assert delta <= 3. * .05 + 1e-9
+
+
+def test_terminal_cruise_feedback_does_not_change_earlier_minco_tracking():
+    tracker = TrajectoryTrackerCore(maximum_horizontal_speed=6.5)
+    tracker.active_trajectory = replace(linear_trajectory(), contact_stamp=12.)
+    command = tracker.command(
+        state(10.5, (.5, 0., -.9)), 4,
+        terminal_target_at_time=lambda stamp: (2., 0., 0.),
+        terminal_target_velocity=(4., 0., 0.),
+    )
+    assert command.velocity == pytest.approx((1., 0., .2))
 
 
 def test_tracker_samples_minco_from_trajectory_start_not_prediction_stamp():

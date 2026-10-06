@@ -1,0 +1,42 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__ test_terminal_feedback_preserves_cruise_speed_and_corrects_a_missed_target __
+
+    def test_terminal_feedback_preserves_cruise_speed_and_corrects_a_missed_target():
+        # The old terminal plan asks for 5.5 m/s. A newer target position is
+        # displaced laterally; its 4 m/s velocity enters the short intercept lead.
+        coefficients = (0., 5.5, 0., 0., 0., 0.,
+                        0., 0., 0., 0., 0., 0.,
+                        -.33, 0., 0., 0., 0., 0.)
+        tracker = TrajectoryTrackerCore(maximum_horizontal_speed=6.5)
+        tracker.active_trajectory = replace(
+            linear_trajectory(), contact_stamp=12.,
+            segments=(PolynomialSegmentData(2., coefficients),))
+        tracker.previous_command_velocity = (6.5, 0., 0.)
+        tracker.previous_command_stamp = 11.45
+        measured = state(11.5, (8.25, 0., -.33), (6.5, 0., 0.))
+>       command = tracker.command(
+            measured, 4, control_stamp=11.5,
+            terminal_target_at_time=lambda stamp: (9.25 + 4. * (stamp - 11.5), .4, 0.),
+            terminal_target_velocity=(4., 0., 0.),
+        )
+E       TypeError: TrajectoryTrackerCore.command() got an unexpected keyword argument 'terminal_target_at_time'
+
+test/test_trajectory_tracking.py:109: TypeError
+_____ test_terminal_cruise_feedback_does_not_change_earlier_minco_tracking _____
+
+    def test_terminal_cruise_feedback_does_not_change_earlier_minco_tracking():
+        tracker = TrajectoryTrackerCore(maximum_horizontal_speed=6.5)
+        tracker.active_trajectory = replace(linear_trajectory(), contact_stamp=12.)
+>       command = tracker.command(
+            state(10.5, (.5, 0., -.9)), 4,
+            terminal_target_at_time=lambda stamp: (2., 0., 0.),
+            terminal_target_velocity=(4., 0., 0.),
+        )
+E       TypeError: TrajectoryTrackerCore.command() got an unexpected keyword argument 'terminal_target_at_time'
+
+test/test_trajectory_tracking.py:123: TypeError
+=========================== short test summary info ============================
+FAILED test/test_trajectory_tracking.py::test_terminal_feedback_preserves_cruise_speed_and_corrects_a_missed_target
+FAILED test/test_trajectory_tracking.py::test_terminal_cruise_feedback_does_not_change_earlier_minco_tracking
+2 failed, 26 deselected in 0.07s

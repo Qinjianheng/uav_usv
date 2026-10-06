@@ -65,6 +65,7 @@ class GazeboTargetVisualizer:
         from gz.msgs10.entity_factory_pb2 import EntityFactory
         from gz.msgs10.pose_pb2 import Pose
         from gz.msgs10.world_control_pb2 import WorldControl
+        from gz.msgs10.world_stats_pb2 import WorldStatistics
         from gz.transport13 import Node as GazeboTransportNode
 
         self._boolean_type = Boolean
@@ -95,6 +96,19 @@ class GazeboTargetVisualizer:
         self._created = False
         self._last_create_attempt = -math.inf
         self.last_error = ''
+        self._world_paused = None
+        if not self._node.subscribe(
+            WorldStatistics, f'/world/{self._world_name}/stats', self._world_stats_callback,
+        ):
+            raise RuntimeError('Could not subscribe to native Gazebo pause state.')
+
+    @property
+    def world_paused(self):
+        """Native world pause state, unknown until the first statistics packet."""
+        return self._world_paused
+
+    def _world_stats_callback(self, message):
+        self._world_paused = bool(message.paused)
 
     @property
     def created(self):

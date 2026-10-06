@@ -238,10 +238,10 @@ intercept_planner_node:
     # Hard MINCO feasibility limit matches the 7 m/s vehicle envelope.
     maximum_horizontal_speed: 7.0
     maximum_vertical_speed: 4.0
-    maximum_horizontal_acceleration: 3.0
+    maximum_horizontal_acceleration: 3.5
     maximum_vertical_acceleration: 3.0
     preferred_closing_speed: 1.5
-    conservative_closing_speed: 0.3
+    conservative_closing_speed: 1.2
     # The aim sphere must contain the watered-off contact point.  The airframe
     # reaches 0.23 m below the PX4 reference (see the evaluator's
     # body_lower_extent), so the contact altitude is chosen at
@@ -287,7 +287,7 @@ intercept_planner_node:
     # FAR_GUIDANCE must converge on the moving, vertical-time-sized standoff
     # before the first descent can be admitted.  These are joint position and
     # relative-velocity checks inside the existing full MINCO/safety gate.
-    approach_preparation_standoff_speed: 0.8
+    approach_preparation_standoff_speed: 1.5
     approach_preparation_position_tolerance: 0.75
     approach_preparation_velocity_tolerance: 0.75
     response_delay: 0.15
@@ -319,8 +319,8 @@ trajectory_tracker_node:
     # Y preparation lowers altitude with the existing velocity shaper.
     # The moving standoff is closing_speed * current vertical minimum time.
     approach_contact_clearance: 0.33
-    approach_preparation_clearance: 1.5
-    approach_closing_speed: 0.8
+    approach_preparation_clearance: 1.2
+    approach_closing_speed: 1.5
     approach_horizon: 4.0
     approach_response_delay: 0.15
     maximum_plan_age: 0.125
@@ -345,12 +345,15 @@ trajectory_tracker_node:
     search_arc_increment: 0.52
     terminal_loss_recovery_timeout: 0.3
     position_gain: 1.2
+    terminal_cruise_enabled: true
     # Keep executed PX4 commands below the 7 m/s planning envelope.
     maximum_horizontal_speed: 6.5
     # Keep non-MINCO FOLLOW/FAR_GUIDANCE below the tracker command limit.
     guidance_maximum_horizontal_speed: 6.2
     maximum_vertical_speed: 4.0
-    maximum_horizontal_acceleration: 3.0
+    maximum_horizontal_acceleration: 3.5
+    # Keep TAKEOFF/FOLLOW/FAR_GUIDANCE acceleration unchanged.
+    guidance_maximum_horizontal_acceleration: 3.0
     maximum_vertical_acceleration: 3.0
     sea_surface_z: 0.0
     # contact_clearance (0.05 m) + terminal_safety_margin (0.02 m).
@@ -429,6 +432,7 @@ intercept_evaluator_node:
     gazebo_uav_entity_name: x500_mono_cam_0
     gazebo_target_entity_name: usv_target
     gazebo_visual_height_offset: 0.42
+    pause_gazebo_on_success: true
     gazebo_pause_timeout_ms: 250
     gazebo_pause_maximum_attempts: 2
     gazebo_pause_retry_delay: 0.05
@@ -484,10 +488,10 @@ rgbd_target_localizer:
     image_pair_buffer_size: 8
     time_pair_diagnostics_enabled: false
     localization_rate_hz: 10.0
-    camera_pitch_down: 0.4363323129985824
-    camera_translation_x: 0.35
+    camera_pitch_down: 0.4886921905584123
+    camera_translation_x: 0.18
     camera_translation_y: 0.0
-    camera_translation_z: 0.19
+    camera_translation_z: 0.39
     target_radius: 0.25
     target_reference_z_offset: 0.42
     # Optional bounded geometry fields for offline error attribution.
@@ -514,7 +518,7 @@ front_tof_monitor:
     minimum_depth: 0.05
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
-    camera_pitch_down: 0.4363323129985824
+    camera_pitch_down: 0.4886921905584123
     target_visual_height_offset: 0.42
     analysis_rate_hz: 5.0
     gazebo_world_name: default
@@ -529,7 +533,7 @@ dual_tof_selector:
 
 target_bearing_node:
   ros__parameters:
-    camera_pitch_down: 0.4363323129985824
+    camera_pitch_down: 0.4886921905584123
     color_topic: /camera/front/image_raw
     bearing_topic: /perception/front/target_bearing
     horizontal_fov: 1.74

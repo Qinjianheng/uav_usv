@@ -486,10 +486,10 @@ rgbd_target_localizer:
     image_pair_buffer_size: 8
     time_pair_diagnostics_enabled: false
     localization_rate_hz: 10.0
-    camera_pitch_down: 0.20944
-    camera_translation_x: 0.35
+    camera_pitch_down: 0.4886921905584123
+    camera_translation_x: 0.18
     camera_translation_y: 0.0
-    camera_translation_z: 0.19
+    camera_translation_z: 0.39
     target_radius: 0.25
     target_reference_z_offset: 0.42
     # Optional bounded geometry fields for offline error attribution.
@@ -516,7 +516,7 @@ front_tof_monitor:
     minimum_depth: 0.05
     maximum_depth: 25.0
     evaluation_window_seconds: 5.0
-    camera_pitch_down: 0.20944
+    camera_pitch_down: 0.4886921905584123
     target_visual_height_offset: 0.42
     analysis_rate_hz: 5.0
     gazebo_world_name: default
@@ -531,6 +531,7 @@ dual_tof_selector:
 
 target_bearing_node:
   ros__parameters:
+    camera_pitch_down: 0.4886921905584123
     color_topic: /camera/front/image_raw
     bearing_topic: /perception/front/target_bearing
     horizontal_fov: 1.74

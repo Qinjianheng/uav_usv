@@ -1,5 +1,6 @@
 import array
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -42,6 +43,9 @@ class Recorder(Node):
         self.result_time = None
         self.started = time.monotonic()
         self.auto_x = '--auto-x' in sys.argv
+        self.require_settled_follow = '--settled-follow' in sys.argv
+        self.navigation = self.kf = None
+        self.follow_metrics = {}
         self.flight_ready = False
         self.x_sent = False
         self.x_ready_since = None
@@ -108,6 +112,10 @@ class Recorder(Node):
             self.mission = msg
         elif name == 'controller':
             self.control = msg
+        elif name == 'navigation':
+            self.navigation = msg
+        elif name == 'kf':
+            self.kf = msg
         elif name == 'planner' and self.y_time is not None:
             print('PLAN', msg.plan_id, msg.prediction_sequence_id,
                   msg.failure_detail, msg.rejection_stage, msg.rejection_detail,
@@ -117,12 +125,48 @@ class Recorder(Node):
             print('RESULT', plain(message_to_ordereddict(msg)), flush=True)
             self.result_time = now
 
+    def settled_follow(self):
+        """Test-only Y trigger from fresh estimated states, never target truth."""
+        uav, target = self.navigation, self.kf
+        if uav is None or target is None or not uav.valid or not target.valid:
+            return False
+        if uav.frame_id != 'local_ned' or target.frame_id != uav.frame_id:
+            return False
+        ros_now = self.get_clock().now().nanoseconds * 1e-9
+        for stamp in (uav.stamp, target.stamp, target.source_stamp):
+            age = ros_now - (stamp.sec + stamp.nanosec * 1e-9)
+            if stamp.sec <= 0 or not 0 <= age <= .125:
+                return False
+        speed = math.hypot(target.velocity.x, target.velocity.y)
+        if speed < .1:
+            return False
+        desired_x = target.position.x - 5. * target.velocity.x / speed
+        desired_y = target.position.y - 5. * target.velocity.y / speed
+        metrics = {
+            'follow_position_error': math.hypot(uav.position.x-desired_x,
+                                               uav.position.y-desired_y),
+            'horizontal_distance': math.hypot(uav.position.x-target.position.x,
+                                              uav.position.y-target.position.y),
+            'relative_horizontal_speed': math.hypot(uav.velocity.x-target.velocity.x,
+                                                    uav.velocity.y-target.velocity.y),
+            'height': -uav.position.z,
+            'vertical_speed': uav.velocity.z,
+        }
+        self.follow_metrics = metrics
+        return (all(math.isfinite(v) for v in metrics.values())
+                and metrics['follow_position_error'] <= 1.
+                and metrics['relative_horizontal_speed'] <= 1.
+                and abs(metrics['height']-5.) <= .35
+                and abs(metrics['vertical_speed']) <= .35)
+
     def tick(self):
         now = time.monotonic()
         ready = (self.mission is not None and self.mission.state_name == 'FOLLOW'
                  and self.control is not None and self.control.target_visible
                  and self.control.target_locked
                  and now-self.last.get('controller', 0) < .2)
+        if self.require_settled_follow:
+            ready = ready and self.settled_follow()
         if self.y_time is None:
             if ready and self.follow_since is None:
                 self.follow_since = now
@@ -132,7 +176,9 @@ class Recorder(Node):
                 msg = String(data='Y')
                 self.pub.publish(msg)
                 self.y_time = now
-                self.write('driver', {'command': 'Y', 'continuous_locked_follow_seconds': now-self.follow_since})
+                self.write('driver', {'command': 'Y', 'continuous_locked_follow_seconds': now-self.follow_since,
+                                      'settled_follow_required': self.require_settled_follow,
+                                      'entry_metrics': self.follow_metrics})
                 print('Y SENT after stable FOLLOW', flush=True)
         self.output.flush()
         if (self.result_time is not None and now-self.result_time > 2

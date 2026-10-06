@@ -41,8 +41,8 @@ from .front_tof_monitor import (
 
 # The PX4 local position is referenced to the Gazebo model origin.  The
 # merged x500_base puts base_link at model z=+0.24 m; front_camera_link is
-# z=-0.05 m relative to base_link, so its model-relative z is +0.19 m.
-DEFAULT_CAMERA_TRANSLATION_FLU = (0.35, 0.0, 0.19)
+# z=+0.15 m relative to base_link, so its model-relative z is +0.39 m.
+DEFAULT_CAMERA_TRANSLATION_FLU = (0.18, 0.0, 0.39)
 
 
 def aligned_camera_qos():
@@ -850,7 +850,8 @@ def target_vector_from_rgbd(
 def validation_sphere_center(points, radius):
     """Recover the validation sphere center from its visible depth surface."""
     radius = float(radius)
-    if radius <= 0.0 or len(points) < 12:
+    if (not math.isfinite(radius) or radius <= 0.0 or len(points) < 12
+            or not np.isfinite(points).all()):
         return None
     # Keep the cost bounded even when the sphere fills the image. The fit
     # does not need a complete silhouette, unlike a median surface ray.
@@ -859,7 +860,9 @@ def validation_sphere_center(points, radius):
     solution, _, rank, singular = np.linalg.lstsq(
         matrix, np.sum(points * points, axis=1), rcond=None,
     )
-    if rank != 4 or singular[-1] <= 1e-8 * singular[0]:
+    # A tiny nearly planar cap can have exact rank and negligible residual,
+    # while amplifying depth/model errors by more than 100000 times.
+    if rank != 4 or singular[-1] <= 1e-5 * singular[0]:
         return None
     center = solution[:3]
     radius_squared = solution[3] + np.dot(center, center)
@@ -880,6 +883,7 @@ def target_geometry_from_rgbd(
     minimum_depth,
     maximum_depth,
     target_radius=0.0,
+    require_valid_sphere=False,
 ):
     """
     Return the current estimator inputs and intermediate camera vectors.
@@ -887,8 +891,9 @@ def target_geometry_from_rgbd(
     Gazebo Rendering's RGB-D depth image contains the camera-forward X
     component. Recover the validation sphere center from the visible 3D
     surface, including partial close views. Sparse or degenerate surfaces
-    retain the representative surface-ray approximation. Intermediate
-    values keep the depth measurement independently auditable.
+    retain the representative surface-ray approximation for diagnostics.
+    The online node requires a valid sphere and rejects that approximation.
+    Intermediate values keep the depth measurement independently auditable.
     """
     if target_mask is None or depth is None:
         return None
@@ -934,6 +939,8 @@ def target_geometry_from_rgbd(
         -(rows - cy) * valid_depths / fy,
     ))
     fitted = validation_sphere_center(points, target_radius)
+    if require_valid_sphere and target_radius > 0.0 and fitted is None:
+        return None
     if fitted is not None:
         forward, left, up = fitted
     depth_mad = float(np.median(np.abs(
@@ -1090,7 +1097,7 @@ class RgbdTargetLocalizer(Node):
         self.declare_parameter('image_pair_buffer_size', 8)
         self.declare_parameter('time_pair_diagnostics_enabled', False)
         self.declare_parameter('localization_rate_hz', 20.0)
-        self.declare_parameter('camera_pitch_down', 0.4363323129985824)
+        self.declare_parameter('camera_pitch_down', 0.4886921905584123)
         self.declare_parameter(
             'camera_translation_x', DEFAULT_CAMERA_TRANSLATION_FLU[0],
         )
@@ -2264,6 +2271,7 @@ class RgbdTargetLocalizer(Node):
             self.minimum_depth,
             self.maximum_depth,
             self.target_radius,
+            require_valid_sphere=True,
         )
         if geometry is None:
             self.publish_invalid_observation(
@@ -2339,6 +2347,10 @@ class RgbdTargetLocalizer(Node):
             math.hypot(camera_vector[1], camera_vector[2]),
             max(camera_vector[0], 1e-9),
         ))
+        # The validated camera ray is a perception output used by visual yaw,
+        # independent of optional verbose pose/geometry audit fields.
+        (observation.center_camera_x, observation.center_camera_y,
+         observation.center_camera_z) = geometry.center_camera
         if getattr(self, 'geometry_diagnostics_enabled', False):
             observation.geometry_diagnostics_enabled = True
             observation.mask_centroid_u = geometry.mask_center[0]
@@ -2372,11 +2384,6 @@ class RgbdTargetLocalizer(Node):
                 observation.surface_camera_y,
                 observation.surface_camera_z,
             ) = geometry.surface_camera
-            (
-                observation.center_camera_x,
-                observation.center_camera_y,
-                observation.center_camera_z,
-            ) = geometry.center_camera
             (
                 observation.target_body_flu_x,
                 observation.target_body_flu_y,

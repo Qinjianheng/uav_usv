@@ -1,0 +1,119 @@
+{
+  "role": "ORIGINAL_SAMPLE_EPOCH_SPEED_AUDIT",
+  "results": [
+    {
+      "stamp": {
+        "sec": 1791251704,
+        "nanosec": 520122528
+      },
+      "mission_id": 1,
+      "success": true,
+      "outcome": "SUCCESS",
+      "reason": "CAPTURE_RADIUS_REACHED",
+      "detail": "determined by simulation truth in evaluator only",
+      "elapsed_time": 4.622915983200073,
+      "capture_radius": 0.5,
+      "minimum_distance": 0.48256359328943976,
+      "horizontal_distance": 0.2654240013035786,
+      "vertical_error": 0.40301082007858513,
+      "relative_speed": 2.80114702963954,
+      "closing_speed": 1.3783419642673298,
+      "max_horizontal_speed": 6.789334900963804,
+      "max_vertical_speed": 2.760979369920136,
+      "max_horizontal_acceleration": 4.266267148177928,
+      "max_vertical_acceleration": 4.494329145081204
+    }
+  ],
+  "phases": [
+    {
+      "state": "INIT",
+      "t": -43.35195517539978
+    },
+    {
+      "state": "GROUND_HOLD",
+      "t": -41.33780241012573
+    },
+    {
+      "state": "INIT",
+      "t": -33.48679280281067
+    },
+    {
+      "state": "GROUND_HOLD",
+      "t": -33.437994956970215
+    },
+    {
+      "state": "TAKEOFF",
+      "t": -31.195794820785522
+    },
+    {
+      "state": "FOLLOW",
+      "t": -21.93799114227295
+    },
+    {
+      "state": "FAR_GUIDANCE",
+      "t": 0.002388477325439453
+    },
+    {
+      "state": "MINCO_READY",
+      "t": 3.162308931350708
+    },
+    {
+      "state": "MINCO_TRACKING",
+      "t": 3.1979455947875977
+    },
+    {
+      "state": "MINCO_READY",
+      "t": 3.4182493686676025
+    },
+    {
+      "state": "MINCO_TRACKING",
+      "t": 3.4478719234466553
+    },
+    {
+      "state": "TERMINAL_MINCO",
+      "t": 3.6637134552001953
+    },
+    {
+      "state": "PLAN_RECOVERY",
+      "t": 4.698093891143799
+    },
+    {
+      "state": "SAFE_WAIT",
+      "t": 5.198371887207031
+    },
+    {
+      "state": "TARGET_LOCK",
+      "t": 5.213127613067627
+    },
+    {
+      "state": "FAR_GUIDANCE",
+      "t": 5.299380540847778
+    }
+  ],
+  "last_0p7_seconds": {
+    "command_speed": {
+      "count": 14,
+      "first": 5.980596009625066,
+      "last": 6.500000000000001,
+      "maximum": 6.500000000000001,
+      "minimum": 5.980596009625066,
+      "peak_minus_contact": 0.0
+    },
+    "actual_speed": {
+      "count": 14,
+      "first": 5.312555079319133,
+      "last": 6.783258608319563,
+      "maximum": 6.783258608319563,
+      "minimum": 5.312555079319133,
+      "peak_minus_contact": 0.0
+    },
+    "minco_speed": {
+      "count": 14,
+      "first": 5.528360141726466,
+      "last": 5.482047513273208,
+      "maximum": 5.605756132203096,
+      "minimum": 5.482047513273208,
+      "peak_minus_contact": 0.12370861892988838
+    }
+  }
+}

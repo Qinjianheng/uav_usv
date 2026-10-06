@@ -148,7 +148,11 @@ def red_pixel_mask(data, width, height, step, encoding):
     green = pixels[:, :, green_index].astype(np.uint16)
     blue = pixels[:, :, blue_index].astype(np.uint16)
     return (
-        (red >= 160)
+        # The validation sphere's shadow is still saturated red (R=94 in
+        # native terminal frames). A lit-surface cutoff drops the whole
+        # target before it leaves view. Keep chromatic dominance and the
+        # absolute contrast gate while admitting that visible dark surface.
+        (red >= 90)
         & (red >= 3 * green // 2)
         & (red >= 3 * blue // 2)
         & (red - np.minimum(green, blue) >= 60)
@@ -252,7 +256,7 @@ class FrontTofMonitor(Node):
         self.declare_parameter('minimum_depth', 0.05)
         self.declare_parameter('maximum_depth', 25.0)
         self.declare_parameter('evaluation_window_seconds', 5.0)
-        self.declare_parameter('camera_pitch_down', 0.4363323129985824)
+        self.declare_parameter('camera_pitch_down', 0.4886921905584123)
         self.declare_parameter('target_visual_height_offset', 0.42)
         self.declare_parameter('analysis_rate_hz', 10.0)
         self.declare_parameter('gazebo_world_name', 'default')

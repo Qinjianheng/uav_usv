@@ -185,6 +185,7 @@ class InterceptEvaluatorNode(Node):
         self.declare_parameter('gazebo_pause_timeout_ms', 250)
         self.declare_parameter('gazebo_pause_maximum_attempts', 2)
         self.declare_parameter('gazebo_pause_retry_delay', 0.05)
+        self.declare_parameter('pause_gazebo_on_success', True)
         rate = float(self.get_parameter('evaluation_rate_hz').value)
         if rate <= 0.0:
             raise ValueError('evaluation_rate_hz must be positive')
@@ -241,6 +242,22 @@ class InterceptEvaluatorNode(Node):
         world_name = str(
             self.get_parameter('gazebo_world_name').value
         ).strip().strip('/')
+        self.pause_gazebo_on_success = bool(self.get_parameter(
+            'pause_gazebo_on_success').value)
+        if self.pause_gazebo_on_success:
+            try:
+                from .gazebo_terminal import GazeboTerminalPauser, GazeboWorldPauseClient
+
+                pause_client = GazeboWorldPauseClient(
+                    world_name, self.get_parameter('gazebo_pause_timeout_ms').value)
+                self.gazebo_pauser = GazeboTerminalPauser(
+                    pause_client.pause_world,
+                    maximum_attempts=self.get_parameter(
+                        'gazebo_pause_maximum_attempts').value,
+                    retry_delay=self.get_parameter('gazebo_pause_retry_delay').value,
+                )
+            except (ImportError, RuntimeError, ValueError) as exc:
+                self.get_logger().warn(f'Capture pause client unavailable: {exc}')
         self.gazebo_entity_diagnostics_enabled = bool(self.get_parameter(
             'gazebo_entity_diagnostics_enabled'
         ).value)
@@ -1422,13 +1439,14 @@ class InterceptEvaluatorNode(Node):
         terminal_states = {
             'MINCO_READY', 'MINCO_TRACKING', 'TERMINAL_MINCO'
         }
+        recovery_states = {'PLAN_RECOVERY', 'SAFE_WAIT', 'SAFE_RECOVERY', 'REACQUIRE'}
         if state_name in terminal_states:
             self.approach_phase = 'TERMINAL_APPROACH'
             if previous_phase not in terminal_states:
                 self.terminal_approach_count += 1
-        elif state_name in ('PLAN_RECOVERY', 'SAFE_WAIT'):
+        elif state_name in recovery_states:
             self.approach_phase = 'RECOVERY'
-            if previous_phase not in ('PLAN_RECOVERY', 'SAFE_WAIT'):
+            if previous_phase not in recovery_states:
                 self.recovery_count += 1
                 if (
                     self.terminal_approach_count == 1
@@ -1914,7 +1932,6 @@ class InterceptEvaluatorNode(Node):
         hit = Bool()
         hit.data = bool(result.success)
         self.hit_pub.publish(hit)
-        # Results are recorded only; evaluation never pauses the world.
         from .gazebo_terminal import GazeboPauseResult
         self.terminal_pause_result = GazeboPauseResult(
             terminal_event=result.reason,
@@ -1936,10 +1953,25 @@ class InterceptEvaluatorNode(Node):
             self.get_logger().info(
                 f'{result.outcome}: {result.reason} | '
                 f'minimum distance={result.minimum_distance:.3f} m | '
-                f'run logging continues: {self.writer.paths.csv_path}'
+                f'run artifacts: {self.writer.paths.csv_path}'
             )
         self.intercept_result = result
         self.result_published = True
+        if result.success and getattr(self, 'pause_gazebo_on_success', False):
+            # Only end the simulated experiment. No evaluation state or hit
+            # event is fed into the online mission/planner/controller graph.
+            if self.gazebo_pauser is not None:
+                self.terminal_pause_result = self.gazebo_pauser.pause(result.reason)
+            else:
+                self.terminal_pause_result = GazeboPauseResult(
+                    result.reason, True, False, 0)
+            paused = self.terminal_pause_result.gazebo_pause_succeeded
+            if paused:
+                self.get_logger().info('Capture complete | Gazebo world paused')
+            else:
+                self.get_logger().warn(
+                    'Capture complete | Gazebo pause FAILED; inspect world control service')
+            self._finalize_run(result.reason, run_now)
 
 
 def main(args=None):

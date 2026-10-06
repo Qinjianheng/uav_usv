@@ -42,6 +42,29 @@ def moving_target(horizon):
     )
 
 
+def test_short_committed_contact_uses_minco_closing_velocity_bound():
+    """A constant 5.5 m/s trajectory can meet a 4 m/s target in 0.7 s."""
+    planner = make_planner(
+        minimum_duration=.3, maximum_duration=.7,
+        capture_radius=.5, contact_clearance=.3, preferred_clearance=.33,
+        piece_count=1, response_delay=.15,
+    )
+    outcome = planner.plan(
+        initial_position=(0., 0., -.33),
+        initial_velocity=(5.5, 0., 0.),
+        initial_acceleration=(0., 0., 0.),
+        target_state_at_time=lambda t: (
+            (1.05 + 4. * t, 0., 0.), (4., 0., 0.), (0., 0., 0.),
+        ),
+        preferred_duration=.7,
+    )
+
+    assert outcome.failure == FastPlanningFailure.NONE
+    assert outcome.plan.duration == pytest.approx(.7)
+    assert outcome.plan.sample(.7).position == pytest.approx((3.85, 0., -.33))
+    assert outcome.plan.sample(.7).velocity[0] == pytest.approx(5.5)
+
+
 def test_realtime_search_checks_at_most_six_candidates():
     planner = make_planner(maximum_horizontal_acceleration=0.3)
 
@@ -81,6 +104,7 @@ def test_staged_duration_search_sweeps_the_horizon_after_dynamic_failures():
 def test_candidate_diagnostics_preserve_all_constraint_violations():
     planner = make_planner(
         maximum_horizontal_speed=2.1,
+        conservative_closing_speed=0.05,
         maximum_horizontal_acceleration=0.5,
         maximum_vertical_speed=4.0,
         maximum_vertical_acceleration=8.0,
@@ -244,6 +268,7 @@ def test_terminal_bounded_search_fails_instead_of_selecting_late_plan():
 def test_horizontal_and_vertical_dynamic_failures_are_distinct():
     horizontal = make_planner(
         maximum_horizontal_speed=2.1,
+        conservative_closing_speed=0.05,
         maximum_horizontal_acceleration=0.5,
         maximum_vertical_acceleration=8.0,
     ).plan(
@@ -253,7 +278,9 @@ def test_horizontal_and_vertical_dynamic_failures_are_distinct():
         target_state_at_time=lambda _horizon: (
             (5.0, 0.0, -0.1),
             (2.0, 0.0, 0.0),
-            (0.0, 0.0, 0.0),
+            # P/V are reachable, but every candidate exceeds the 0.5 m/s²
+            # acceleration bound at the imposed endpoint.
+            (1.0, 0.0, 0.0),
         ),
     )
     vertical = make_planner(

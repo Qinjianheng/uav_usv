@@ -83,4 +83,43 @@ FOLLOW 保持 5 m。Y 准备平稳降到海面以上 1.5 m，速度整形共用�
 
 前相机 RGB/depth near clip 改为 0.05 m，localizer/front monitor minimum depth 同步；相机外参、验证球、Q/R、125 ms freshness、捕获半径和海面保护不变。复验 `modular_intercept_20261005_163442_290076_mission_1*` 仍超时，最小距离 0.524167 m。
 
-进一步复现 RGB-D 几何的近距离近似误差：原方法以所有有效表面深度中值和像素中值加半径恢复中心，部分可见球面时不对应真正中心射线。合成物理 ray/sphere 交点测试两例先失败。新增有界（最多 512 点）3D 球面中心恢复，并验证秩、半径一致性及表面残差；少量/退化点维持旧方法。仅针对当前已知半径红球接口，不代表无标记 USV 感知已验证。完整复验进行中。
+进一步复现 RGB-D 几何的近距离近似误差：原方法以所有有效表面深度中值和像素中值加半径恢复中心，部分可见球面时不对应真正中心射线。合成物理 ray/sphere 交点测试两例先失败。新增有界（最多 512 点）3D 球面中心恢复，并验证秩、半径一致性及表面残差；少量/退化点维持旧方法。仅针对当前已知半径红球接口，不代表无标记 USV 感知已验证。球面恢复完整复验 `modular_intercept_20261005_164113_770185_mission_1*` 仍 TIMEOUT，最小距离 0.632802 m。
+
+
+## 可达时间预筛选与 MINCO 终端速度不一致（明确代码缺陷）
+
+`finite_horizon_intercept_planner.py::reachability_at` 原先采用水平终端速度 `v_usv`；但 `_candidate` 强制 `v_usv + closing_speed * direction`。同一接触点的预筛选和轨迹终端约束不一致，预筛选凭空增加减速要求，可能排除原本可行的锁定 contact，推动滚动时刻不断向后。
+
+近球面复验中 plan57–63 的 contact_delay 连续为 0.070–0.082 s，接纳余量长期维持约 0.9 s；required_time 由 horizontal_min_time 主导，尚未进行候选验证就被提升为新的搜索下限。每轮发生“终点生成可行，但 committed contact 被 lower bound 排除”的情况，短预测仍无法按原时刻收敛。
+
+独立物理反例：UAV 初始位置 x=0、速度 5.5 m/s，USV 初始 x=1.05、速度 4 m/s；t=0.7 s 接触点 x=3.85，UAV 匀速 5.5 m/s 即可到达，终端闭合速度 1.5 m/s，垂直保持 z=-0.33 m。旧 planner 却返回 HORIZON_INSUFFICIENT。新增 `test_short_committed_contact_uses_minco_closing_velocity_bound` 先红，证明这不是模型噪声或实际追踪误差。
+
+修复对允许的 closing speed 候选分别计算与 MINCO 相同的终端速度，取最小 required_time 作为搜索下界。该下界不替代各条候选的完整限速、限加速度与海面检查；所有安全/接纳门限保留。后续复验和最终收尾结果见 `terminal_sphere_validation_20261005.md`。
+
+当前 Git HEAD 已由用户更新为 master/6818e5a（10.5.1），该提交包含此前进行中的修订；其后的可达时间修复以此为基线。没有由本任务执行自动提交。
+
+
+## 2026-10-06 最终收尾
+
+用户要求保留当前效果并收尾。最新相机安装位置 (base_link FLU 0.18,0,0.15，模型原点外参 0.18,0,0.39)、28° 下倾与暗部红色检测修复完成两次完整任务：均首次进近 SUCCESS，Y 后约 6.45 s，末端相对速度 2.57/2.32 m/s，捕获前没有保护恢复，129/129 帧视觉有效，成功后 Gazebo 自动暂停。此前三次 centered_short_y 在恢复中触发的 SUCCESS 不计作正常终端制导成功。
+
+Y 前 5 m 高度/5 m 跟随距离保持；最终误差、原始图像、真值边界、检查、分段原因与未验证项集中于 `terminal_sphere_validation_20261005.md` 和 `y_intercept_evidence_20261005/final_camera_origin_validation.json`。最终 826 passed / 1 skipped，未自动提交、推送或清理用户数据。
+
+
+## 2026-10-06 追加停止修复后的最终确认
+
+此前“最终收尾”一节是当时的历史结果，之后用户继续反馈捕获后小球未停止和末段减速。暂停物理世界不足以阻止 ROS 墙钟目标积分及 set_pose，现由原生 world stats 同步暂停状态，冻结积分和可视化更新，发布零速度；恢复不补积分暂停间隔。
+
+完整试验 complete_pause_1 为 TIMEOUT，尚未触发成功暂停；随后固定 6.5 m/s 接触速度和提前接纳试验 cruise_contact_1 也 TIMEOUT，所有 MINCO 候选均被动力学检查拒绝。不同运行的目标运动相位不同，不能归因于捕获后的停止分支，也不能宣称原配置具有普遍捕获率。
+
+撤回上述未验证控制改动、保留停止修复后，stop_only_baseline_1 完整 X → FOLLOW → Y 任务 SUCCESS：6.335783 s、最小距离 0.478032 m、相对速度 2.277366 m/s，捕获前 TRACKING、127/127 视觉有效；成功自动暂停后的约 7 秒原生 pose/info 和 world stats 证明飞机与球姿态冻结，131 个 ROS 目标状态位置固定、速度为零。没有显式手动 pause。最终 829 passed / 1 skipped；用户确认“就这个效果准备收尾”，不继续末端不减速改造。当前仍存在末段参考减速，未将此项宣称解决。
+
+最终配置、所有追加成功/失败的证据、预测误差和冻结验证集中于 terminal_sphere_validation_20261005.md 与 y_intercept_evidence_20261005/final_stop_only_validation.json。工作区保留修改和原始数据，未自动提交或推送。
+
+## 2026-10-06：末端速度修复后两次重复实验收尾
+
+用户随后再次反馈末端减速并要求继续修复。当前 tracker 保留导航物理测量 epoch，在同一 epoch 比较 MINCO 位置反馈；发布时刻单独用于前馈、限幅和到期判断。剩余接触时间 0～0.7 s、预测水平距离不超过 2.5 m 且 KF/BCTRA 新鲜时，执行层按短时未来目标方向保持水平速度并升至 6.5 m/s，限加速度转向；竖直轨迹和海面保护保留，MINCO 数学终点仍为目标速度加闭合速度。
+
+修复后首次 SUCCESS 为 4.413230 s。用户确认成功后要求两次重复，期间不改代码或参数：重复 1 SUCCESS，4.622916 s、最小三维距离 0.482564 m、相对速度 2.801147 m/s；重复 2 SUCCESS，4.484602 s、最小三维距离 0.461706 m、相对速度 2.870920 m/s。三次均第一次末端进近捕获、捕获前恢复次数零。最后 0.7 s 水平指令升至 6.5 m/s，实测水平速度逐样本上升，捕获前最后记录分别为 6.803260、6.783259、6.828834 m/s。三次自动暂停后的原生 UAV/目标姿态、世界时间均冻结，目标速度为零。
+
+当前测试 836 passed / 1 skipped / 2 个已有弃用提示，flake8 及两包构建通过。Y 前 FOLLOW 5 m/5 m、125 ms freshness、KF Q/R、0.50 m 捕获半径及真值仅评价边界保持。最新实现、验证范围、原始前缀、速度曲线和停止证据见 [terminal_cruise_validation_20261006.md](terminal_cruise_validation_20261006.md) 与 [汇总 JSON](y_intercept_evidence_20261005/terminal_cruise_repeat_validation.json)。本次独立启动的仿真已关闭，未自动提交或推送。

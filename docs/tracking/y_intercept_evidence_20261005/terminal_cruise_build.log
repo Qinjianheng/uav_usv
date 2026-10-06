@@ -1,0 +1,6 @@
+Starting >>> uav_control
+Finished <<< uav_control [1.11s]
+Starting >>> uav_usv_bringup
+Finished <<< uav_usv_bringup [0.07s]
+
+Summary: 2 packages finished [1.44s]

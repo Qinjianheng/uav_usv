@@ -1,0 +1,405 @@
+{
+  "role": "ORIGINAL_SAMPLE_EPOCH_SPEED_AUDIT",
+  "results": [
+    {
+      "stamp": {
+        "sec": 1791251546,
+        "nanosec": 712029457
+      },
+      "mission_id": 1,
+      "success": true,
+      "outcome": "SUCCESS",
+      "reason": "CAPTURE_RADIUS_REACHED",
+      "detail": "determined by simulation truth in evaluator only",
+      "elapsed_time": 4.413229703903198,
+      "capture_radius": 0.5,
+      "minimum_distance": 0.46470192364879703,
+      "horizontal_distance": 0.24178051924182778,
+      "vertical_error": 0.39685017117048665,
+      "relative_speed": 2.8260625082540334,
+      "closing_speed": 1.4126196372497488,
+      "max_horizontal_speed": 6.812253635162173,
+      "max_vertical_speed": 2.757541392185898,
+      "max_horizontal_acceleration": 4.313276797003891,
+      "max_vertical_acceleration": 4.015343944673333
+    }
+  ],
+  "phases": [
+    {
+      "state": "GROUND_HOLD",
+      "t": -41.398744344711304
+    },
+    {
+      "state": "TAKEOFF",
+      "t": -31.195504426956177
+    },
+    {
+      "state": "FOLLOW",
+      "t": -22.045004844665527
+    },
+    {
+      "state": "FAR_GUIDANCE",
+      "t": 0.0015971660614013672
+    },
+    {
+      "state": "MINCO_READY",
+      "t": 3.0266051292419434
+    },
+    {
+      "state": "MINCO_TRACKING",
+      "t": 3.0753068923950195
+    },
+    {
+      "state": "MINCO_READY",
+      "t": 3.261272668838501
+    },
+    {
+      "state": "MINCO_TRACKING",
+      "t": 3.2751662731170654
+    },
+    {
+      "state": "TERMINAL_MINCO",
+      "t": 3.5070550441741943
+    },
+    {
+      "state": "SAFE_RECOVERY",
+      "t": 4.5065202713012695
+    }
+  ],
+  "last_0p7_seconds": {
+    "command_speed": {
+      "count": 14,
+      "first": 5.998269331694216,
+      "last": 6.5,
+      "maximum": 6.500000000000001,
+      "minimum": 5.998269331694214,
+      "peak_minus_contact": 8.881784197001252e-16
+    },
+    "actual_speed": {
+      "count": 14,
+      "first": 5.054629806852439,
+      "last": 6.803260152477325,
+      "maximum": 6.803260152477325,
+      "minimum": 5.054629806852439,
+      "peak_minus_contact": 0.0
+    },
+    "minco_speed": {
+      "count": 14,
+      "first": 5.623632441054203,
+      "last": 5.6686886182794645,
+      "maximum": 5.808961877112853,
+      "minimum": 5.623632441054203,
+      "peak_minus_contact": 0.14027325883338815
+    }
+  },
+  "samples": [
+    {
+      "t": 3.0551798343658447,
+      "to_result": -1.3596224784851074,
+      "navigation_sample_t": 3.029832363128662,
+      "remaining": 1.4457643032073975,
+      "command_speed": 4.601985196210254,
+      "actual_speed": 4.60863250708664,
+      "minco_speed": 4.600560195961605,
+      "target_distance_estimate": 2.382483107847503,
+      "plan": 14
+    },
+    {
+      "t": 3.1051430702209473,
+      "to_result": -1.3096592426300049,
+      "navigation_sample_t": 3.0938355922698975,
+      "remaining": 1.3958661556243896,
+      "command_speed": 4.599430809008073,
+      "actual_speed": 4.538149293818155,
+      "minco_speed": 4.59639769828981,
+      "target_distance_estimate": 2.2661120401081196,
+      "plan": 14
+    },
+    {
+      "t": 3.1555066108703613,
+      "to_result": -1.2592957019805908,
+      "navigation_sample_t": 3.133843421936035,
+      "remaining": 1.346006155014038,
+      "command_speed": 4.625776088609976,
+      "actual_speed": 4.497760733884716,
+      "minco_speed": 4.61969200131206,
+      "target_distance_estimate": 2.313736467608221,
+      "plan": 14
+    },
+    {
+      "t": 3.2047436237335205,
+      "to_result": -1.2100586891174316,
+      "navigation_sample_t": 3.1738388538360596,
+      "remaining": 1.2958710193634033,
+      "command_speed": 4.677834954120177,
+      "actual_speed": 4.465453810661659,
+      "minco_speed": 4.664657882405354,
+      "target_distance_estimate": 2.2876576343550945,
+      "plan": 14
+    },
+    {
+      "t": 3.255023241043091,
+      "to_result": -1.1597790718078613,
+      "navigation_sample_t": 3.2298343181610107,
+      "remaining": 1.2459123134613037,
+      "command_speed": 4.756402100577668,
+      "actual_speed": 4.434249557169859,
+      "minco_speed": 4.728875353441855,
+      "target_distance_estimate": 2.2612421903176783,
+      "plan": 14
+    },
+    {
+      "t": 3.304555654525757,
+      "to_result": -1.1102466583251953,
+      "navigation_sample_t": 3.269836664199829,
+      "remaining": 1.1959397792816162,
+      "command_speed": 4.84928630473577,
+      "actual_speed": 4.421009255668358,
+      "minco_speed": 4.806409386118609,
+      "target_distance_estimate": 2.2518895936284666,
+      "plan": 15
+    },
+    {
+      "t": 3.355165958404541,
+      "to_result": -1.0596363544464111,
+      "navigation_sample_t": 3.333843946456909,
+      "remaining": 1.146042823791504,
+      "command_speed": 4.9688946730531365,
+      "actual_speed": 4.416690424494398,
+      "minco_speed": 4.896411672901074,
+      "target_distance_estimate": 2.2134108951733107,
+      "plan": 15
+    },
+    {
+      "t": 3.4050827026367188,
+      "to_result": -1.0097196102142334,
+      "navigation_sample_t": 3.389836549758911,
+      "remaining": 1.095926284790039,
+      "command_speed": 5.099027186189685,
+      "actual_speed": 4.432832007168688,
+      "minco_speed": 4.9922577710072895,
+      "target_distance_estimate": 2.1748397056360105,
+      "plan": 15
+    },
+    {
+      "t": 3.455245018005371,
+      "to_result": -0.959557294845581,
+      "navigation_sample_t": 3.429853677749634,
+      "remaining": 1.0459065437316895,
+      "command_speed": 5.226917546332859,
+      "actual_speed": 4.457260645663672,
+      "minco_speed": 5.092316815352741,
+      "target_distance_estimate": 2.1468060049399775,
+      "plan": 15
+    },
+    {
+      "t": 3.5053625106811523,
+      "to_result": -0.9094398021697998,
+      "navigation_sample_t": 3.469831943511963,
+      "remaining": 0.9958341121673584,
+      "command_speed": 5.357941802068056,
+      "actual_speed": 4.493591707933159,
+      "minco_speed": 5.1929991042961765,
+      "target_distance_estimate": 2.1283661393948186,
+      "plan": 15
+    },
+    {
+      "t": 3.5558650493621826,
+      "to_result": -0.8589372634887695,
+      "navigation_sample_t": 3.533841133117676,
+      "remaining": 0.9457786083221436,
+      "command_speed": 5.508528890586897,
+      "actual_speed": 4.578187025126928,
+      "minco_speed": 5.29241461434671,
+      "target_distance_estimate": 2.0548498497034324,
+      "plan": 15
+    },
+    {
+      "t": 3.6048097610473633,
+      "to_result": -0.8099925518035889,
+      "navigation_sample_t": 3.5898401737213135,
+      "remaining": 0.8959081172943115,
+      "command_speed": 5.649263881332817,
+      "actual_speed": 4.680055505177969,
+      "minco_speed": 5.384497575657372,
+      "target_distance_estimate": 2.0267160541413825,
+      "plan": 15
+    },
+    {
+      "t": 3.655054807662964,
+      "to_result": -0.7597475051879883,
+      "navigation_sample_t": 3.629838705062866,
+      "remaining": 0.8459839820861816,
+      "command_speed": 5.770144992118991,
+      "actual_speed": 4.769430219492844,
+      "minco_speed": 5.472618346643768,
+      "target_distance_estimate": 1.995418197849275,
+      "plan": 15
+    },
+    {
+      "t": 3.704212188720703,
+      "to_result": -0.710590124130249,
+      "navigation_sample_t": 3.6938421726226807,
+      "remaining": 0.7959988117218018,
+      "command_speed": 5.899597292389723,
+      "actual_speed": 4.937016547593802,
+      "minco_speed": 5.550888949902544,
+      "target_distance_estimate": 1.9003056071420836,
+      "plan": 15
+    },
+    {
+      "t": 3.756179094314575,
+      "to_result": -0.658623218536377,
+      "navigation_sample_t": 3.7338449954986572,
+      "remaining": 0.7458493709564209,
+      "command_speed": 5.998269331694216,
+      "actual_speed": 5.054629806852439,
+      "minco_speed": 5.623632441054203,
+      "target_distance_estimate": 1.8468138686221094,
+      "plan": 15
+    },
+    {
+      "t": 3.8064887523651123,
+      "to_result": -0.6083135604858398,
+      "navigation_sample_t": 3.789834976196289,
+      "remaining": 0.6957974433898926,
+      "command_speed": 5.998269331694215,
+      "actual_speed": 5.237811388902251,
+      "minco_speed": 5.6831955842718225,
+      "target_distance_estimate": 1.7185907267050884,
+      "plan": 15
+    },
+    {
+      "t": 3.8560214042663574,
+      "to_result": -0.5587809085845947,
+      "navigation_sample_t": 3.8298399448394775,
+      "remaining": 0.6459505558013916,
+      "command_speed": 5.998269331694214,
+      "actual_speed": 5.376046444779442,
+      "minco_speed": 5.730718324752374,
+      "target_distance_estimate": 1.7329439400468885,
+      "plan": 15
+    },
+    {
+      "t": 3.9057013988494873,
+      "to_result": -0.5091009140014648,
+      "navigation_sample_t": 3.8938403129577637,
+      "remaining": 0.595867395401001,
+      "command_speed": 6.1085759903744234,
+      "actual_speed": 5.613887323005152,
+      "minco_speed": 5.766972092652401,
+      "target_distance_estimate": 1.5297035628915547,
+      "plan": 15
+    },
+    {
+      "t": 3.9566969871520996,
+      "to_result": -0.45810532569885254,
+      "navigation_sample_t": 3.9338347911834717,
+      "remaining": 0.5457899570465088,
+      "command_speed": 6.276896455318877,
+      "actual_speed": 5.754376109229176,
+      "minco_speed": 5.792315166280729,
+      "target_distance_estimate": 1.5180905090170076,
+      "plan": 15
+    },
+    {
+      "t": 4.004818916320801,
+      "to_result": -0.40998339653015137,
+      "navigation_sample_t": 3.9738399982452393,
+      "remaining": 0.49593305587768555,
+      "command_speed": 6.441425597478675,
+      "actual_speed": 5.884579715802986,
+      "minco_speed": 5.805539399217989,
+      "target_distance_estimate": 1.4420211283223912,
+      "plan": 15
+    },
+    {
+      "t": 4.054957628250122,
+      "to_result": -0.3598446846008301,
+      "navigation_sample_t": 4.029829740524292,
+      "remaining": 0.4458789825439453,
+      "command_speed": 6.5,
+      "actual_speed": 6.051372715006903,
+      "minco_speed": 5.808961877112853,
+      "target_distance_estimate": 1.3254834489161185,
+      "plan": 15
+    },
+    {
+      "t": 4.104860067367554,
+      "to_result": -0.30994224548339844,
+      "navigation_sample_t": 4.069837808609009,
+      "remaining": 0.3958473205566406,
+      "command_speed": 6.499999999999999,
+      "actual_speed": 6.176782645032167,
+      "minco_speed": 5.802903150476614,
+      "target_distance_estimate": 1.2381122683830468,
+      "plan": 15
+    },
+    {
+      "t": 4.154585838317871,
+      "to_result": -0.26021647453308105,
+      "navigation_sample_t": 4.133845806121826,
+      "remaining": 0.34588122367858887,
+      "command_speed": 6.5,
+      "actual_speed": 6.3946885710481185,
+      "minco_speed": 5.788841922526474,
+      "target_distance_estimate": 1.0632672748187397,
+      "plan": 15
+    },
+    {
+      "t": 4.204429626464844,
+      "to_result": -0.2103726863861084,
+      "navigation_sample_t": 4.173833847045898,
+      "remaining": 0.29585838317871094,
+      "command_speed": 6.5,
+      "actual_speed": 6.519399331549168,
+      "minco_speed": 5.768416639379476,
+      "target_distance_estimate": 0.9753225619662313,
+      "plan": 15
+    },
+    {
+      "t": 4.254651308059692,
+      "to_result": -0.16015100479125977,
+      "navigation_sample_t": 4.2298314571380615,
+      "remaining": 0.24579405784606934,
+      "command_speed": 6.499999999999999,
+      "actual_speed": 6.605046691033459,
+      "minco_speed": 5.743503165970389,
+      "target_distance_estimate": 0.8470017029755662,
+      "plan": 15
+    },
+    {
+      "t": 4.306599140167236,
+      "to_result": -0.10820317268371582,
+      "navigation_sample_t": 4.293831825256348,
+      "remaining": 0.19570398330688477,
+      "command_speed": 6.5,
+      "actual_speed": 6.710316184776551,
+      "minco_speed": 5.715756601020489,
+      "target_distance_estimate": 0.6229609965066965,
+      "plan": 15
+    },
+    {
+      "t": 4.356114149093628,
+      "to_result": -0.05868816375732422,
+      "navigation_sample_t": 4.333844184875488,
+      "remaining": 0.145829439163208,
+      "command_speed": 6.500000000000001,
+      "actual_speed": 6.758695573001288,
+      "minco_speed": 5.690247648261198,
+      "target_distance_estimate": 0.5852517255583043,
+      "plan": 15
+    },
+    {
+      "t": 4.405738353729248,
+      "to_result": -0.009063959121704102,
+      "navigation_sample_t": 4.389837265014648,
+      "remaining": 0.09586644172668457,
+      "command_speed": 6.5,
+      "actual_speed": 6.803260152477325,
+      "minco_speed": 5.6686886182794645,
+      "target_distance_estimate": 0.4543901738245117,
+      "plan": 15
+    }
+  ]
+}

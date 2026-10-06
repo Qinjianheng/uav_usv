@@ -260,7 +260,8 @@ class FastMincoPlanner(FiniteHorizonInterceptPlanner):
             return
         self._candidate_diagnostics.append(CandidateDiagnostic(
             duration=float(duration),
-            closing_speed=float(closing_speed),
+            closing_speed=float(
+                candidate.closing_speed if candidate is not None else closing_speed),
             curve_weight=float(curve_weight),
             generation_time=max(float(generation_time), 0.0),
             maximum_horizontal_speed=(

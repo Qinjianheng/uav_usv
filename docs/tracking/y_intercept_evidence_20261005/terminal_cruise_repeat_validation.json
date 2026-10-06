@@ -1,0 +1,232 @@
+{
+  "role": "TERMINAL_CRUISE_CURRENT_CODE_REPEAT_VALIDATION",
+  "date": "2026-10-06",
+  "baseline_commit": "6818e5a",
+  "working_tree_modifications": true,
+  "code_changed_between_repeats": false,
+  "control_and_config_sha256": {
+    "src/uav_control/uav_control/control/trajectory_tracking.py": "bdb1d2a8d3aaaff45e579b3645fce04b1a99e49322c40c91d1a13e476b8c7573",
+    "src/uav_control/uav_control/control/trajectory_tracker_node.py": "0868b94516568130fb9db7d6b808c74c57a38c691dc1c89dd485c84a68f7f32b",
+    "src/uav_usv_bringup/config/baseline.yaml": "c957d631a23b1faf6007e4dc99386cf9e782946f1b044944d4476fbeac389f90",
+    "src/uav_usv_bringup/config/visual_geometry_diagnostics.yaml": "1844b1a731c8a10488066a1389300f3e6a15169b7e0b17cdcaab15119875cdb9"
+  },
+  "requested_repeats": 2,
+  "requested_repeat_successes": 2,
+  "runs": [
+    {
+      "name": "terminal_cruise_user_phase_1",
+      "prefix": "modular_intercept_20261006_095151_101120_mission_1",
+      "result": {
+        "stamp": {
+          "sec": 1791251546,
+          "nanosec": 712029457
+        },
+        "mission_id": 1,
+        "success": true,
+        "outcome": "SUCCESS",
+        "reason": "CAPTURE_RADIUS_REACHED",
+        "detail": "determined by simulation truth in evaluator only",
+        "elapsed_time": 4.413229703903198,
+        "capture_radius": 0.5,
+        "minimum_distance": 0.46470192364879703,
+        "horizontal_distance": 0.24178051924182778,
+        "vertical_error": 0.39685017117048665,
+        "relative_speed": 2.8260625082540334,
+        "closing_speed": 1.4126196372497488,
+        "max_horizontal_speed": 6.812253635162173,
+        "max_vertical_speed": 2.757541392185898,
+        "max_horizontal_acceleration": 4.313276797003891,
+        "max_vertical_acceleration": 4.015343944673333
+      },
+      "last_0p7_seconds": {
+        "command_speed": {
+          "count": 14,
+          "first": 5.998269331694216,
+          "last": 6.5,
+          "maximum": 6.500000000000001,
+          "minimum": 5.998269331694214,
+          "peak_minus_contact": 8.881784197001252e-16
+        },
+        "actual_speed": {
+          "count": 14,
+          "first": 5.054629806852439,
+          "last": 6.803260152477325,
+          "maximum": 6.803260152477325,
+          "minimum": 5.054629806852439,
+          "peak_minus_contact": 0.0
+        },
+        "minco_speed": {
+          "count": 14,
+          "first": 5.623632441054203,
+          "last": 5.6686886182794645,
+          "maximum": 5.808961877112853,
+          "minimum": 5.623632441054203,
+          "peak_minus_contact": 0.14027325883338815
+        }
+      },
+      "minimum_sampled_speed_change": {
+        "command_speed": -8.881784197001252e-16,
+        "actual_speed": 0.0445645794760372
+      },
+      "freeze": {
+        "pause_seen": true,
+        "target_position_frozen": true,
+        "target_velocity_zero": true,
+        "world_clock_frozen": true,
+        "native_uav_target_poses_frozen": true
+      },
+      "terminal_approach_count": 1,
+      "recovery_count": 0,
+      "first_terminal_approach_hit": true,
+      "gazebo_pause_succeeded": true,
+      "recording": "data/experiments/current/y_intercept_20261006_terminal_cruise_user_phase_1.jsonl",
+      "speed_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_user_phase_1_speed_audit.json",
+      "freeze_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_user_phase_1_freeze.json"
+    },
+    {
+      "name": "terminal_cruise_repeat_1",
+      "prefix": "modular_intercept_20261006_095428_701507_mission_1",
+      "result": {
+        "stamp": {
+          "sec": 1791251704,
+          "nanosec": 520122528
+        },
+        "mission_id": 1,
+        "success": true,
+        "outcome": "SUCCESS",
+        "reason": "CAPTURE_RADIUS_REACHED",
+        "detail": "determined by simulation truth in evaluator only",
+        "elapsed_time": 4.622915983200073,
+        "capture_radius": 0.5,
+        "minimum_distance": 0.48256359328943976,
+        "horizontal_distance": 0.2654240013035786,
+        "vertical_error": 0.40301082007858513,
+        "relative_speed": 2.80114702963954,
+        "closing_speed": 1.3783419642673298,
+        "max_horizontal_speed": 6.789334900963804,
+        "max_vertical_speed": 2.760979369920136,
+        "max_horizontal_acceleration": 4.266267148177928,
+        "max_vertical_acceleration": 4.494329145081204
+      },
+      "last_0p7_seconds": {
+        "command_speed": {
+          "count": 14,
+          "first": 5.980596009625066,
+          "last": 6.500000000000001,
+          "maximum": 6.500000000000001,
+          "minimum": 5.980596009625066,
+          "peak_minus_contact": 0.0
+        },
+        "actual_speed": {
+          "count": 14,
+          "first": 5.312555079319133,
+          "last": 6.783258608319563,
+          "maximum": 6.783258608319563,
+          "minimum": 5.312555079319133,
+          "peak_minus_contact": 0.0
+        },
+        "minco_speed": {
+          "count": 14,
+          "first": 5.528360141726466,
+          "last": 5.482047513273208,
+          "maximum": 5.605756132203096,
+          "minimum": 5.482047513273208,
+          "peak_minus_contact": 0.12370861892988838
+        }
+      },
+      "minimum_sampled_speed_change": {
+        "command_speed": -1.7763568394002505e-15,
+        "actual_speed": 0.017720958491992178
+      },
+      "freeze": {
+        "pause_seen": true,
+        "target_position_frozen": true,
+        "target_velocity_zero": true,
+        "world_clock_frozen": true,
+        "native_uav_target_poses_frozen": true
+      },
+      "terminal_approach_count": 1,
+      "recovery_count": 0,
+      "first_terminal_approach_hit": true,
+      "gazebo_pause_succeeded": true,
+      "recording": "data/experiments/current/y_intercept_20261006_terminal_cruise_repeat_1.jsonl",
+      "speed_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_repeat_1_speed_audit.json",
+      "freeze_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_repeat_1_freeze.json"
+    },
+    {
+      "name": "terminal_cruise_repeat_2",
+      "prefix": "modular_intercept_20261006_095732_501270_mission_1",
+      "result": {
+        "stamp": {
+          "sec": 1791251888,
+          "nanosec": 185295105
+        },
+        "mission_id": 1,
+        "success": true,
+        "outcome": "SUCCESS",
+        "reason": "CAPTURE_RADIUS_REACHED",
+        "detail": "determined by simulation truth in evaluator only",
+        "elapsed_time": 4.484601736068726,
+        "capture_radius": 0.5,
+        "minimum_distance": 0.4617056074460784,
+        "horizontal_distance": 0.24749984040603007,
+        "vertical_error": 0.3897638989774988,
+        "relative_speed": 2.870920256279861,
+        "closing_speed": 1.328066400076723,
+        "max_horizontal_speed": 6.857136720649992,
+        "max_vertical_speed": 2.7744091914569697,
+        "max_horizontal_acceleration": 4.2980294641843795,
+        "max_vertical_acceleration": 3.896465404685153
+      },
+      "last_0p7_seconds": {
+        "command_speed": {
+          "count": 14,
+          "first": 5.9881579236983,
+          "last": 6.499999999999999,
+          "maximum": 6.500000000000001,
+          "minimum": 5.988157923698299,
+          "peak_minus_contact": 1.7763568394002505e-15
+        },
+        "actual_speed": {
+          "count": 14,
+          "first": 5.0802407014654145,
+          "last": 6.82883443609684,
+          "maximum": 6.82883443609684,
+          "minimum": 5.0802407014654145,
+          "peak_minus_contact": 0.0
+        },
+        "minco_speed": {
+          "count": 14,
+          "first": 5.609985436791178,
+          "last": 5.585947562621478,
+          "maximum": 5.760999613280902,
+          "minimum": 5.585947562621478,
+          "peak_minus_contact": 0.1750520506594233
+        }
+      },
+      "minimum_sampled_speed_change": {
+        "command_speed": -1.7763568394002505e-15,
+        "actual_speed": 0.03398326837589405
+      },
+      "freeze": {
+        "pause_seen": true,
+        "target_position_frozen": true,
+        "target_velocity_zero": true,
+        "world_clock_frozen": true,
+        "native_uav_target_poses_frozen": true
+      },
+      "terminal_approach_count": 1,
+      "recovery_count": 0,
+      "first_terminal_approach_hit": true,
+      "gazebo_pause_succeeded": true,
+      "recording": "data/experiments/current/y_intercept_20261006_terminal_cruise_repeat_2.jsonl",
+      "speed_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_repeat_2_speed_audit.json",
+      "freeze_audit": "docs/tracking/y_intercept_evidence_20261005/terminal_cruise_repeat_2_freeze.json"
+    }
+  ],
+  "test_result": "836 passed, 1 skipped, 2 existing warnings",
+  "capture_radius": 0.5,
+  "truth_role": "evaluator and offline audit only",
+  "experimental_entrance": "X then Y approximately 31.18 s later with fresh locked FOLLOW",
+  "limitations": "Same target parameters and entrance; marked sphere interface; no general capture rate claim."
+}

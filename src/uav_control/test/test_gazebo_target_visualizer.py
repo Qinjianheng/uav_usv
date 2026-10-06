@@ -3,9 +3,22 @@ import xml.etree.ElementTree as ElementTree
 import pytest
 
 from uav_control.gazebo_target_visualizer import (
+    GazeboTargetVisualizer,
     ned_to_gazebo_enu,
     red_sphere_sdf,
 )
+
+
+def test_visualizer_reports_native_pause_and_resume():
+    from types import SimpleNamespace
+
+    visualizer = GazeboTargetVisualizer.__new__(GazeboTargetVisualizer)
+    visualizer._world_paused = None
+    assert visualizer.world_paused is None
+    visualizer._world_stats_callback(SimpleNamespace(paused=True))
+    assert visualizer.world_paused is True
+    visualizer._world_stats_callback(SimpleNamespace(paused=False))
+    assert visualizer.world_paused is False
 
 
 def test_ned_to_gazebo_enu_swaps_horizontal_axes_and_flips_z():

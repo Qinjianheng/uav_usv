@@ -205,7 +205,7 @@ class TargetBearingNode(Node):
             'color_topic': '/camera/front/image_raw',
             'bearing_topic': '/perception/front/target_bearing',
             'horizontal_fov': 1.74,
-            'camera_pitch_down': 0.4363323129985824,
+            'camera_pitch_down': 0.4886921905584123,
             'minimum_red_pixels': 3,
             'gazebo_world_name': 'default',
             'image_clock_reference_timeout': 0.5,

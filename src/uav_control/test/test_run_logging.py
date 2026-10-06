@@ -360,6 +360,66 @@ def test_record_only_evaluation_result_does_not_end_run_logging(tmp_path):
     assert summary['run_end_reason'] == 'NODE_SHUTDOWN'
 
 
+@pytest.mark.parametrize('transport_succeeds', [True, False])
+def test_capture_pauses_world_and_finalizes_once_even_if_transport_fails(
+        tmp_path, transport_succeeds):
+    """A successful capture must not leave physics/logging running forever."""
+    from uav_control.evaluation.gazebo_terminal import GazeboTerminalPauser
+
+    node = node_fixture(tmp_path)
+    node.evaluator.capture_radius = .5
+    phase(node, 'TAKEOFF', 10.)
+    phase(node, 'FAR_GUIDANCE', 11., intercept=True)
+    paths = node.writer.paths
+    node.pause_gazebo_on_success = True
+    requests = []
+    node.gazebo_pauser = GazeboTerminalPauser(
+        lambda: requests.append(True) or transport_succeeds,
+        retry_delay=0.,
+    )
+    node.get_logger = lambda: SimpleNamespace(
+        info=lambda _: None, warn=lambda _: None)
+    node.latest_uav = KinematicState((0., 0., -.33), (5.5, 0., 0.))
+    node.latest_truth = KinematicState((0., 0., 0.), (4., 0., 0.))
+    node.uav_history.add(11.01, node.latest_uav)
+    node.truth_history.add(11.01, node.latest_truth)
+    node.clock_value = 11.01
+    results = []
+    node.result_pub = SimpleNamespace(publish=results.append)
+    node.timer_callback()
+
+    assert node.writer is None
+    summary_text = paths.summary_path.read_text()
+    summary = json.loads(summary_text)
+    assert summary['outcome'] == 'SUCCESS'
+    assert summary['run_end_reason'] == 'CAPTURE_RADIUS_REACHED'
+    assert summary['gazebo_pause_requested'] is True
+    assert summary['gazebo_pause_succeeded'] is transport_succeeds
+    assert summary['gazebo_pause_attempts'] == (1 if transport_succeeds else 2)
+    assert requests
+    assert len(results) == 1
+    node.timer_callback()
+    node._finalize_run('NODE_SHUTDOWN', 12.)
+    assert len(results) == 1
+    assert paths.summary_path.read_text() == summary_text
+
+
+def test_safe_recovery_cannot_be_reported_as_a_clean_first_terminal_hit(tmp_path):
+    """The visual safety recovery observed in SITL belongs in capture metrics."""
+    node = node_fixture(tmp_path)
+    phase(node, 'TAKEOFF', 10.)
+    phase(node, 'FAR_GUIDANCE', 11., intercept=True)
+    phase(node, 'TERMINAL_MINCO', 11.5, intercept=True)
+    phase(node, 'SAFE_RECOVERY', 12., intercept=True)
+    phase(node, 'REACQUIRE', 12.1, intercept=True)
+    assert node.recovery_count == 1
+    assert node.first_terminal_approach_result == 'RECOVERY'
+    phase(node, 'FAR_GUIDANCE', 13., intercept=True)
+    phase(node, 'TERMINAL_MINCO', 13.5, intercept=True)
+    assert node.terminal_approach_count == 2
+    node._finalize_run('NODE_SHUTDOWN', 14.)
+
+
 def test_old_worker_plan_cannot_enter_new_run_artifacts(tmp_path):
     from uav_usv_interfaces.msg import PlannerDiagnostic
 

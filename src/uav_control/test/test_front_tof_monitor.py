@@ -137,6 +137,18 @@ def test_count_red_pixels_supports_rgb_image_rows():
     ) == 2
 
 
+@pytest.mark.parametrize('encoding', ['rgb8', 'bgr8'])
+def test_red_mask_keeps_shadowed_target_without_accepting_background(encoding):
+    # Original terminal frames contain a large shadowed sphere at (94, 0, 0).
+    # It remains visible even when no directly lit pixel reaches R=160.
+    image = np.array([[(94, 0, 0), (160, 0, 0), (80, 0, 0),
+                       (94, 94, 94), (40, 120, 160), (100, 90, 0)]], dtype=np.uint8)
+    if encoding == 'bgr8':
+        image = image[:, :, ::-1].copy()
+    mask = red_pixel_mask(image.tobytes(), 6, 1, 18, encoding)
+    assert mask.tolist() == [[True, True, False, False, False, False]]
+
+
 def test_red_pixel_mask_supports_bgr_and_row_padding():
     rows = np.zeros((2, 16), dtype=np.uint8)
     pixels = rows[:, :12].reshape(2, 4, 3)

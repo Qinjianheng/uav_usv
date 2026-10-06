@@ -1,0 +1,10 @@
+{
+  "owned_process_groups": [
+    164443,
+    163787,
+    164248,
+    163555
+  ],
+  "remaining_live_processes": [],
+  "all_owned_simulation_groups_stopped": true
+}

@@ -407,6 +407,10 @@ class FiniteHorizonInterceptPlanner:
         speeds.append(self.minimum_closing_speed)
         return speeds
 
+    def _terminal_horizontal_velocity(self, target_velocity, direction, closing_speed):
+        """Use the same target plus closing velocity in reachability and MINCO."""
+        return tuple(target_velocity[a] + closing_speed * direction[a] for a in (0, 1))
+
     def _curve_weight_candidates(self):
         if self.minco_piece_count == 1:
             return (0.0,)
@@ -469,11 +473,9 @@ class FiniteHorizonInterceptPlanner:
         # clearance ceiling just before the endpoint whenever the target
         # rises, so the UAV levels off vertically at the contact instead.  The
         # tiny upward bias keeps the contact strictly non-descending.
-        terminal_velocity = (
-            target_velocity[0] + closing_speed * horizontal_direction[0],
-            target_velocity[1] + closing_speed * horizontal_direction[1],
-            -1e-9,
-        )
+        terminal_horizontal = self._terminal_horizontal_velocity(
+            target_velocity, horizontal_direction, closing_speed)
+        terminal_velocity = (*terminal_horizontal, -1e-9)
         axes = tuple(
             QuinticAxis.from_boundary(
                 initial_position[index],
@@ -1007,28 +1009,33 @@ class FiniteHorizonInterceptPlanner:
             contact = self._capture_contact_position(target_position)
             if contact is None:
                 return None, None
-            # The trajectory levels off vertically at contact, so the vertical
-            # reachability bound must use a zero endpoint heave velocity
-            # instead of the target's, or the search interval disagrees with
-            # the boundary conditions actually imposed by _candidate.
-            guidance_velocity = (
-                target_velocity[0],
-                target_velocity[1],
-                0.0,
+            # Use the endpoint velocities that _candidate actually imposes.
+            # Matching the target alone invents an extra deceleration and
+            # rejects feasible short contacts with nonzero closing speed.
+            direction = self._direction(
+                initial_position[:2], contact[:2], target_velocity[:2],
             )
-            estimate = estimate_reachability(
-                initial_position,
-                initial_velocity,
-                contact,
-                guidance_velocity,
-                self.maximum_horizontal_speed,
-                self.maximum_vertical_speed,
-                self.maximum_horizontal_acceleration,
-                self.maximum_vertical_acceleration,
-                self.effective_vertical_braking_acceleration,
-                self.response_delay,
-                self.absolute_maximum_duration,
-            )
+            estimates = []
+            for closing_speed in self._closing_speed_candidates():
+                horizontal_velocity = self._terminal_horizontal_velocity(
+                    target_velocity, direction, closing_speed)
+                guidance_velocity = (*horizontal_velocity, 0.0)
+                estimates.append(estimate_reachability(
+                    initial_position,
+                    initial_velocity,
+                    contact,
+                    guidance_velocity,
+                    self.maximum_horizontal_speed,
+                    self.maximum_vertical_speed,
+                    self.maximum_horizontal_acceleration,
+                    self.maximum_vertical_acceleration,
+                    self.effective_vertical_braking_acceleration,
+                    self.response_delay,
+                    self.absolute_maximum_duration,
+                ))
+            # This is only a search lower bound. Every generated candidate
+            # still passes the full speed, acceleration and sea-safety gates.
+            estimate = min(estimates, key=lambda value: value.required_time)
             return estimate, contact
 
         def first_finite_reachability(start_time):

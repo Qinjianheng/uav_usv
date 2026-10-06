@@ -335,6 +335,10 @@ class TrajectoryTrackerNode(Node):
         )
         self.declare_parameter('maximum_vertical_speed', 4.0)
         self.declare_parameter('maximum_horizontal_acceleration', 3.0)
+        self.declare_parameter(
+            'guidance_maximum_horizontal_acceleration',
+            self.get_parameter('maximum_horizontal_acceleration').value,
+        )
         self.declare_parameter('maximum_vertical_acceleration', 3.0)
         self.declare_parameter('sea_surface_z', 0.0)
         self.declare_parameter('reserve_clearance', 0.07)
@@ -344,6 +348,7 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('recovery_climb_speed', 1.0)
         self.declare_parameter('maximum_command_dt', 0.1)
         self.declare_parameter('maximum_actual_vertical_acceleration', 4.0)
+        self.declare_parameter('terminal_cruise_enabled', False)
         self.declare_parameter('maximum_state_age', 0.125)
         self.declare_parameter('use_velocity_control', True)
         self.declare_parameter('frame_id', 'local_ned')
@@ -365,8 +370,8 @@ class TrajectoryTrackerNode(Node):
         self.declare_parameter('bearing_approach_speed', 6.0)
         self.declare_parameter('altitude_velocity_gain', 1.0)
         self.declare_parameter('approach_contact_clearance', 0.33)
-        self.declare_parameter('approach_closing_speed', 0.8)
-        self.declare_parameter('approach_preparation_clearance', 1.5)
+        self.declare_parameter('approach_closing_speed', 1.5)
+        self.declare_parameter('approach_preparation_clearance', 1.2)
         self.declare_parameter('approach_horizon', 4.0)
         self.declare_parameter('approach_response_delay', 0.15)
         self.declare_parameter('terminal_replacement_position_error', 0.15)
@@ -513,7 +518,7 @@ class TrajectoryTrackerNode(Node):
                 'maximum_vertical_speed'
             ).value,
             maximum_horizontal_acceleration=self.get_parameter(
-                'maximum_horizontal_acceleration'
+                'guidance_maximum_horizontal_acceleration'
             ).value,
             maximum_vertical_acceleration=self.get_parameter(
                 'maximum_vertical_acceleration'
@@ -658,6 +663,7 @@ class TrajectoryTrackerNode(Node):
         self.latest_target_state = None
         self.latest_kf_message = None
         self.latest_body_bearing = None
+        self.latest_center_bearing = None
         self.visibility_decision = None
         self.search_state = 'GROUND_HOLD'
         self.search_hold_position = None
@@ -758,6 +764,7 @@ class TrajectoryTrackerNode(Node):
         if stamp <= 0.0:
             self.visibility.reset()
             self.latest_body_bearing = None
+            self.latest_center_bearing = None
             self.latest_kf_message = None
             self.latest_target_state = None
             self.latest_prediction = None
@@ -772,11 +779,23 @@ class TrajectoryTrackerNode(Node):
             self.latest_body_bearing = (stamp, body_bearing)
 
     def observation_callback(self, message):
+        stamp = _stamp_seconds(message.stamp)
+        now = self._ros_seconds()
         self.visibility.mark_observation(
-            _stamp_seconds(message.stamp),
+            stamp,
             bool(message.valid and message.frame_id == self.expected_frame_id),
-            self._ros_seconds(),
+            now,
         )
+        previous = getattr(self, 'latest_center_bearing', None)
+        if previous is not None and 0.0 < stamp < previous[0]:
+            return
+        ray = tuple(float(getattr(message, 'center_camera_' + a, math.nan)) for a in 'xyz')
+        trusted = (
+            message.valid and message.frame_id == self.expected_frame_id
+            and 0.0 <= measurement_age(now, stamp) <= self.maximum_state_age
+            and all(math.isfinite(v) for v in ray) and ray[0] > 0.0
+        )
+        self.latest_center_bearing = (stamp, math.atan2(-ray[1], ray[0])) if trusted else None
 
     def prediction_callback(self, message):
         if not (message.valid and message.frame_id == self.expected_frame_id
@@ -807,6 +826,7 @@ class TrajectoryTrackerNode(Node):
             self.visibility.reset()
             self.visibility_decision = None
             self.latest_body_bearing = None
+            self.latest_center_bearing = None
             self.latest_kf_message = None
             self.latest_target_state = None
             self.latest_prediction = None
@@ -1326,6 +1346,7 @@ class TrajectoryTrackerNode(Node):
         visual_intercept = (
             getattr(self, 'intercept_requested', False)
             and self.mission_state in (
+                MissionState.FAR_GUIDANCE,
                 MissionState.MINCO_READY, MissionState.MINCO_TRACKING,
                 MissionState.TERMINAL_MINCO,
             )
@@ -1345,8 +1366,16 @@ class TrajectoryTrackerNode(Node):
         self.yaw_owner = 'HOLD'
         if not inhibited and decision is not None:
             if decision.visible:
+                bearing = self.visibility.last_valid_image_bearing
+                center = getattr(self, 'latest_center_bearing', None)
+                if (visual_intercept and center is not None
+                        and 0.0 <= measurement_age(current.stamp, center[0])
+                        <= self.maximum_state_age):
+                    # A clipped RGB centroid moves as pixels leave the frame.
+                    # The reliable fitted center represents the target itself.
+                    bearing = center[1]
                 rate = image_yaw_rate(
-                    self.visibility.last_valid_image_bearing,
+                    bearing,
                     self.visibility.config.vision_yaw_gain,
                     self.visibility.config.target_center_deadband_rad,
                     (self.max_observation_yaw_rate if decision.locked
@@ -1604,7 +1633,21 @@ class TrajectoryTrackerNode(Node):
                                          time.perf_counter() - started)
                 return
             self.search_hold_position = None
-            command = self.tracker.command(current, self.mission_id)
+            # Position feedback must compare the physical measurement with
+            # the reference at that same sample epoch. Feedforward and command
+            # limits use the current publication epoch independently.
+            terminal_target = (fresh_flight_target(
+                self.latest_kf_message, now, self.maximum_state_age, self.expected_frame_id,
+            ) if self.get_parameter('terminal_cruise_enabled').value else None)
+            command = self.tracker.command(
+                self.latest_state, self.mission_id, control_stamp=now,
+                terminal_target_at_time=(
+                    lambda stamp: prediction_endpoint_from_message(prediction, stamp)
+                ) if terminal_target is not None else None,
+                terminal_target_velocity=(
+                    terminal_target.velocity if terminal_target is not None else None
+                ),
+            )
             velocity_mode = self.use_velocity_control
             if command is None:
                 # Keep the recovery reference continuous instead of snapping
