@@ -146,15 +146,11 @@ moving_target:
     maximum_lateral_acceleration: 3.2
     figure_eight_x_amplitude: 40.0
     figure_eight_y_amplitude: 20.0
-    # Sea state.  The target heave is a scenario parameter, but it is also a
-    # hard geometric budget: the airframe reaches 0.23 m below the PX4
-    # reference and needs roughly 0.32 m of reference clearance to stay out of
-    # the water under tracking overshoot, while the capture sphere the
-    # evaluator scores is only 0.50 m.  A 0.15 m heave would consume the whole
-    # remaining sphere, so every watered-off contact sat exactly on the
-    # boundary.  0.05 m (10 cm peak to peak) is a calm-water assumption that
-    # keeps the contact inside the sphere with margin.
-    vertical_oscillation_amplitude: 0.05
+    # User-requested sea state (2026-10-07): 0.15 m amplitude, 0.30 m peak
+    # to peak, still 0.25 Hz. This is distinct from the frozen 0.05 m success
+    # baseline and requires new capture/clearance validation. Controller and
+    # evaluator safety/capture limits are deliberately unchanged.
+    vertical_oscillation_amplitude: 0.15
     vertical_oscillation_frequency: 0.25
     update_rate_hz: 20.0
     start_on_command: true
@@ -246,8 +242,9 @@ intercept_planner_node:
     # reaches 0.23 m below the PX4 reference (see the evaluator's
     # body_lower_extent), so the contact altitude is chosen at
     # preferred_clearance above the sea and the aim radius has to cover
-    # clearance + target heave: 0.29 + 0.05 = 0.34 m, which stays inside the
-    # 0.50 m sphere the evaluator scores.  A smaller aim radius makes every
+    # clearance + target heave. The former 0.05 m scenario passed; the current
+    # 0.15 m scenario has a tighter budget and needs independent validation
+    # with this unchanged 0.50 m capture radius. A smaller aim radius makes every
     # watered-off contact a CAPTURE_GEOMETRY rejection and a smaller clearance
     # puts the planned endpoint below the body-contact threshold, so the plan
     # could never be flown without a water strike.
